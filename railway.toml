@@ -3,7 +3,7 @@ builder = "dockerfile"
 dockerfilePath = "Dockerfile.backend"
 
 [deploy]
-startCommand = "sh -c 'exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000} --proxy-headers'"
+startCommand = "/usr/local/bin/entrypoint.sh"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
