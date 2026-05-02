@@ -1,0 +1,1 @@
+{"id":5,"metrics":{"total_profit":0,"win_rate":0,"max_drawdown":0,"sharpe_ratio":0,"total_trades":0,"avg_duration":"N/A"},"trades":[],"results":{"RsiBollingerStrategy":{"run_id":"717656633927475a20d4219a6fd204b90bed59a9","backtest_start_time":1776500749,"timeframe":"15m","timeframe_detail":null,"backtest_start_ts":1704067200,"backtest_end_ts":1704844800}}}

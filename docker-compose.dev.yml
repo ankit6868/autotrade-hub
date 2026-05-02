@@ -1,0 +1,29 @@
+version: "3.9"
+
+# ─── Local development: PostgreSQL only ───────────────────────────────────────
+# Run with:  docker compose -f docker-compose.dev.yml up -d
+# Stop with: docker compose -f docker-compose.dev.yml down
+# Wipe data: docker compose -f docker-compose.dev.yml down -v
+# ──────────────────────────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: autotrade_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tradebot
+      POSTGRES_PASSWORD: tradebot
+      POSTGRES_DB: autotrade
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tradebot -d autotrade"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:

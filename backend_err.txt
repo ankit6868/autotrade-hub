@@ -1,0 +1,343 @@
+INFO:     Started server process [14860]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     ('127.0.0.1', 64747) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDA5MDQsImZ2YSI6WzQzNiwtMV0sImlhdCI6MTc3NzcwMDYwNCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAwNTk0LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.k_d4T2GrdLZG552YPEcwq6FO70fbd5AL7gs2tCAXxUoFLsMk35ywgcSF2JYcQkT0LKP3BnDd23WNhM8MC2hZyNv1pMI80rkeE54OEqbOYs7UTCYAXpG80tXIdcWP8Yq1IciVYCOcROxOivgJfHnkvZuDGWAQAAitEXLsh87Gq1wmko-x4R_s10ERNh_SuFquvTWLGRbzkHcTkS1yEy6MQZ93IjJVOrjgfhptrKKetJKzi3xGU30874Bvbk4Pw-3QjIhCXrPBWyzqoP_K5c4mkiTGfSlXojo1_8oCpO8pGNk7v5M5VWfE1ozC84o5HC1PjYkCp04SoRNQxt38N2YrFg" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 57397) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDA5MDQsImZ2YSI6WzQzNiwtMV0sImlhdCI6MTc3NzcwMDYwNCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAwNTk0LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.k_d4T2GrdLZG552YPEcwq6FO70fbd5AL7gs2tCAXxUoFLsMk35ywgcSF2JYcQkT0LKP3BnDd23WNhM8MC2hZyNv1pMI80rkeE54OEqbOYs7UTCYAXpG80tXIdcWP8Yq1IciVYCOcROxOivgJfHnkvZuDGWAQAAitEXLsh87Gq1wmko-x4R_s10ERNh_SuFquvTWLGRbzkHcTkS1yEy6MQZ93IjJVOrjgfhptrKKetJKzi3xGU30874Bvbk4Pw-3QjIhCXrPBWyzqoP_K5c4mkiTGfSlXojo1_8oCpO8pGNk7v5M5VWfE1ozC84o5HC1PjYkCp04SoRNQxt38N2YrFg" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 50002) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDA5MDQsImZ2YSI6WzQzNiwtMV0sImlhdCI6MTc3NzcwMDYwNCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAwNTk0LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.k_d4T2GrdLZG552YPEcwq6FO70fbd5AL7gs2tCAXxUoFLsMk35ywgcSF2JYcQkT0LKP3BnDd23WNhM8MC2hZyNv1pMI80rkeE54OEqbOYs7UTCYAXpG80tXIdcWP8Yq1IciVYCOcROxOivgJfHnkvZuDGWAQAAitEXLsh87Gq1wmko-x4R_s10ERNh_SuFquvTWLGRbzkHcTkS1yEy6MQZ93IjJVOrjgfhptrKKetJKzi3xGU30874Bvbk4Pw-3QjIhCXrPBWyzqoP_K5c4mkiTGfSlXojo1_8oCpO8pGNk7v5M5VWfE1ozC84o5HC1PjYkCp04SoRNQxt38N2YrFg" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 64169) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDExODcsImZ2YSI6WzQ0MCwtMV0sImlhdCI6MTc3NzcwMDg4NywiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAwODc3LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.rIjCE1Ss4_SLvG1JobyqvG3ihdXvJd6uhdFv5_woQPMQnyvvVPYB9ZkMBXlt1Xf_IiJIpjlZCxVuZpjcMTqshtMjYn9xTkq6wcLTGpn4iKXAt1TFZ2vO7Z0JI6njXxgTWNxxj_XLOm_clrLChTLvP-DbAZ14uk1ZvZby3vxF1iPQfQaS4mWCheaIX0cnRDQDUpHwr7TSfsAxF0ugBspjl3ovBe_HDPx1tP5c0stLyq75xw9LBsuhr5k7M0rmulJeoyO-qX_7xMNBLnyBFwqOeNexqGgZCfeB60iIvk4AuZz6cfxPKVky1ycZ8b5XvjqeiOvcDsw93jDhqT_H5D4TnA" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 60593) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDExODcsImZ2YSI6WzQ0MCwtMV0sImlhdCI6MTc3NzcwMDg4NywiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAwODc3LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.rIjCE1Ss4_SLvG1JobyqvG3ihdXvJd6uhdFv5_woQPMQnyvvVPYB9ZkMBXlt1Xf_IiJIpjlZCxVuZpjcMTqshtMjYn9xTkq6wcLTGpn4iKXAt1TFZ2vO7Z0JI6njXxgTWNxxj_XLOm_clrLChTLvP-DbAZ14uk1ZvZby3vxF1iPQfQaS4mWCheaIX0cnRDQDUpHwr7TSfsAxF0ugBspjl3ovBe_HDPx1tP5c0stLyq75xw9LBsuhr5k7M0rmulJeoyO-qX_7xMNBLnyBFwqOeNexqGgZCfeB60iIvk4AuZz6cfxPKVky1ycZ8b5XvjqeiOvcDsw93jDhqT_H5D4TnA" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 63414) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDExODcsImZ2YSI6WzQ0MCwtMV0sImlhdCI6MTc3NzcwMDg4NywiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAwODc3LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.rIjCE1Ss4_SLvG1JobyqvG3ihdXvJd6uhdFv5_woQPMQnyvvVPYB9ZkMBXlt1Xf_IiJIpjlZCxVuZpjcMTqshtMjYn9xTkq6wcLTGpn4iKXAt1TFZ2vO7Z0JI6njXxgTWNxxj_XLOm_clrLChTLvP-DbAZ14uk1ZvZby3vxF1iPQfQaS4mWCheaIX0cnRDQDUpHwr7TSfsAxF0ugBspjl3ovBe_HDPx1tP5c0stLyq75xw9LBsuhr5k7M0rmulJeoyO-qX_7xMNBLnyBFwqOeNexqGgZCfeB60iIvk4AuZz6cfxPKVky1ycZ8b5XvjqeiOvcDsw93jDhqT_H5D4TnA" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 63687) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDExODcsImZ2YSI6WzQ0MCwtMV0sImlhdCI6MTc3NzcwMDg4NywiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAwODc3LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.rIjCE1Ss4_SLvG1JobyqvG3ihdXvJd6uhdFv5_woQPMQnyvvVPYB9ZkMBXlt1Xf_IiJIpjlZCxVuZpjcMTqshtMjYn9xTkq6wcLTGpn4iKXAt1TFZ2vO7Z0JI6njXxgTWNxxj_XLOm_clrLChTLvP-DbAZ14uk1ZvZby3vxF1iPQfQaS4mWCheaIX0cnRDQDUpHwr7TSfsAxF0ugBspjl3ovBe_HDPx1tP5c0stLyq75xw9LBsuhr5k7M0rmulJeoyO-qX_7xMNBLnyBFwqOeNexqGgZCfeB60iIvk4AuZz6cfxPKVky1ycZ8b5XvjqeiOvcDsw93jDhqT_H5D4TnA" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 59420) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDEyNzYsImZ2YSI6WzQ0MiwtMV0sImlhdCI6MTc3NzcwMDk3NiwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAwOTY2LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.wljtJM_9tCqu8gtysB2_otSz3idMzLHfCOZYgb-Z3wUc6yyC6_18kVvIhlYi5p08iC_MN9aDcSuSJLNVbAZ01Po7EfLeYjt33xr7sDBFq5ynR3NXBJVgDf8xcm2V6ANQ9gaRNQIgwXD1ovKFLp7W3r4FR5BTyTHfzf74tPbVJ85V68uL-_IPr3g4nu3CErtLKgg8D7l-RzQrVkLw6dyeh7bFHqa-9hn5vrhd4ySr020x6z1XSHUEp-TVlZ7LrPktvNwGuxB3nGv__ceEpZi5R4zeZeQXNEo4j-_F4Gwdit6u_CCtB_nNE2oPy6hlP3SFkVThzN4c_XseP0pyRtUlDQ" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 63859) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDEyNzYsImZ2YSI6WzQ0MiwtMV0sImlhdCI6MTc3NzcwMDk3NiwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAwOTY2LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.wljtJM_9tCqu8gtysB2_otSz3idMzLHfCOZYgb-Z3wUc6yyC6_18kVvIhlYi5p08iC_MN9aDcSuSJLNVbAZ01Po7EfLeYjt33xr7sDBFq5ynR3NXBJVgDf8xcm2V6ANQ9gaRNQIgwXD1ovKFLp7W3r4FR5BTyTHfzf74tPbVJ85V68uL-_IPr3g4nu3CErtLKgg8D7l-RzQrVkLw6dyeh7bFHqa-9hn5vrhd4ySr020x6z1XSHUEp-TVlZ7LrPktvNwGuxB3nGv__ceEpZi5R4zeZeQXNEo4j-_F4Gwdit6u_CCtB_nNE2oPy6hlP3SFkVThzN4c_XseP0pyRtUlDQ" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 51634) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDMzMDgsImZ2YSI6WzQ3NiwtMV0sImlhdCI6MTc3NzcwMzAwOCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAyOTk4LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.oXacGAjX2pOMz0d60EvKrxW4O6Pc6ygFiCwU-zQrhNtbhQIUWBPqN0H6Fm4x3C2qpDLt7KnxqfOJqrQ54x86FjialM1Og4t3WLpEmvsSHofpUiNd9D30PGx1Iyku3nFn3XsOtvPBSXxRJPEMBxNSa-pOpDMh-Tji5g8yePC7hT6qV8UUuvc0_8E6vklboi-a_qpPNlWYiVBMKlBBwv86dRJBfvgyNK2YZLYoP8dRejYRjljJ9lXVyprCFMOa14iZsoTmBwTxM8jT51V1hOHhyeYiPdCNoCkMlnJN_qi6ELdovzGdY4W5UqIKLRsqNoZQarnZwhdFodXItSNH11dm1g" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 64707) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDMzMDgsImZ2YSI6WzQ3NiwtMV0sImlhdCI6MTc3NzcwMzAwOCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAyOTk4LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.oXacGAjX2pOMz0d60EvKrxW4O6Pc6ygFiCwU-zQrhNtbhQIUWBPqN0H6Fm4x3C2qpDLt7KnxqfOJqrQ54x86FjialM1Og4t3WLpEmvsSHofpUiNd9D30PGx1Iyku3nFn3XsOtvPBSXxRJPEMBxNSa-pOpDMh-Tji5g8yePC7hT6qV8UUuvc0_8E6vklboi-a_qpPNlWYiVBMKlBBwv86dRJBfvgyNK2YZLYoP8dRejYRjljJ9lXVyprCFMOa14iZsoTmBwTxM8jT51V1hOHhyeYiPdCNoCkMlnJN_qi6ELdovzGdY4W5UqIKLRsqNoZQarnZwhdFodXItSNH11dm1g" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 62860) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDMzNjAsImZ2YSI6WzQ3NywtMV0sImlhdCI6MTc3NzcwMzA2MCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAzMDUwLCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.wPTaW9VU-4uhF-GOzF3wO0qiMHCvFLWfs8mtjkxF3AS6Pb6LnY59d26LkuDTt6G19zMEU_pi_WMUc3W9ih4syMx3qeNGy_IlIRA3NpvXXdUNDD3ZnT2RG615XX5u3Zyb8ACNFn40ILGhzXe5-IljCykkduCU42FR5MXV3vwNx8iyEg8GY2GgXAA3GOxmnMdHoTZkydC7AeKGFDBtfJMfG5C1n6rxZvRsISodamnljLA0Z8TMyAHm0Vjdc4zV1k5H2oJEXfy1Lce3gWO4v6v_TY30fpKBvdccmq3C8Nk1oayy7gnX-Je_EdO7OOdy4pCwS3DpFYN4zFERBfzm8HY0jw" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 59811) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDMzNjAsImZ2YSI6WzQ3NywtMV0sImlhdCI6MTc3NzcwMzA2MCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAzMDUwLCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.wPTaW9VU-4uhF-GOzF3wO0qiMHCvFLWfs8mtjkxF3AS6Pb6LnY59d26LkuDTt6G19zMEU_pi_WMUc3W9ih4syMx3qeNGy_IlIRA3NpvXXdUNDD3ZnT2RG615XX5u3Zyb8ACNFn40ILGhzXe5-IljCykkduCU42FR5MXV3vwNx8iyEg8GY2GgXAA3GOxmnMdHoTZkydC7AeKGFDBtfJMfG5C1n6rxZvRsISodamnljLA0Z8TMyAHm0Vjdc4zV1k5H2oJEXfy1Lce3gWO4v6v_TY30fpKBvdccmq3C8Nk1oayy7gnX-Je_EdO7OOdy4pCwS3DpFYN4zFERBfzm8HY0jw" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 65045) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDQwMzcsImZ2YSI6WzQ4OCwtMV0sImlhdCI6MTc3NzcwMzczNywiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAzNzI3LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.W2LkvY3TYIQa3lnngtzmI_3hPu4bktLx9YT0gGKB09kZ1tr_unqC8oHNaNvYOAcweuV7v8zUhws9hrGdSpeIi3mqvei09W-YHNL5T6M7FvzjWt-Qp6R5L5gjpnqFJOVVAbvJ-f7RT1sDt6JqGEheuGSHf2znRB_kWFBq9hLkUHzdEjw41VV2wSYENYk-lGY1F5GFIZBakyxMAVd4H9TF6W-kJP2QZSSObhmS7g7CZv7_JQ-WtlphEItXzdm5R1nj3Iub7COq-8j4yQRaWtviTiIb9jHdZvU3o82AoLY7iA5iquF-2aCEIlWYSuQwDXltyUy6FtbsilCDOKLFidKIRw" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 64958) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDQwMzcsImZ2YSI6WzQ4OCwtMV0sImlhdCI6MTc3NzcwMzczNywiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAzNzI3LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.W2LkvY3TYIQa3lnngtzmI_3hPu4bktLx9YT0gGKB09kZ1tr_unqC8oHNaNvYOAcweuV7v8zUhws9hrGdSpeIi3mqvei09W-YHNL5T6M7FvzjWt-Qp6R5L5gjpnqFJOVVAbvJ-f7RT1sDt6JqGEheuGSHf2znRB_kWFBq9hLkUHzdEjw41VV2wSYENYk-lGY1F5GFIZBakyxMAVd4H9TF6W-kJP2QZSSObhmS7g7CZv7_JQ-WtlphEItXzdm5R1nj3Iub7COq-8j4yQRaWtviTiIb9jHdZvU3o82AoLY7iA5iquF-2aCEIlWYSuQwDXltyUy6FtbsilCDOKLFidKIRw" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 51021) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDQwNDQsImZ2YSI6WzQ4OCwtMV0sImlhdCI6MTc3NzcwMzc0NCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAzNzM0LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.vyphXrtmtU8gO-tiePPC3mGiJqJ2binrMG1ncjWC1SkI5ZXZgS88xbbZ1uImx0tbTwOIQFTexltD0nR8TP3d81AuoeimgPyX9hqfsOyDfLMG8Vkszi_TNgZRFOKNphfBupEFzW537ojuVnt_F20GmHuwjpOk0Ur-OucYgrGHBpqj62S9lS9qaRIw1uQEIpga1ML8O5qlB6YlbL77FtKJjuvgPYdz2Sc3xBFMjZdcgUjrC33PnRHaboz_NSfvJFkOGjE-JkkYf3lKR-eakZCSg-2X16-Tc_IaClI0C4Wc4dhuISHkOIGo6KuPJwgoD3KysbS_dLVWYnCzS9XtKoFdQQ" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 64173) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDQwNDQsImZ2YSI6WzQ4OCwtMV0sImlhdCI6MTc3NzcwMzc0NCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAzNzM0LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.vyphXrtmtU8gO-tiePPC3mGiJqJ2binrMG1ncjWC1SkI5ZXZgS88xbbZ1uImx0tbTwOIQFTexltD0nR8TP3d81AuoeimgPyX9hqfsOyDfLMG8Vkszi_TNgZRFOKNphfBupEFzW537ojuVnt_F20GmHuwjpOk0Ur-OucYgrGHBpqj62S9lS9qaRIw1uQEIpga1ML8O5qlB6YlbL77FtKJjuvgPYdz2Sc3xBFMjZdcgUjrC33PnRHaboz_NSfvJFkOGjE-JkkYf3lKR-eakZCSg-2X16-Tc_IaClI0C4Wc4dhuISHkOIGo6KuPJwgoD3KysbS_dLVWYnCzS9XtKoFdQQ" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 59704) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDQwNDQsImZ2YSI6WzQ4OCwtMV0sImlhdCI6MTc3NzcwMzc0NCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAzNzM0LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.vyphXrtmtU8gO-tiePPC3mGiJqJ2binrMG1ncjWC1SkI5ZXZgS88xbbZ1uImx0tbTwOIQFTexltD0nR8TP3d81AuoeimgPyX9hqfsOyDfLMG8Vkszi_TNgZRFOKNphfBupEFzW537ojuVnt_F20GmHuwjpOk0Ur-OucYgrGHBpqj62S9lS9qaRIw1uQEIpga1ML8O5qlB6YlbL77FtKJjuvgPYdz2Sc3xBFMjZdcgUjrC33PnRHaboz_NSfvJFkOGjE-JkkYf3lKR-eakZCSg-2X16-Tc_IaClI0C4Wc4dhuISHkOIGo6KuPJwgoD3KysbS_dLVWYnCzS9XtKoFdQQ" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 53249) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MDQwNDQsImZ2YSI6WzQ4OCwtMV0sImlhdCI6MTc3NzcwMzc0NCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzAzNzM0LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.vyphXrtmtU8gO-tiePPC3mGiJqJ2binrMG1ncjWC1SkI5ZXZgS88xbbZ1uImx0tbTwOIQFTexltD0nR8TP3d81AuoeimgPyX9hqfsOyDfLMG8Vkszi_TNgZRFOKNphfBupEFzW537ojuVnt_F20GmHuwjpOk0Ur-OucYgrGHBpqj62S9lS9qaRIw1uQEIpga1ML8O5qlB6YlbL77FtKJjuvgPYdz2Sc3xBFMjZdcgUjrC33PnRHaboz_NSfvJFkOGjE-JkkYf3lKR-eakZCSg-2X16-Tc_IaClI0C4Wc4dhuISHkOIGo6KuPJwgoD3KysbS_dLVWYnCzS9XtKoFdQQ" [accepted]
+INFO:     connection open
+User user_3D13sWDUUGwHNwiwOdW8jdIENH4 starting live trade with safety overrides: ['No paper trading history found. Paper trade for at least 7 days first.', 'Paper trading is not profitable (P&L: 0.00). Must be positive.']
+User user_3D13sWDUUGwHNwiwOdW8jdIENH4 starting live trade with safety overrides: ['No paper trading history found. Paper trade for at least 7 days first.', 'Paper trading is not profitable (P&L: 0.00). Must be positive.']
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 50363) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjIzMjcsImZ2YSI6Wzc5MywtMV0sImlhdCI6MTc3NzcyMjAyNywiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIyMDE3LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.d7B9T6DWkXqx9KQh9DVfYCTYhS9jdWO6fNlARxr8P3w8g1QRnmtsPaJHzAH02_Z66pSFzKVA4QtSpt9r76LABtVzYd_L1ksbuglQ3YJWMgaIAUde0RsAar10as7mmppL1ZYbsrZR2zB5N1-oEFe5BOEpRw3NpVY6x4wkYykkcm2LqrG3VbpaZPnHimjKh8nHjc_xAK860kAWjMO3Bmxb5J9VsEZpgN6tN0JbxP6YYefuTzGVxbYmrkMR62IUODC0eXwsve4Tg37ZcvMhn5Lb8OE-ULSrwzV8rsaK545Bm_E9h54e6sffwnj19Sq4G--GBnKFyHGy6WYLmpC4igizWg" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 59874) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjIzMjcsImZ2YSI6Wzc5MywtMV0sImlhdCI6MTc3NzcyMjAyNywiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIyMDE3LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.d7B9T6DWkXqx9KQh9DVfYCTYhS9jdWO6fNlARxr8P3w8g1QRnmtsPaJHzAH02_Z66pSFzKVA4QtSpt9r76LABtVzYd_L1ksbuglQ3YJWMgaIAUde0RsAar10as7mmppL1ZYbsrZR2zB5N1-oEFe5BOEpRw3NpVY6x4wkYykkcm2LqrG3VbpaZPnHimjKh8nHjc_xAK860kAWjMO3Bmxb5J9VsEZpgN6tN0JbxP6YYefuTzGVxbYmrkMR62IUODC0eXwsve4Tg37ZcvMhn5Lb8OE-ULSrwzV8rsaK545Bm_E9h54e6sffwnj19Sq4G--GBnKFyHGy6WYLmpC4igizWg" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 64516) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjMyODYsImZ2YSI6WzgwOSwtMV0sImlhdCI6MTc3NzcyMjk4NiwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIyOTc2LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.fh_kmZIVfnMn5BgB8KX9fk0Yl3WrFK6T6M_28vu00euZlwb4iO7eCZFaBEGA2yV88iNHxci7R03BZ7FdEgx7oRJ-NCsPqMH_1Ab106QjZoiRxLLnYU4GwD3sXCYrEIN3fdzwtjud890YZ4r38nZAzbjhLJRj2yRpEh3R1jhz6UdfgmFtMXGMajFBfXbW0_ny9_rm1iXZrj-70sn49vWi_zytFZ4qcwx7zkM5xtWj3Y81IsDHo7Qpk0g0m87cZv1vRq9sY6KuCQU65jRRsAYbQ26t6sEjkV8b3actEsBXJc2XB6_fbFVYS4ECa-IwFw4SX-xGqXHrTgZJXJ5DcQ9TsA" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 54640) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjMyODYsImZ2YSI6WzgwOSwtMV0sImlhdCI6MTc3NzcyMjk4NiwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIyOTc2LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.fh_kmZIVfnMn5BgB8KX9fk0Yl3WrFK6T6M_28vu00euZlwb4iO7eCZFaBEGA2yV88iNHxci7R03BZ7FdEgx7oRJ-NCsPqMH_1Ab106QjZoiRxLLnYU4GwD3sXCYrEIN3fdzwtjud890YZ4r38nZAzbjhLJRj2yRpEh3R1jhz6UdfgmFtMXGMajFBfXbW0_ny9_rm1iXZrj-70sn49vWi_zytFZ4qcwx7zkM5xtWj3Y81IsDHo7Qpk0g0m87cZv1vRq9sY6KuCQU65jRRsAYbQ26t6sEjkV8b3actEsBXJc2XB6_fbFVYS4ECa-IwFw4SX-xGqXHrTgZJXJ5DcQ9TsA" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 52572) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjMzMDksImZ2YSI6WzgwOSwtMV0sImlhdCI6MTc3NzcyMzAwOSwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIyOTk5LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.CmDqoLeG0BYG5VVWFkBdH2j1l405HptOA2U6oh7qWDoVJyKPeVa32V_y-5dRR-MnJ8zojZ3ONSYNzAoONE0bV1m0TxPzrgkUN_4VEcSnLfjIbOo8UaVlGnzW6QaNCncwUiWsF1FieuSazIKDwAlOTU_jS_Savi76sjdTLt_NhmUw2HoUTe0MNh6WTALE_3_naQGYq_xfz6Xhs_5Kxr3WgMwWoAldl4H43BPX_as_0jBUW7pkMyDr9oGND9Yx2ZD1nifOoQn4cZMac8LxLPPsppzJdcvTq-CMVXFRv5WhCh1Ix2G915mrJQ2DjjcbpLY4yodoXs-uYoWfj3XuoOVhlQ" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 49215) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjMzMDksImZ2YSI6WzgwOSwtMV0sImlhdCI6MTc3NzcyMzAwOSwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIyOTk5LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.CmDqoLeG0BYG5VVWFkBdH2j1l405HptOA2U6oh7qWDoVJyKPeVa32V_y-5dRR-MnJ8zojZ3ONSYNzAoONE0bV1m0TxPzrgkUN_4VEcSnLfjIbOo8UaVlGnzW6QaNCncwUiWsF1FieuSazIKDwAlOTU_jS_Savi76sjdTLt_NhmUw2HoUTe0MNh6WTALE_3_naQGYq_xfz6Xhs_5Kxr3WgMwWoAldl4H43BPX_as_0jBUW7pkMyDr9oGND9Yx2ZD1nifOoQn4cZMac8LxLPPsppzJdcvTq-CMVXFRv5WhCh1Ix2G915mrJQ2DjjcbpLY4yodoXs-uYoWfj3XuoOVhlQ" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 56372) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjMzNjYsImZ2YSI6WzgxMCwtMV0sImlhdCI6MTc3NzcyMzA2NiwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIzMDU2LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.mubbKQ6MjwjLWwaLIj2bHxSJepsFX6egIsp1dhe95xB1AqC9AX41Et5vsRRLbGXrEIHPDKVgPKXWNrMDz6D8-MOBkhLOeGuRiCC2jFWIkhbv0V-8UhXHCUrD3jI1zRFNE-cgh2o9R5l6awCbSSBSP7QHCiAXSJXl4x8w4wyCyBlazqh8tOzO6LxRd3iOlbT2zDxQ_74bJQGk-GSRwX2fGQ6xQxMvSEFFpFn87mplOU424omcKH-VDSrwfm9baLb9tq8V9wJ-uIrbXQFwcD3hyDjBOCtQx8zRJI3DLp_AA69xbwC3BrQHcA1843KpZSUBmWw0-jDUmf8qAKnIn-lGxw" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 55620) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjMzNjYsImZ2YSI6WzgxMCwtMV0sImlhdCI6MTc3NzcyMzA2NiwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIzMDU2LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.mubbKQ6MjwjLWwaLIj2bHxSJepsFX6egIsp1dhe95xB1AqC9AX41Et5vsRRLbGXrEIHPDKVgPKXWNrMDz6D8-MOBkhLOeGuRiCC2jFWIkhbv0V-8UhXHCUrD3jI1zRFNE-cgh2o9R5l6awCbSSBSP7QHCiAXSJXl4x8w4wyCyBlazqh8tOzO6LxRd3iOlbT2zDxQ_74bJQGk-GSRwX2fGQ6xQxMvSEFFpFn87mplOU424omcKH-VDSrwfm9baLb9tq8V9wJ-uIrbXQFwcD3hyDjBOCtQx8zRJI3DLp_AA69xbwC3BrQHcA1843KpZSUBmWw0-jDUmf8qAKnIn-lGxw" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 58930) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjMzNjYsImZ2YSI6WzgxMCwtMV0sImlhdCI6MTc3NzcyMzA2NiwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIzMDU2LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.mubbKQ6MjwjLWwaLIj2bHxSJepsFX6egIsp1dhe95xB1AqC9AX41Et5vsRRLbGXrEIHPDKVgPKXWNrMDz6D8-MOBkhLOeGuRiCC2jFWIkhbv0V-8UhXHCUrD3jI1zRFNE-cgh2o9R5l6awCbSSBSP7QHCiAXSJXl4x8w4wyCyBlazqh8tOzO6LxRd3iOlbT2zDxQ_74bJQGk-GSRwX2fGQ6xQxMvSEFFpFn87mplOU424omcKH-VDSrwfm9baLb9tq8V9wJ-uIrbXQFwcD3hyDjBOCtQx8zRJI3DLp_AA69xbwC3BrQHcA1843KpZSUBmWw0-jDUmf8qAKnIn-lGxw" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 58022) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjM4NjMsImZ2YSI6WzgxOCwtMV0sImlhdCI6MTc3NzcyMzU2MywiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIzNTUzLCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.SSpRfLCO8DXGrSazp2E2IiMuYlz5VECDU1SaiLBnB2YtVdLJnpsIo06mBHCjFK-AeFTKsKmN5gdEYOVB5WZO961dxexfXNXh1cyyPG6SlYEDCgYlN7RgcHecZL8V8-AApm7nlDaXA08r7zKUeEAOPQsiTL1x01RCMkTYD7Uy_d31BQTmb4IxHqkhnrm-XfKH-5Q4THDkt0uuGEK4fLt-g8yQjiUhhhVoJu64Fe-2vi14g5TM1jmPUqpu6tL9_z-ENRKS3nXgdWHGDiG_91R5jhv8Vpi7nDRnWMYLBcrjEyrBsCm5ca68mNRrbsqvEy-0DO4raWoOcFzkxT1MTyqieg" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 61843) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjM4ODQsImZ2YSI6WzgxOSwtMV0sImlhdCI6MTc3NzcyMzU4NCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIzNTc0LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.sLkFQxCTt8WVEKWFzS70M4KStvPxm_n5gheBfmD07EWhlOyogNdjIBpQ_0d4Q4SRBq-tx-DAd1fCFSocmLf-b9YVhxUqTEbYclDtQpt2bgoDN3Hps9oeJEjJeXaF0jD2c78mX9AOqspuzPd6V9iXKHDM2OXQ3dJ9oKfSiqesZmHyh3I9aJPeBcc1xFwTeyCSEGecUGFt2YfskLmB2GKfESF7yT1PdoE5aPzvfDNnrRLg6YOonPDiKGGsirVuBoQIke63gJstW66tCRQ81UHYu0NJrQApQjbYiseest-w_UQYHmJZopISQHJ_3Pi1Xv6C1t8UvKRJ5mXrqvHTnS2BdQ" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 56835) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjM4ODQsImZ2YSI6WzgxOSwtMV0sImlhdCI6MTc3NzcyMzU4NCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIzNTc0LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.sLkFQxCTt8WVEKWFzS70M4KStvPxm_n5gheBfmD07EWhlOyogNdjIBpQ_0d4Q4SRBq-tx-DAd1fCFSocmLf-b9YVhxUqTEbYclDtQpt2bgoDN3Hps9oeJEjJeXaF0jD2c78mX9AOqspuzPd6V9iXKHDM2OXQ3dJ9oKfSiqesZmHyh3I9aJPeBcc1xFwTeyCSEGecUGFt2YfskLmB2GKfESF7yT1PdoE5aPzvfDNnrRLg6YOonPDiKGGsirVuBoQIke63gJstW66tCRQ81UHYu0NJrQApQjbYiseest-w_UQYHmJZopISQHJ_3Pi1Xv6C1t8UvKRJ5mXrqvHTnS2BdQ" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 64267) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjM4ODQsImZ2YSI6WzgxOSwtMV0sImlhdCI6MTc3NzcyMzU4NCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIzNTc0LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.sLkFQxCTt8WVEKWFzS70M4KStvPxm_n5gheBfmD07EWhlOyogNdjIBpQ_0d4Q4SRBq-tx-DAd1fCFSocmLf-b9YVhxUqTEbYclDtQpt2bgoDN3Hps9oeJEjJeXaF0jD2c78mX9AOqspuzPd6V9iXKHDM2OXQ3dJ9oKfSiqesZmHyh3I9aJPeBcc1xFwTeyCSEGecUGFt2YfskLmB2GKfESF7yT1PdoE5aPzvfDNnrRLg6YOonPDiKGGsirVuBoQIke63gJstW66tCRQ81UHYu0NJrQApQjbYiseest-w_UQYHmJZopISQHJ_3Pi1Xv6C1t8UvKRJ5mXrqvHTnS2BdQ" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 58260) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 52241) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 57892) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 57149) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 49978) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 55121) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 64373) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 59767) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 52995) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 55491) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 53240) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 54070) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 53518) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 55527) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 50513) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 50326) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 54633) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 57678) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 59703) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 55337) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 64914) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 55266) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 65077) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 57993) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 56895) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 56163) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 63331) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 52543) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 55879) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 65508) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 64826) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 50164) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 60400) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 58768) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 62838) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 49389) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 62952) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 59626) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 58677) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 65085) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 58823) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 58870) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 51929) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 55231) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 51815) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 56417) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 49230) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 53218) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 60088) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 49174) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 51521) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 59428) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 53746) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjQyMzcsImZ2YSI6WzgyNCwtMV0sImlhdCI6MTc3NzcyMzkzNywiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzIzOTI3LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.CQgbph6DU2u6PKhj336SAy14k_L-TFLc8ix_LbNNl17lJjGx7FxUYe24bukzxytNcy0BWXr6ld8yGhWE5P_mld6s0UfgAq0vcfFkYX-xZPx3hwMMoCOQFIm73OsqIZWb07WMCGBpIdqbunLILxWNpwbW6ZF8_zg8o4c_qDR6IlyxPGpFK3MMc-uyZuF_XstLPS8QSu0U9jSc784PkxulGELivRyCqP0d7kOfnZ9caE_o1ceTIrVLTyTJwj7UihfCghzKQKoYeTxcyWXdj3TteINIWmBtBzHMFYQ7jopMczkjKkKFhVdNnabDCS_sceYy7o6fA_B1K34HzDNADTfTBQ" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 64285) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 60658) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 58800) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 60007) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 51922) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 65408) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 62610) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 56902) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 64005) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 57908) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 62725) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 49752) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 61349) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 57668) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 56898) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 59426) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 56249) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 57536) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 51348) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 52104) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 54383) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 64961) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 60545) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 54897) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     ('127.0.0.1', 63995) - "WebSocket /ws/trades" 403
+INFO:     connection rejected (403 Forbidden)
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed
+INFO:     ('127.0.0.1', 53275) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjQzNjgsImZ2YSI6WzgyNywtMV0sImlhdCI6MTc3NzcyNDA2OCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzI0MDU4LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.CSVDAGt4D-pfG7q5snY_BjbNUe49RisTH9GXjJtteyTplaEE_eFMJM0iBHWN6I9D2_svGq3X8lCy9Q1Exp_stGKJDrI9tJs9ctIYOPGtkkjxhSnyBu2amAEkgdiWCB2kUkWJ5PXWkjpvLZUKwJtjhH8u0H1jDimlHti3aZzV9wv3eoM9RtElEoR5Jl1-zFFU7W23ewKrUAVg4nvmjmFx-SwBtbHj3fsGPN04R86xAJZguCXaIBl9Z6X4h-RXWOfHKkDPBFr0jfWsrOLmynEGXsKXHsZpFTf63bUutAIqi7kCm39S_9CSB0c-bj7uPWEUJwqnbgy7PGwBB9kFS2aX7w" [accepted]
+INFO:     connection open
+INFO:     ('127.0.0.1', 54297) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjQzNjgsImZ2YSI6WzgyNywtMV0sImlhdCI6MTc3NzcyNDA2OCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzI0MDU4LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.CSVDAGt4D-pfG7q5snY_BjbNUe49RisTH9GXjJtteyTplaEE_eFMJM0iBHWN6I9D2_svGq3X8lCy9Q1Exp_stGKJDrI9tJs9ctIYOPGtkkjxhSnyBu2amAEkgdiWCB2kUkWJ5PXWkjpvLZUKwJtjhH8u0H1jDimlHti3aZzV9wv3eoM9RtElEoR5Jl1-zFFU7W23ewKrUAVg4nvmjmFx-SwBtbHj3fsGPN04R86xAJZguCXaIBl9Z6X4h-RXWOfHKkDPBFr0jfWsrOLmynEGXsKXHsZpFTf63bUutAIqi7kCm39S_9CSB0c-bj7uPWEUJwqnbgy7PGwBB9kFS2aX7w" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     ('127.0.0.1', 59155) - "WebSocket /ws/trades?token=eyJhbGciOiJSUzI1NiIsImNhdCI6ImNsX0I3ZDRQRDExMUFBQSIsImtpZCI6Imluc18zRDEyakVxMUlETm14bnJHSzN2dDhUcTJCaE8iLCJ0eXAiOiJKV1QifQ.eyJhenAiOiJodHRwOi8vbG9jYWxob3N0OjMwMDAiLCJleHAiOjE3Nzc3MjQzNjgsImZ2YSI6WzgyNywtMV0sImlhdCI6MTc3NzcyNDA2OCwiaXNzIjoiaHR0cHM6Ly9zcXVhcmUtYnJlYW0tMjQuY2xlcmsuYWNjb3VudHMuZGV2IiwibmJmIjoxNzc3NzI0MDU4LCJzaWQiOiJzZXNzXzNEOHJHN214bXF0V3VuU29KQjVLUzNZWDR4ViIsInN0cyI6ImFjdGl2ZSIsInN1YiI6InVzZXJfM0QxM3NXRFVVR3dITndpd09kVzhqZElFTkg0IiwidiI6Mn0.CSVDAGt4D-pfG7q5snY_BjbNUe49RisTH9GXjJtteyTplaEE_eFMJM0iBHWN6I9D2_svGq3X8lCy9Q1Exp_stGKJDrI9tJs9ctIYOPGtkkjxhSnyBu2amAEkgdiWCB2kUkWJ5PXWkjpvLZUKwJtjhH8u0H1jDimlHti3aZzV9wv3eoM9RtElEoR5Jl1-zFFU7W23ewKrUAVg4nvmjmFx-SwBtbHj3fsGPN04R86xAJZguCXaIBl9Z6X4h-RXWOfHKkDPBFr0jfWsrOLmynEGXsKXHsZpFTf63bUutAIqi7kCm39S_9CSB0c-bj7uPWEUJwqnbgy7PGwBB9kFS2aX7w" [accepted]
+INFO:     connection open

@@ -1,0 +1,319 @@
+import logging
+from datetime import datetime
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel
+
+log = logging.getLogger("trading")
+from sqlalchemy import select, desc
+from sqlalchemy.orm import Session
+
+from backend.models import get_db, Config, Strategy
+from backend.models.trade import Trade
+from backend.utils.encryption import decrypt
+from backend.utils.clerk_auth import get_user_id
+from backend.utils.audit import log_event
+from backend.utils.rate_limit import limiter, TRADE_LIMIT
+from backend.services.freqtrade_manager import freqtrade_mgr
+from backend.services.risk_manager import RiskManager
+from backend.services.trade_sync import sync as sync_trades
+
+router = APIRouter(prefix="/api/trade", tags=["trading"])
+
+
+class StartRequest(BaseModel):
+    strategy_id: int
+    mode: str = "paper"  # "paper" or "live"
+    pairs: list[str] = ["BTC/USDT"]
+    timeframe: str = "15m"
+    stoploss: float = -0.03
+    wallet: float = 1000
+    confirmation: str = ""
+    override_safety: bool = False  # True = user acknowledged warnings, don't hard-block
+
+
+@router.post("/start")
+@limiter.limit(TRADE_LIMIT)
+def start_trading(
+    req: StartRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    cfg_result = db.execute(select(Config).where(Config.user_id == user_id).limit(1))
+    config = cfg_result.scalar_one_or_none()
+    if not config:
+        return {"error": "Not configured. Complete setup first."}
+
+    strat_result = db.execute(
+        select(Strategy).where(Strategy.id == req.strategy_id, Strategy.user_id == user_id)
+    )
+    strategy = strat_result.scalar_one_or_none()
+    if not strategy:
+        return {"error": "Strategy not found"}
+
+    strategy_name = f"strategy_{strategy.id}"
+    for line in (strategy.generated_code or "").split("\n"):
+        if line.startswith("class ") and "IStrategy" in line:
+            strategy_name = line.split("(")[0].replace("class ", "").strip()
+            break
+
+    mgr = freqtrade_mgr.for_user(user_id)
+    if req.mode == "live":
+        if req.confirmation != "CONFIRM":
+            return {"error": "Must type 'CONFIRM' to start live trading"}
+
+        risk_mgr = RiskManager(config)
+        safety = risk_mgr.check_live_safety(db, user_id)
+        if not safety["safe"]:
+            if not req.override_safety:
+                # Hard block — user hasn't acknowledged warnings yet
+                return {"error": "Safety checks failed", "details": safety["errors"]}
+            # override_safety=True: user acknowledged all warnings, log but proceed
+            log.warning(
+                "User %s starting live trade with safety overrides: %s",
+                user_id, safety["errors"],
+            )
+
+        result = mgr.start_live(
+            strategy_name=strategy_name,
+            pairs=req.pairs,
+            timeframe=req.timeframe,
+            stoploss=req.stoploss,
+            kucoin_key=decrypt(config.kucoin_key_enc, user_id),
+            kucoin_secret=decrypt(config.kucoin_secret_enc, user_id),
+            kucoin_passphrase=decrypt(config.kucoin_passphrase_enc, user_id),
+            wallet=req.wallet,
+            max_open_trades=config.max_open_trades or 3,
+            max_position_pct=config.max_position_pct or 5.0,
+            trailing_stop_pct=getattr(config, "trailing_stop_pct", 0.0) or 0.0,
+            take_profit_pct=getattr(config, "take_profit_pct", 0.0) or 0.0,
+            position_adjustment=bool(getattr(config, "position_adjustment", False)),
+        )
+    else:
+        result = mgr.start_paper(
+            strategy_name=strategy_name,
+            pairs=req.pairs,
+            timeframe=req.timeframe,
+            stoploss=req.stoploss,
+            wallet=req.wallet,
+            max_open_trades=config.max_open_trades or 3,
+            max_position_pct=config.max_position_pct or 5.0,
+            trailing_stop_pct=getattr(config, "trailing_stop_pct", 0.0) or 0.0,
+            take_profit_pct=getattr(config, "take_profit_pct", 0.0) or 0.0,
+            position_adjustment=bool(getattr(config, "position_adjustment", False)),
+        )
+
+    log_event(
+        db, user_id, "trade.start", request,
+        mode=req.mode, strategy_id=req.strategy_id, pair=",".join(req.pairs),
+        payload={
+            "timeframe": req.timeframe,
+            "stoploss": req.stoploss,
+            "wallet": req.wallet,
+            "result": result,
+        },
+    )
+    return result
+
+
+@router.post("/stop")
+@limiter.limit(TRADE_LIMIT)
+async def stop_trading(
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    result = freqtrade_mgr.for_user(user_id).stop()
+    log_event(db, user_id, "trade.stop", request, payload={"result": result})
+    return result
+
+
+@router.get("/status")
+async def get_status(user_id: str = Depends(get_user_id)):
+    return freqtrade_mgr.for_user(user_id).status
+
+
+@router.post("/sync")
+def sync_from_freqtrade(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Manually pull trades from freqtrade's SQLite DBs into our table."""
+    return sync_trades(db, user_id)
+
+
+@router.get("/open")
+def get_open_trades(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    try:
+        sync_trades(db, user_id)
+    except Exception:
+        pass
+    result = db.execute(
+        select(Trade)
+        .where(Trade.status == "open", Trade.user_id == user_id)
+        .order_by(desc(Trade.entry_time))
+    )
+    trades = result.scalars().all()
+    return {
+        "trades": [
+            {
+                "id": t.id,
+                "pair": t.pair,
+                "side": t.side,
+                "entry_price": t.entry_price,
+                "amount": t.amount,
+                "stoploss_price": t.stoploss_price,
+                "entry_time": str(t.entry_time),
+                "mode": t.mode,
+            }
+            for t in trades
+        ]
+    }
+
+
+@router.get("/history")
+def get_trade_history(
+    mode: str = None,
+    strategy_id: int = None,
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    try:
+        sync_trades(db, user_id)
+    except Exception:
+        pass
+    query = (
+        select(Trade)
+        .where(Trade.status == "closed", Trade.user_id == user_id)
+        .order_by(desc(Trade.exit_time))
+    )
+
+    if mode:
+        query = query.where(Trade.mode == mode)
+    if strategy_id:
+        query = query.where(Trade.strategy_id == strategy_id)
+
+    query = query.limit(limit).offset(offset)
+    result = db.execute(query)
+    trades = result.scalars().all()
+
+    return {
+        "trades": [
+            {
+                "id": t.id,
+                "pair": t.pair,
+                "side": t.side,
+                "entry_price": t.entry_price,
+                "exit_price": t.exit_price,
+                "amount": t.amount,
+                "profit_pct": t.profit_pct,
+                "profit_abs": t.profit_abs,
+                "entry_time": str(t.entry_time),
+                "exit_time": str(t.exit_time),
+                "exit_reason": t.exit_reason,
+                "mode": t.mode,
+                "strategy_id": t.strategy_id,
+            }
+            for t in trades
+        ]
+    }
+
+
+@router.post("/force-close/{trade_id}")
+def force_close(
+    trade_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    result = db.execute(
+        select(Trade).where(
+            Trade.id == trade_id,
+            Trade.status == "open",
+            Trade.user_id == user_id,
+        )
+    )
+    trade = result.scalar_one_or_none()
+    if not trade:
+        return {"error": "Open trade not found"}
+
+    trade.status = "closed"
+    trade.exit_time = datetime.utcnow()
+    trade.exit_reason = "force_closed"
+    db.commit()
+
+    log_event(
+        db, user_id, "trade.force_close", request,
+        mode=trade.mode, strategy_id=trade.strategy_id, pair=trade.pair,
+        payload={"trade_id": trade_id},
+    )
+    return {"status": "closed", "trade_id": trade_id}
+
+
+@router.post("/emergency-stop")
+def emergency_stop(
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    stop_result = freqtrade_mgr.for_user(user_id).stop()
+
+    result = db.execute(
+        select(Trade).where(Trade.status == "open", Trade.user_id == user_id)
+    )
+    open_trades = result.scalars().all()
+    closed_count = 0
+    for trade in open_trades:
+        trade.status = "closed"
+        trade.exit_time = datetime.utcnow()
+        trade.exit_reason = "emergency_stop"
+        closed_count += 1
+
+    db.commit()
+
+    log_event(
+        db, user_id, "trade.emergency_stop", request,
+        payload={"trades_closed": closed_count, "bot": stop_result},
+    )
+
+    return {
+        "stopped": True,
+        "trades_closed": closed_count,
+        "bot": stop_result,
+    }
+
+
+@router.get("/audit")
+def get_audit_log(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Last N audit events for the current user. Read-only."""
+    from backend.models.audit import TradeAudit
+    rows = db.execute(
+        select(TradeAudit)
+        .where(TradeAudit.user_id == user_id)
+        .order_by(desc(TradeAudit.created_at))
+        .limit(min(limit, 500))
+    ).scalars().all()
+    return {
+        "events": [
+            {
+                "id": r.id,
+                "event": r.event,
+                "mode": r.mode,
+                "strategy_id": r.strategy_id,
+                "pair": r.pair,
+                "payload": r.payload,
+                "actor_ip": r.actor_ip,
+                "created_at": str(r.created_at),
+            }
+            for r in rows
+        ]
+    }

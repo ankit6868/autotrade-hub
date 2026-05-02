@@ -1,0 +1,14 @@
+node_modules
+.next
+.next/cache
+out
+npm-debug.log*
+*.log
+.env
+.env.*
+.git
+.gitignore
+.vscode
+.idea
+Dockerfile
+Dockerfile.prod

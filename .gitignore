@@ -1,0 +1,50 @@
+node_modules/
+frontend/node_modules/
+.next/
+frontend/.next/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Secrets — never commit these
+.env
+.env.prod
+.env.local
+*.env
+
+# Data
+data/
+data/*.db
+*.db
+*.sqlite
+user_data/
+strategies/user_generated/
+
+# Python venvs
+.venv/
+venv/
+env/
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Logs
+*.log
+backend.log
+backend_new.log
+backend_new_err.log
+
+# Migration scripts (one-off)
+fix_pg_columns.py
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/

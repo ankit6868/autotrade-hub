@@ -1,0 +1,27 @@
+# Caddyfile — automatic HTTPS via Let's Encrypt
+# Replace {$DOMAIN} with your actual domain, or set DOMAIN env var.
+# For local testing use: localhost or an IP address.
+
+{$DOMAIN:localhost} {
+
+    # Proxy everything to the Next.js frontend (which already proxies /api/* → backend)
+    reverse_proxy frontend:3000
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+
+    # Compression
+    encode gzip zstd
+
+    # Logging
+    log {
+        output stdout
+        format console
+    }
+}

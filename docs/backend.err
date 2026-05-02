@@ -1,0 +1,112 @@
+INFO:     Started server process [11308]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:65014 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:62178 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:62928 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:49894 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     127.0.0.1:50335 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:51502 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:62635 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:56554 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     127.0.0.1:56717 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:58092 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     127.0.0.1:56986 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:52799 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:50650 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:61635 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:60798 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:55210 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     127.0.0.1:55172 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:60929 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:59213 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:60623 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:60764 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:54458 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:55809 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     127.0.0.1:57561 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:62987 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:57365 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     127.0.0.1:62465 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:62853 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:61486 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     127.0.0.1:52145 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:50356 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed
+INFO:     127.0.0.1:60066 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:60068 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:64928 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:64930 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:63934 - "WebSocket /ws/trades" [accepted]
+INFO:     connection open
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed
+INFO:     connection closed

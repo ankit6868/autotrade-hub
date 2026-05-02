@@ -1,0 +1,130 @@
+# Production compose — single-server Docker Compose setup with automatic HTTPS
+#
+# QUICKSTART:
+#   1. Copy .env.prod.example → .env.prod and fill in all values
+#   2. Point your domain's A record to this server's IP
+#   3. Run: docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# Required env vars (.env.prod):
+#   APP_SECRET_KEY            32+ char random string
+#   POSTGRES_PASSWORD         strong random string
+#   DOMAIN                    your domain, e.g. trade.example.com
+#   CLERK_JWKS_URL            https://<your-clerk>.clerk.accounts.dev/.well-known/jwks.json
+#   CLERK_ISSUER              https://<your-clerk>.clerk.accounts.dev
+#   NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
+#   CLERK_SECRET_KEY
+
+services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER:     ${POSTGRES_USER:-tradebot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB:       ${POSTGRES_DB:-tradebot}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tradebot} -d ${POSTGRES_DB:-tradebot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  # ── FastAPI Backend ─────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL:        postgresql+psycopg://${POSTGRES_USER:-tradebot}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tradebot}
+      APP_SECRET_KEY:      ${APP_SECRET_KEY:?APP_SECRET_KEY is required}
+      CLERK_JWKS_URL:      ${CLERK_JWKS_URL:-}
+      CLERK_ISSUER:        ${CLERK_ISSUER:-}
+      CLERK_AUDIENCE:      ${CLERK_AUDIENCE:-}
+      CORS_ALLOWED_ORIGINS: https://${DOMAIN:-localhost},http://localhost:3000
+      RATE_LIMIT_DEFAULT:  ${RATE_LIMIT_DEFAULT:-200/minute}
+      RATE_LIMIT_TRADE:    ${RATE_LIMIT_TRADE:-20/minute}
+      RATE_LIMIT_AI:       ${RATE_LIMIT_AI:-30/minute}
+      RATE_LIMIT_STORAGE:  ${RATE_LIMIT_STORAGE:-memory://}
+      SENTRY_DSN:          ${SENTRY_DSN:-}
+      ENV:                 production
+      APP_VERSION:         ${APP_VERSION:-1.0.0}
+      ENABLE_DOCS:         "false"
+      RUN_MIGRATIONS:      "1"
+    volumes:
+      - tradebot_data:/app/data
+      - tradebot_user_data:/app/user_data
+    expose:
+      - "8000"
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+
+  # ── Next.js Frontend ────────────────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY:-}
+        NEXT_PUBLIC_API_URL: /
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      BACKEND_URL:      http://backend:8000
+      CLERK_SECRET_KEY: ${CLERK_SECRET_KEY:-}
+    expose:
+      - "3000"
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://127.0.0.1:3000/"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+  # ── Caddy — Automatic HTTPS reverse proxy ───────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - frontend
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"     # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      DOMAIN: ${DOMAIN:-localhost}
+    networks:
+      - internal
+
+volumes:
+  pgdata:
+  tradebot_data:
+  tradebot_user_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  internal:
+    driver: bridge

@@ -1,0 +1,44 @@
+# Pinned for Python 3.12+. Production images use Python 3.12.
+# All packages have prebuilt wheels for 3.12 on linux/amd64 and macos/arm64.
+
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+websockets==14.1
+
+# Auth (Clerk JWT verification via JWKS)
+PyJWT[crypto]==2.10.1
+
+# Async HTTP client (used to call OpenRouter, KuCoin)
+httpx==0.28.1
+
+# Document parsing
+PyPDF2==3.0.1
+python-docx==1.1.2
+
+# Database
+SQLAlchemy==2.0.36
+psycopg[binary,pool]==3.2.3   # Postgres driver for production
+alembic==1.14.0               # Schema migrations
+
+# Indicator math
+numpy==2.2.1
+pandas==2.2.3
+
+# Security
+cryptography==44.0.0
+
+# Telegram (optional)
+python-telegram-bot==21.9
+
+# Observability (no-op unless SENTRY_DSN is set)
+sentry-sdk[fastapi]==2.19.2
+
+# Rate limiting
+slowapi==0.1.9
+
+# Utilities
+python-dotenv==1.0.1
+pydantic==2.10.4
+pydantic-settings==2.7.0
