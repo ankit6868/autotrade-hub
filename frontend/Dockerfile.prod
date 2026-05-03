@@ -20,8 +20,12 @@ COPY . .
 # NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY is a public key — safe to embed at build time.
 ARG NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="pk_test_c3F1YXJlLWJyZWFtLTI0LmNsZXJrLmFjY291bnRzLmRldiQ"
 ARG NEXT_PUBLIC_API_URL=""
+# BACKEND_URL is read by next.config.js's rewrites() at build time, so it has
+# to be declared as an ARG even though it's a server-only var.
+ARG BACKEND_URL=""
 ENV NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=${NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY}
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV BACKEND_URL=${BACKEND_URL}
 ENV NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
 ENV NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
 
