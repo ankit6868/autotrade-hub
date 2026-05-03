@@ -22,12 +22,10 @@ export default function Sidebar() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
 
-  // Close drawer whenever the route changes
   useEffect(() => {
     setOpen(false);
   }, [pathname]);
 
-  // Lock body scroll while the mobile drawer is open
   useEffect(() => {
     if (typeof document === 'undefined') return;
     document.body.style.overflow = open ? 'hidden' : '';
@@ -36,7 +34,6 @@ export default function Sidebar() {
     };
   }, [open]);
 
-  // Close on Escape
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
       if (e.key === 'Escape') setOpen(false);
@@ -47,11 +44,16 @@ export default function Sidebar() {
 
   return (
     <>
-      {/* Mobile top bar — visible below md */}
+      {/* Mobile top bar */}
       <header
         suppressHydrationWarning
-        className="md:hidden fixed top-0 inset-x-0 h-14 z-40 flex items-center justify-between px-4 bg-[#0d1424]/85 backdrop-blur-md border-b border-[#243153]"
-        style={{ paddingTop: 'env(safe-area-inset-top)' }}
+        className="md:hidden fixed top-0 inset-x-0 h-14 z-40 flex items-center justify-between px-4 border-b border-white/[0.06]"
+        style={{
+          paddingTop: 'env(safe-area-inset-top)',
+          background: 'rgba(10, 14, 28, 0.7)',
+          backdropFilter: 'blur(18px) saturate(160%)',
+          WebkitBackdropFilter: 'blur(18px) saturate(160%)',
+        }}
       >
         <button
           aria-label={open ? 'Close menu' : 'Open menu'}
@@ -77,11 +79,10 @@ export default function Sidebar() {
         <Link href="/" className="flex items-center gap-2">
           <span className="text-base font-semibold text-white tracking-tight">AutoTrade Hub</span>
         </Link>
-        {/* Spacer balances the menu button so the title stays centred */}
         <div className="w-9" />
       </header>
 
-      {/* Backdrop — only on mobile when drawer open */}
+      {/* Backdrop */}
       {open && (
         <div
           className="md:hidden fixed inset-0 z-40 bg-black/60 backdrop-blur-sm animate-fade-in"
@@ -90,12 +91,12 @@ export default function Sidebar() {
         />
       )}
 
-      {/* Sidebar — desktop fixed, mobile slide-in drawer */}
+      {/* Sidebar */}
       <aside
         suppressHydrationWarning
         className={[
-          'fixed left-0 top-0 h-screen w-72 md:w-64 z-50',
-          'bg-[#0d1424] border-r border-[#243153] flex flex-col',
+          'fixed left-0 top-0 h-screen w-72 md:w-64 z-50 flex flex-col',
+          'border-r border-white/[0.06]',
           'transform transition-transform duration-300 ease-out will-change-transform',
           open ? 'translate-x-0' : '-translate-x-full',
           'md:translate-x-0',
@@ -103,11 +104,22 @@ export default function Sidebar() {
         style={{
           paddingTop: 'env(safe-area-inset-top)',
           paddingBottom: 'env(safe-area-inset-bottom)',
+          background: 'rgba(10, 14, 28, 0.72)',
+          backdropFilter: 'blur(20px) saturate(160%)',
+          WebkitBackdropFilter: 'blur(20px) saturate(160%)',
+          boxShadow: 'inset -1px 0 0 rgba(255,255,255,0.04)',
         }}
       >
-        <div className="px-5 py-5 border-b border-[#243153] flex items-center justify-between">
+        {/* Brand */}
+        <div className="px-5 py-5 border-b border-white/[0.06] flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2.5 group">
-            <span className="inline-flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-brand-500 to-brand-700 text-white text-lg shadow-[0_4px_16px_-4px_rgba(51,145,255,0.6)] group-hover:scale-105 transition-transform">
+            <span
+              className="inline-flex h-10 w-10 items-center justify-center rounded-2xl text-white text-lg shadow-glow group-hover:scale-105 transition-transform"
+              style={{
+                background: 'linear-gradient(135deg, #1b6ff5 0%, #1747e8 60%, #0a2cb8 100%)',
+                boxShadow: '0 8px 24px -8px rgba(27,111,245,0.6), inset 0 1px 0 rgba(255,255,255,0.2)',
+              }}
+            >
               ⚡
             </span>
             <div>
@@ -115,7 +127,6 @@ export default function Sidebar() {
               <p className="text-[11px] text-slate-400 leading-tight">Free AI Trading</p>
             </div>
           </Link>
-          {/* Close button inside drawer (mobile only) */}
           <button
             aria-label="Close menu"
             onClick={() => setOpen(false)}
@@ -128,7 +139,8 @@ export default function Sidebar() {
           </button>
         </div>
 
-        <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
+        {/* Navigation */}
+        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
           {nav.map((item) => {
             const active = pathname === item.href || (item.href !== '/' && pathname?.startsWith(item.href));
             return (
@@ -138,21 +150,38 @@ export default function Sidebar() {
                 className={[
                   'group relative flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all',
                   active
-                    ? 'bg-gradient-to-r from-brand-600/25 to-brand-600/5 text-white font-medium'
+                    ? 'text-white font-medium'
                     : 'text-slate-400 hover:text-white hover:bg-white/[0.04]',
                 ].join(' ')}
+                style={
+                  active
+                    ? {
+                        background:
+                          'linear-gradient(90deg, rgba(27,111,245,0.22) 0%, rgba(27,111,245,0.04) 100%)',
+                        boxShadow: 'inset 0 0 0 1px rgba(27,111,245,0.25)',
+                      }
+                    : undefined
+                }
               >
                 {active && (
-                  <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 rounded-r-full bg-brand-400" />
+                  <span className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-full bg-brand-400 shadow-[0_0_12px_rgba(27,111,245,0.8)]" />
                 )}
-                <span className="text-base w-5 text-center">{item.icon}</span>
+                <span
+                  className={[
+                    'inline-flex h-7 w-7 items-center justify-center rounded-lg text-base transition-colors',
+                    active ? 'bg-white/[0.08]' : 'bg-white/[0.03] group-hover:bg-white/[0.06]',
+                  ].join(' ')}
+                >
+                  {item.icon}
+                </span>
                 <span className="truncate">{item.label}</span>
               </Link>
             );
           })}
         </nav>
 
-        <div className="p-3 border-t border-[#243153]">
+        {/* Footer / emergency stop */}
+        <div className="p-3 border-t border-white/[0.06]">
           <button
             onClick={async () => {
               if (confirm('EMERGENCY STOP: This will halt all trading immediately. Continue?')) {

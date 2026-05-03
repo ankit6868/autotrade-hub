@@ -75,7 +75,9 @@ export default function Dashboard() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
         <div>
-          <h1 className="heading-xl">Dashboard</h1>
+          <h1 className="heading-xl">
+            Welcome back <span className="text-gradient-brand">👋</span>
+          </h1>
           <p className="text-slate-400 mt-1 text-sm">AutoTrade Hub overview</p>
         </div>
         {botStatus && (
@@ -101,12 +103,28 @@ export default function Dashboard() {
         </div>
       )}
 
-      {/* Metrics */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        <MetricCard title="Total P&L" value={`${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)} USDT`} color={totalPnl >= 0 ? 'profit' : 'loss'} />
-        <MetricCard title="Win Rate" value={`${winRate.toFixed(1)}%`} />
-        <MetricCard title="Open Trades" value={openTrades.length} />
-        <MetricCard title="Bot Status" value={botStatus?.running ? 'Running' : 'Stopped'} subtitle={botStatus?.mode ? String(botStatus.mode) : undefined} />
+      {/* Metrics — hero card on left (like reference's Portfolio Balance), supporting metrics on right */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-3 sm:gap-4">
+        <div className="lg:col-span-1">
+          <MetricCard
+            title="Total P&L"
+            value={`${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(2)} USDT`}
+            subtitle={`${recentTrades.length} recent trades`}
+            variant="hero"
+            icon={<span className="text-base">💰</span>}
+          />
+        </div>
+        <div className="lg:col-span-2 grid grid-cols-2 sm:grid-cols-3 gap-3 sm:gap-4">
+          <MetricCard title="Win Rate" value={`${winRate.toFixed(1)}%`} icon={<span>🎯</span>} />
+          <MetricCard title="Open Trades" value={openTrades.length} icon={<span>📈</span>} />
+          <MetricCard
+            title="Bot Status"
+            value={botStatus?.running ? 'Running' : 'Stopped'}
+            subtitle={botStatus?.mode ? String(botStatus.mode) : undefined}
+            color={botStatus?.running ? 'profit' : 'default'}
+            icon={<span>{botStatus?.running ? '🟢' : '⚪'}</span>}
+          />
+        </div>
       </div>
 
       {/* Risk Monitor */}
