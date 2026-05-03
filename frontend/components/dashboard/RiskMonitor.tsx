@@ -26,7 +26,7 @@ function GaugeBar({ value, label, color }: { value: number; label: string; color
         <span className="text-slate-400">{label}</span>
         <span className={`font-medium ${color}`}>{pct.toFixed(0)}%</span>
       </div>
-      <div className="w-full h-2 rounded-full bg-[#2a3a52] overflow-hidden">
+      <div className="w-full h-2 rounded-full bg-[#1a2440] overflow-hidden">
         <div
           className={`h-full rounded-full transition-all duration-500 ${
             pct >= 80 ? 'bg-red-500' : pct >= 50 ? 'bg-yellow-500' : 'bg-emerald-500'

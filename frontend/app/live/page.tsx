@@ -220,12 +220,12 @@ function LiveTradingInner() {
 
   return (
     <div className="max-w-6xl mx-auto">
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6 sm:mb-8">
         <div>
-          <h1 className="text-3xl font-bold">Live Trading</h1>
-          <p className="text-slate-400 mt-1">Trade with real money on KuCoin</p>
+          <h1 className="heading-xl">Live Trading</h1>
+          <p className="text-slate-400 mt-1 text-sm">Trade with real money on KuCoin</p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3 sm:gap-4 flex-wrap">
           <StatusBadge
             status={isRunning ? 'running' : 'stopped'}
             label={isRunning ? 'LIVE' : 'Stopped'}
@@ -493,7 +493,6 @@ function LiveTradingInner() {
           <TradingViewWidget
             symbol={pairToTV(pairs[0] || 'BTC/USDT')}
             interval={INTERVAL_TO_TV[timeframe] || '15'}
-            height={340}
           />
         </div>
         <SignalsPanel pair={(pairs[0] || 'BTC/USDT')} interval={timeframe} compact={false} />

@@ -222,10 +222,10 @@ function PaperTradeInner() {
 
   return (
     <div className="max-w-6xl mx-auto">
-      <div className="flex items-center justify-between mb-8">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6 sm:mb-8">
         <div>
-          <h1 className="text-3xl font-bold">Paper Trading</h1>
-          <p className="text-slate-400 mt-1">Test your strategy with virtual money</p>
+          <h1 className="heading-xl">Paper Trading</h1>
+          <p className="text-slate-400 mt-1 text-sm">Test your strategy with virtual money</p>
         </div>
         <StatusBadge
           status={isRunning ? 'running' : 'stopped'}
@@ -535,7 +535,6 @@ function PaperTradeInner() {
           <TradingViewWidget
             symbol={pairToTV(pairs[0] || 'BTC/USDT')}
             interval={INTERVAL_TO_TV[timeframe] || '15'}
-            height={340}
           />
         </div>
         <SignalsPanel pair={(pairs[0] || 'BTC/USDT')} interval={timeframe} compact={false} />

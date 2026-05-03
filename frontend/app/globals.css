@@ -3,39 +3,150 @@
 @tailwind utilities;
 
 :root {
-  --bg-primary: #0a0f1c;
-  --bg-secondary: #111827;
-  --bg-card: #1a2236;
-  --border: #2a3a52;
+  --bg-primary: #060913;
+  --bg-secondary: #0d1424;
+  --bg-card: #131c30;
+  --bg-elevated: #1a2440;
+  --border: #243153;
+  --border-strong: #2f3f6b;
   --text-primary: #f1f5f9;
   --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --brand: #3391ff;
+  --brand-glow: rgba(51, 145, 255, 0.35);
+  --profit: #22c55e;
+  --loss: #ef4444;
+  --shadow-card: 0 4px 24px -8px rgba(0, 0, 0, 0.4);
+  --shadow-elevated: 0 12px 32px -8px rgba(0, 0, 0, 0.6);
+}
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  /* Smoother scrolling on iOS */
+  -webkit-overflow-scrolling: touch;
+  /* Prevent ugly text-size auto-bump on phones */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 body {
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  /* Subtle radial glow background — modern, depth-y, not distracting */
+  background-image:
+    radial-gradient(at 0% 0%, rgba(27, 111, 245, 0.08) 0px, transparent 50%),
+    radial-gradient(at 100% 100%, rgba(99, 102, 241, 0.06) 0px, transparent 50%);
+  background-attachment: fixed;
+  font-feature-settings: "cv11", "ss01", "ss03";
+  /* Honour iOS safe-area insets so content never sits under the notch */
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+}
+
+/* Modern, thin scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.2);
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.35);
+}
+
+/* Hide scrollbar but keep scrolling for chip rows */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Selection */
+::selection {
+  background: rgba(51, 145, 255, 0.35);
+  color: #fff;
 }
 
 @layer components {
   .card {
-    @apply bg-[#1a2236] border border-[#2a3a52] rounded-xl p-6;
+    @apply bg-[#131c30] border border-[#243153] rounded-2xl p-4 sm:p-6 shadow-[0_4px_24px_-8px_rgba(0,0,0,0.4)] transition-colors;
   }
+  .card-hover {
+    @apply hover:border-[#2f3f6b] hover:bg-[#15203a];
+  }
+  .card-glass {
+    @apply bg-white/[0.03] backdrop-blur-md border border-white/[0.06] rounded-2xl p-4 sm:p-6;
+  }
+
   .btn-primary {
-    @apply bg-brand-600 hover:bg-brand-700 text-white px-6 py-2.5 rounded-lg font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center justify-center gap-2 bg-brand-600 hover:bg-brand-500 active:scale-[0.98] text-white px-4 sm:px-6 py-2.5 rounded-xl font-medium transition-all shadow-[0_4px_16px_-4px_rgba(51,145,255,0.4)] disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none;
   }
   .btn-secondary {
-    @apply bg-[#2a3a52] hover:bg-[#3a4a62] text-white px-6 py-2.5 rounded-lg font-medium transition-colors;
+    @apply inline-flex items-center justify-center gap-2 bg-[#1f2a45] hover:bg-[#2a3a5e] active:scale-[0.98] text-white px-4 sm:px-6 py-2.5 rounded-xl font-medium transition-all border border-[#2a3a52];
   }
   .btn-danger {
-    @apply bg-red-600 hover:bg-red-700 text-white px-6 py-2.5 rounded-lg font-medium transition-colors;
+    @apply inline-flex items-center justify-center gap-2 bg-red-600 hover:bg-red-500 active:scale-[0.98] text-white px-4 sm:px-6 py-2.5 rounded-xl font-medium transition-all shadow-[0_4px_16px_-4px_rgba(239,68,68,0.4)];
   }
   .btn-success {
-    @apply bg-emerald-600 hover:bg-emerald-700 text-white px-6 py-2.5 rounded-lg font-medium transition-colors;
+    @apply inline-flex items-center justify-center gap-2 bg-emerald-600 hover:bg-emerald-500 active:scale-[0.98] text-white px-4 sm:px-6 py-2.5 rounded-xl font-medium transition-all shadow-[0_4px_16px_-4px_rgba(16,185,129,0.4)];
   }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-2 text-slate-300 hover:text-white hover:bg-white/5 active:scale-[0.98] px-3 py-2 rounded-lg font-medium transition-all;
+  }
+
   .input {
-    @apply w-full bg-[#0a0f1c] border border-[#2a3a52] rounded-lg px-4 py-2.5 text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent;
+    /* 16px font-size prevents iOS Safari from zooming the viewport on focus */
+    @apply w-full bg-[#0a1224] border border-[#243153] rounded-xl px-4 py-2.5 text-base sm:text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-brand-500/60 focus:border-brand-500 transition-colors;
   }
   .label {
     @apply block text-sm font-medium text-slate-300 mb-1.5;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-medium border;
+  }
+
+  .heading-xl {
+    @apply text-2xl sm:text-3xl font-bold tracking-tight;
+  }
+  .heading-lg {
+    @apply text-xl sm:text-2xl font-semibold tracking-tight;
+  }
+
+  /* Skeleton shimmer for loading states */
+  .skeleton {
+    @apply relative overflow-hidden bg-[#1a2440] rounded-lg;
+  }
+  .skeleton::after {
+    content: '';
+    @apply absolute inset-0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.04), transparent);
+    animation: shimmer 1.6s infinite;
+  }
+}
+
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+/* Reduced motion respect */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
   }
 }

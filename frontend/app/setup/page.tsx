@@ -102,8 +102,8 @@ export default function SetupPage() {
 
   return (
     <div className="max-w-2xl mx-auto">
-      <h1 className="text-3xl font-bold mb-2">Setup Wizard</h1>
-      <p className="text-slate-400 mb-8">Configure your API keys and trading preferences</p>
+      <h1 className="heading-xl mb-2">Setup Wizard</h1>
+      <p className="text-slate-400 mb-6 sm:mb-8 text-sm sm:text-base">Configure your API keys and trading preferences</p>
 
       {/* Step indicators */}
       <div className="flex gap-2 mb-8">

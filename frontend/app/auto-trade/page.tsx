@@ -229,16 +229,16 @@ export default function AutoTradePage() {
   return (
     <div className="max-w-6xl mx-auto">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
         <div>
-          <h1 className="text-3xl font-bold">Auto-Trade Engine</h1>
-          <p className="text-slate-400 mt-1">
+          <h1 className="heading-xl">Auto-Trade Engine</h1>
+          <p className="text-slate-400 mt-1 text-sm">
             {settings.auto_trade_strategy_id
               ? `Pinned: ${pinnedStrategy?.name || `Strategy #${settings.auto_trade_strategy_id}`}`
               : 'Auto-selects the best pair + strategy from live market scanner'}
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <StatusBadge status={isRunning ? 'running' : 'stopped'} label={isRunning ? 'Engine Running' : 'Stopped'} />
           {isRunning && (
             <button onClick={emergencyStop} className="btn-danger text-sm animate-pulse">
@@ -571,7 +571,7 @@ export default function AutoTradePage() {
                     {/* Strategy detail card */}
                     {pinnedStrategy && (
                       <div className="p-4 rounded-lg bg-[#111827] border border-[#2a3a52] text-sm">
-                        <div className="grid grid-cols-3 gap-4">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4">
                           <div>
                             <p className="text-slate-400 text-xs">Timeframe</p>
                             <p className="font-semibold">{pinnedStrategy.timeframe || '15m'}</p>

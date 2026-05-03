@@ -186,8 +186,8 @@ export default function BacktestPage() {
 
   return (
     <div className="max-w-6xl mx-auto">
-      <h1 className="text-3xl font-bold mb-2">Backtesting</h1>
-      <p className="text-slate-400 mb-6">
+      <h1 className="heading-xl mb-2">Backtesting</h1>
+      <p className="text-slate-400 mb-6 text-sm sm:text-base">
         Test your strategy on real historical KuCoin OHLCV data — up to 10 years back
       </p>
 

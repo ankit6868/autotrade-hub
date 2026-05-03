@@ -62,10 +62,10 @@ export default function TemplatesPage() {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <h1 className="text-3xl font-bold mb-2">Strategy Templates</h1>
-      <p className="text-slate-400 mb-8">Pre-built strategies ready to use — no AI parsing needed</p>
+      <h1 className="heading-xl mb-2">Strategy Templates</h1>
+      <p className="text-slate-400 mb-6 sm:mb-8 text-sm sm:text-base">Pre-built strategies ready to use — no AI parsing needed</p>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6 mb-6 sm:mb-8">
         {templates.map((tmpl) => {
           const info = templateInfo[tmpl.name] || { desc: '', rules: '', timeframe: '', stoploss: '' };
           return (

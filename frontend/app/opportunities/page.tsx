@@ -205,8 +205,8 @@ export default function OpportunitiesPage() {
 
   return (
     <div className="max-w-7xl mx-auto">
-      <h1 className="text-3xl font-bold mb-1">🎯 Opportunities</h1>
-      <p className="text-slate-400 mb-6">
+      <h1 className="heading-xl mb-1">🎯 Opportunities</h1>
+      <p className="text-slate-400 mb-6 text-sm sm:text-base">
         Scan the market for the best (coin × strategy) matches right now. Scoring uses live
         TradingView indicators (RSI, MACD, ADX, Bollinger) and historical backtest data.
       </p>

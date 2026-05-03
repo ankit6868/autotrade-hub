@@ -134,12 +134,12 @@ export default function HistoryPage() {
   return (
     <div className="max-w-6xl mx-auto">
       {/* Header */}
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6">
         <div>
-          <h1 className="text-3xl font-bold">Trade History & Analytics</h1>
-          <p className="text-slate-400 mt-1">{trades.length} trades · {loading ? 'Loading...' : 'Up to date'}</p>
+          <h1 className="heading-xl">Trade History & Analytics</h1>
+          <p className="text-slate-400 mt-1 text-sm">{trades.length} trades · {loading ? 'Loading...' : 'Up to date'}</p>
         </div>
-        <button onClick={exportCSV} disabled={trades.length === 0} className="btn-secondary">
+        <button onClick={exportCSV} disabled={trades.length === 0} className="btn-secondary self-start sm:self-auto">
           ⬇ Export CSV
         </button>
       </div>

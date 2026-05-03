@@ -71,11 +71,11 @@ export default function StrategyUploadPage() {
 
   return (
     <div className="max-w-4xl mx-auto">
-      <h1 className="text-3xl font-bold mb-2">Upload Strategy</h1>
-      <p className="text-slate-400 mb-8">Upload your trading strategy and let AI convert it to code</p>
+      <h1 className="heading-xl mb-2">Upload Strategy</h1>
+      <p className="text-slate-400 mb-6 sm:mb-8 text-sm sm:text-base">Upload your trading strategy and let AI convert it to code</p>
 
       {/* Mode selector */}
-      <div className="grid grid-cols-3 gap-4 mb-8">
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6 sm:mb-8">
         {[
           { key: 'upload', label: 'Upload Document', desc: 'PDF, DOCX, TXT, MD', icon: '📄' },
           { key: 'type', label: 'Type It Out', desc: 'Write your rules directly', icon: '✍️' },

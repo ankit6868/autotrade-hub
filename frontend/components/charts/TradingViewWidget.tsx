@@ -5,6 +5,9 @@ import { useEffect, useRef, memo } from 'react';
 interface Props {
   symbol?: string;       // e.g. "KUCOIN:BTCUSDT"
   interval?: string;     // e.g. "15"
+  /** Optional fixed pixel height. If omitted, the chart fills its container
+   *  and falls back to a responsive min-height (300px on phones, ~520px on
+   *  desktop). Pass a number when you specifically need a fixed size. */
   height?: number;
   theme?: 'dark' | 'light';
   showToolbar?: boolean;
@@ -13,7 +16,7 @@ interface Props {
 function TradingViewWidget({
   symbol = 'KUCOIN:BTCUSDT',
   interval = '15',
-  height = 400,
+  height,
   theme = 'dark',
   showToolbar = true,
 }: Props) {
@@ -24,7 +27,8 @@ function TradingViewWidget({
     if (!containerRef.current) return;
 
     // Clear previous widget but preserve the inner widget div TradingView needs
-    containerRef.current.innerHTML = '<div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>';
+    containerRef.current.innerHTML =
+      '<div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>';
 
     const script = document.createElement('script');
     script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
@@ -56,16 +60,27 @@ function TradingViewWidget({
 
     return () => {
       if (containerRef.current) {
-        containerRef.current.innerHTML = '<div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>';
+        containerRef.current.innerHTML =
+          '<div class="tradingview-widget-container__widget" style="height:100%;width:100%"></div>';
       }
     };
   }, [symbol, interval, theme, showToolbar]);
 
+  // Fluid sizing: when no explicit height is given, use a responsive
+  // min-height so the chart looks decent on phones AND desktops.
+  const style: React.CSSProperties = height
+    ? { height, width: '100%' }
+    : { width: '100%' };
+
+  const fluidClass = height
+    ? ''
+    : 'min-h-[320px] sm:min-h-[420px] lg:min-h-[520px] h-[60vh] max-h-[720px]';
+
   return (
     <div
-      className="tradingview-widget-container"
+      className={`tradingview-widget-container ${fluidClass}`}
       ref={containerRef}
-      style={{ height, width: '100%' }}
+      style={style}
     >
       <div className="tradingview-widget-container__widget" style={{ height: '100%', width: '100%' }} />
     </div>
