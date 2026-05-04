@@ -12,6 +12,8 @@ __pycache__/
 .env.prod
 .env.local
 *.env
+.deploy-creds.tmp
+.deploy-creds*
 
 # Data
 data/

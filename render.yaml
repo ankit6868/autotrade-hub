@@ -1,49 +1,40 @@
+# Render Blueprint — backend only (frontend on Vercel, DB on Supabase)
+#
+# To deploy:
+#   1. Go to https://dashboard.render.com/blueprints
+#   2. Click "New Blueprint Instance" → connect this repo
+#   3. Render reads this file and creates the autotrade-backend service
+#   4. Fill in the blank env vars below in the dashboard:
+#        - DATABASE_URL          (Supabase session pooler URI)
+#        - CLERK_JWKS_URL        (https://<sub>.clerk.accounts.dev/.well-known/jwks.json)
+#        - CLERK_ISSUER          (https://<sub>.clerk.accounts.dev)
+#        - CORS_ALLOWED_ORIGINS  (your Vercel URL, comma-separated)
+
 services:
   # ── FastAPI Backend ───────────────────────────────────────────────────────
   - type: web
     name: autotrade-backend
     runtime: docker
+    plan: free
+    region: oregon
     dockerfilePath: ./Dockerfile.backend
     healthCheckPath: /api/health
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: autotrade-db
-          property: connectionString
+        sync: false                           # set in dashboard → Supabase URI
       - key: APP_SECRET_KEY
         generateValue: true
       - key: CLERK_JWKS_URL
-        value: ""          # fill in from Clerk dashboard
+        sync: false                           # set in dashboard
       - key: CLERK_ISSUER
-        value: ""
+        sync: false                           # set in dashboard
       - key: CORS_ALLOWED_ORIGINS
-        value: "https://autotrade-frontend.onrender.com"
+        sync: false                           # set in dashboard → Vercel URL
       - key: ENV
         value: production
       - key: ENABLE_DOCS
         value: "false"
       - key: RUN_MIGRATIONS
         value: "1"
-
-  # ── Next.js Frontend ──────────────────────────────────────────────────────
-  - type: web
-    name: autotrade-frontend
-    runtime: docker
-    dockerContext: ./frontend
-    dockerfilePath: ./frontend/Dockerfile.prod
-    envVars:
-      - key: BACKEND_URL
-        fromService:
-          type: web
-          name: autotrade-backend
-          envVarKey: RENDER_INTERNAL_HOSTNAME
-      - key: NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY
-        value: ""          # fill in from Clerk dashboard
-      - key: CLERK_SECRET_KEY
-        value: ""
-
-databases:
-  - name: autotrade-db
-    plan: free
-    databaseName: tradebot
-    user: tradebot
+      - key: APP_VERSION
+        value: "1.0.0"
