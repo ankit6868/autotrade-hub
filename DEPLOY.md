@@ -1,157 +1,179 @@
-# AutoTrade Hub — Deployment Guide
+# Deploy: Render + Vercel + Supabase
 
-Three ways to host. Pick whichever fits you.
+Three-service stack, all on free tier:
+
+| Component | Service  | Free tier                                 |
+|-----------|----------|-------------------------------------------|
+| Database  | Supabase | 500 MB Postgres, never sleeps             |
+| Backend   | Render   | 750 hrs/month, sleeps after ~15min idle   |
+| Frontend  | Vercel   | Unlimited bandwidth, never sleeps         |
+
+> Repo: https://github.com/ankit6868/autotrade-hub
+> Branch: `main` (commit `c82db53` or newer)
 
 ---
 
-## Option A — VPS (Recommended, $6–12/month)
+## Already done
 
-Best for: full control, real trading, 24/7 uptime.
-Works on: DigitalOcean, Vultr, Linode, Hetzner.
+- [x] Supabase Postgres project created (`tradebot`, region `ap-south-1` / Mumbai)
+- [x] `render.yaml` blueprint committed (backend-only)
+- [x] `frontend/vercel.json` committed
+- [x] Clerk dev keys ready
 
-### 1. Create a server
-- OS: **Ubuntu 22.04 LTS**
-- Size: **2 vCPU / 2 GB RAM** minimum ($12/mo DigitalOcean, $6/mo Hetzner)
-- Enable SSH access
+The pre-filled values for every step below are in `.deploy-creds.tmp` (gitignored, in repo root).
 
-### 2. Point your domain
-Create an **A record** in your DNS pointing `trade.yourdomain.com → your-server-ip`.
-(Or use just the IP for testing — HTTPS won't auto-provision without a domain.)
+---
 
-### 3. SSH into the server and deploy
+## 1. Deploy backend → Render
+
+1. Open **https://dashboard.render.com/select-repo?type=blueprint**
+2. Pick the `ankit6868/autotrade-hub` repo → **Connect**.
+3. Render auto-detects `render.yaml` and shows one service: `autotrade-backend`.
+4. Render will ask you to fill four `sync: false` env vars before the build starts:
+
+| Key                    | Value                                                                                                                            |
+|------------------------|----------------------------------------------------------------------------------------------------------------------------------|
+| `DATABASE_URL`         | `postgresql+psycopg://postgres.amprzizjsjqlnvopgkid:wDYb397laVk0qa0u@aws-1-ap-south-1.pooler.supabase.com:5432/postgres`         |
+| `CLERK_JWKS_URL`       | `https://square-bream-24.clerk.accounts.dev/.well-known/jwks.json`                                                               |
+| `CLERK_ISSUER`         | `https://square-bream-24.clerk.accounts.dev`                                                                                     |
+| `CORS_ALLOWED_ORIGINS` | `https://autotrade-hub.vercel.app` *(temporary placeholder — update after step 2)*                                               |
+
+> The other env vars (`APP_SECRET_KEY`, `ENV`, `ENABLE_DOCS`, `RUN_MIGRATIONS`, `APP_VERSION`) are auto-set by `render.yaml`.
+
+5. Click **Apply**. First build takes ~5–7 minutes (Docker layer + pip install).
+6. When status turns **Live**, copy the public URL — it will look like:
+   ```
+   https://autotrade-backend.onrender.com
+   ```
+7. Sanity check:
+   ```bash
+   curl https://autotrade-backend.onrender.com/api/health
+   # → {"status":"ok",...}
+   ```
+
+> **Note**: Render free tier sleeps after 15 minutes of inactivity. First request after sleep takes ~30 seconds to wake up. The frontend is configured to retry, so you'll just see a brief loading state.
+
+---
+
+## 2. Deploy frontend → Vercel
+
+1. Open **https://vercel.com/new**
+2. Pick `ankit6868/autotrade-hub` → **Import**.
+3. **Configure Project**:
+   - **Root Directory**: click *Edit* → `frontend`
+   - **Framework Preset**: Next.js *(auto-detected)*
+   - **Build Command**: leave default *(reads from vercel.json)*
+   - **Install Command**: leave default
+4. Expand **Environment Variables** and add:
+
+| Key                                  | Value                                                              |
+|--------------------------------------|--------------------------------------------------------------------|
+| `BACKEND_URL`                        | `https://autotrade-backend.onrender.com` *(from step 1.6)*         |
+| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`  | `pk_test_c3F1YXJlLWJyZWFtLTI0LmNsZXJrLmFjY291bnRzLmRldiQ`          |
+| `CLERK_SECRET_KEY`                   | `sk_test_S4VFkPnC5oeoXfklmhcesn7I5F7ulSusO8oyVEi9Yw`               |
+| `NEXT_PUBLIC_CLERK_SIGN_IN_URL`      | `/sign-in`                                                         |
+| `NEXT_PUBLIC_CLERK_SIGN_UP_URL`      | `/sign-up`                                                         |
+| `NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL`| `/`                                                                |
+| `NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL`| `/setup`                                                           |
+
+5. Click **Deploy**. Build takes ~2 minutes.
+6. Once live, Vercel gives you the URL — typically:
+   ```
+   https://autotrade-hub.vercel.app
+   ```
+   (or `https://autotrade-hub-<hash>-ankit6868s-projects.vercel.app` for previews).
+
+---
+
+## 3. Update CORS on Render
+
+The backend's `CORS_ALLOWED_ORIGINS` placeholder needs the **real** Vercel URL.
+
+1. Open **https://dashboard.render.com** → `autotrade-backend` → **Environment**.
+2. Edit `CORS_ALLOWED_ORIGINS` → set to your actual Vercel URL (comma-separated for multiple):
+   ```
+   https://autotrade-hub.vercel.app,https://autotrade-hub-git-main-ankit6868s-projects.vercel.app
+   ```
+3. **Save Changes** — Render redeploys automatically (~1 min).
+
+---
+
+## 4. Configure Clerk redirect URLs
+
+1. Open **https://dashboard.clerk.com** → your app → **Domains** / **Paths**.
+2. Add the Vercel domain to **Allowed redirect URLs**:
+   ```
+   https://autotrade-hub.vercel.app
+   https://autotrade-hub.vercel.app/sign-in
+   https://autotrade-hub.vercel.app/sign-up
+   ```
+3. Save.
+
+---
+
+## 5. Smoke test
+
 ```bash
-ssh root@your-server-ip
+# Backend up
+curl https://autotrade-backend.onrender.com/api/health
 
-# Upload your project (from your local machine)
-scp -r C:\Users\Ankit\Desktop\tradebot root@your-server-ip:/opt/tradebot
+# Frontend serves
+curl -I https://autotrade-hub.vercel.app
 
-# Or clone from GitHub if you pushed it:
-git clone https://github.com/YOUR/tradebot.git /opt/tradebot
-
-cd /opt/tradebot
+# Frontend → Backend rewrite (Vercel proxies /api/* to BACKEND_URL)
+curl https://autotrade-hub.vercel.app/api/health
 ```
 
-### 4. Configure environment
-```bash
-cp .env.prod.example .env.prod
-nano .env.prod
+In the browser:
+
+1. Go to `https://autotrade-hub.vercel.app`
+2. Sign up with email — Clerk handles auth.
+3. After sign-in, you should land on `/setup` (broker connect screen).
+4. Open DevTools → Network → confirm `/api/*` calls return 200.
+
+---
+
+## Troubleshooting
+
+**Backend build fails with `psycopg` error**
+The `DATABASE_URL` must use the `postgresql+psycopg://` scheme (not `postgres://` or `postgresql://`). Check `.deploy-creds.tmp` for the canonical string.
+
+**Frontend gets 401 from Clerk middleware**
+Confirm the `NEXT_PUBLIC_*` vars on Vercel match what's in Clerk dashboard. After changing env vars on Vercel, you must **Redeploy** for them to take effect (Settings → Deployments → ⋯ → Redeploy).
+
+**CORS errors in browser console**
+The backend `CORS_ALLOWED_ORIGINS` doesn't include your Vercel URL — re-do step 3 with the exact origin (no trailing slash).
+
+**Backend wakes slowly (~30s) on first request**
+Expected on Render free tier. Either upgrade to Starter ($7/mo, no sleep), or hit `/api/health` from an external pinger every 10 minutes (e.g. UptimeRobot free).
+
+**Want to switch DB regions / passwords**
+Edit `.deploy-creds.tmp`, regenerate the Supabase password in their dashboard, and update `DATABASE_URL` on Render.
+
+---
+
+## Quick reference — env vars at a glance
+
+### Render (backend)
+```
+DATABASE_URL=postgresql+psycopg://postgres.amprzizjsjqlnvopgkid:wDYb397laVk0qa0u@aws-1-ap-south-1.pooler.supabase.com:5432/postgres
+CLERK_JWKS_URL=https://square-bream-24.clerk.accounts.dev/.well-known/jwks.json
+CLERK_ISSUER=https://square-bream-24.clerk.accounts.dev
+CORS_ALLOWED_ORIGINS=https://autotrade-hub.vercel.app
+ENV=production
+ENABLE_DOCS=false
+RUN_MIGRATIONS=1
+APP_VERSION=1.0.0
+APP_SECRET_KEY=<auto-generated by render.yaml>
 ```
 
-Fill in these values:
-| Variable | How to get it |
-|---|---|
-| `APP_SECRET_KEY` | Run: `python3 -c "import secrets; print(secrets.token_hex(32))"` |
-| `POSTGRES_PASSWORD` | Any strong password, e.g. `openssl rand -base64 24` |
-| `DOMAIN` | Your domain, e.g. `trade.example.com` |
-| `CLERK_JWKS_URL` | Clerk Dashboard → API Keys → JWKS URL |
-| `CLERK_ISSUER` | Same page, Issuer URL |
-| `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` | Clerk Dashboard → Publishable key |
-| `CLERK_SECRET_KEY` | Clerk Dashboard → Secret key |
-
-### 5. Run the deploy script
-```bash
-chmod +x deploy.sh
-sudo ./deploy.sh
+### Vercel (frontend)
 ```
-
-That's it. Caddy auto-issues a Let's Encrypt SSL cert.
-Your app will be live at `https://trade.yourdomain.com`.
-
----
-
-## Option B — Railway (~$5/month, easiest cloud)
-
-Best for: quick testing, no server management.
-
-1. Push your code to GitHub
-2. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub
-3. Select the repo
-4. Railway auto-detects `railway.toml` and builds the backend
-5. Add a **PostgreSQL** service (click Add → Database → PostgreSQL)
-6. Set environment variables in Railway dashboard (same as `.env.prod` values)
-7. For the frontend: create a second service → select the `frontend/` directory
-
----
-
-## Option C — Render (Free tier available)
-
-Best for: zero cost testing (sleeps after 15 min idle).
-
-1. Push to GitHub
-2. Go to [render.com](https://render.com) → New → Blueprint
-3. Select your repo — Render reads `render.yaml` automatically
-4. Fill in the env vars in the Render dashboard
-5. Deploy
-
-> ⚠️ Free tier services sleep after 15 min — not suitable for real trading.
-> Upgrade to Starter ($7/mo) for always-on.
-
----
-
-## Updating after changes
-
-```bash
-# On the VPS:
-cd /opt/tradebot
-git pull
-docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+BACKEND_URL=https://autotrade-backend.onrender.com
+NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=pk_test_c3F1YXJlLWJyZWFtLTI0LmNsZXJrLmFjY291bnRzLmRldiQ
+CLERK_SECRET_KEY=sk_test_S4VFkPnC5oeoXfklmhcesn7I5F7ulSusO8oyVEi9Yw
+NEXT_PUBLIC_CLERK_SIGN_IN_URL=/sign-in
+NEXT_PUBLIC_CLERK_SIGN_UP_URL=/sign-up
+NEXT_PUBLIC_CLERK_AFTER_SIGN_IN_URL=/
+NEXT_PUBLIC_CLERK_AFTER_SIGN_UP_URL=/setup
 ```
-
----
-
-## Useful commands
-
-```bash
-# View logs
-docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f
-
-# View just backend logs
-docker compose -f docker-compose.prod.yml --env-file .env.prod logs -f backend
-
-# Stop everything
-docker compose -f docker-compose.prod.yml --env-file .env.prod down
-
-# Restart a single service
-docker compose -f docker-compose.prod.yml --env-file .env.prod restart backend
-
-# Run database migrations manually
-docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend alembic upgrade head
-
-# Open a shell in the backend container
-docker compose -f docker-compose.prod.yml --env-file .env.prod exec backend bash
-```
-
----
-
-## What gets deployed
-
-| Service | Port | Description |
-|---|---|---|
-| `caddy` | 80, 443 | HTTPS reverse proxy, auto SSL |
-| `frontend` | 3000 (internal) | Next.js app |
-| `backend` | 8000 (internal) | FastAPI + trading engine |
-| `postgres` | 5432 (internal) | PostgreSQL database |
-
-Only Caddy is exposed to the internet. Everything else is on a private Docker network.
-
----
-
-## Clerk setup for production
-
-1. Go to [dashboard.clerk.com](https://dashboard.clerk.com)
-2. Create a production application (or use existing)
-3. Add your domain to **Allowed origins**: `https://trade.yourdomain.com`
-4. Copy the **Publishable key** → `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
-5. Copy the **Secret key** → `CLERK_SECRET_KEY`
-6. Copy **JWKS URL** → `CLERK_JWKS_URL`
-7. Copy **Issuer** → `CLERK_ISSUER`
-
----
-
-## Minimum server specs
-
-| Plan | Specs | Suitable for |
-|---|---|---|
-| Dev/Testing | 1 vCPU, 1 GB RAM | Paper trading only |
-| Production | 2 vCPU, 2 GB RAM | Live trading, up to 10 users |
-| Scale | 4 vCPU, 4 GB RAM | 10–50 users |
