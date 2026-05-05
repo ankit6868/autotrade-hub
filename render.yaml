@@ -12,11 +12,16 @@
 
 services:
   # ── FastAPI Backend ───────────────────────────────────────────────────────
+  # Region note: KuCoin (and most major exchanges) geo-block US IPs. The
+  # backend MUST run from a non-US region or every API call to the exchange
+  # will fail with "Our services are currently unavailable in the U.S."
+  # Singapore is the best choice — closest to KuCoin's HK infrastructure
+  # and also closest to our Mumbai (ap-south-1) Supabase Postgres.
   - type: web
     name: autotrade-backend
     runtime: docker
     plan: free
-    region: oregon
+    region: singapore
     dockerfilePath: ./Dockerfile.backend
     healthCheckPath: /api/health
     envVars:
