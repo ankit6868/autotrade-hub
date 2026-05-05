@@ -50,10 +50,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               "
             >
               <div className="container-app px-3 xs:px-4 sm:px-6 lg:px-8 2xl:px-10">
+                {/* Desktop only: account button (UserButton) at top right.
+                    On mobile the floating button collided with the hamburger
+                    icon, so the sign-out action was moved into the sidebar
+                    footer (see Sidebar.tsx → SidebarSignOut). */}
                 <div className="hidden md:flex justify-end pt-6 mb-2">
-                  <HeaderUser />
-                </div>
-                <div className="md:hidden absolute top-3 right-4 z-50">
                   <HeaderUser />
                 </div>
                 <div className="animate-fade-in">

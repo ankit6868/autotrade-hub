@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
+import { SidebarSignOut } from '@/components/AuthShell';
 
 const nav = [
   { href: '/', label: 'Dashboard', icon: '⚡' },
@@ -180,8 +181,9 @@ export default function Sidebar() {
           })}
         </nav>
 
-        {/* Footer / emergency stop */}
-        <div className="p-3 border-t border-white/[0.06]">
+        {/* Footer / sign out + emergency stop */}
+        <div className="p-3 border-t border-white/[0.06] space-y-2">
+          <SidebarSignOut />
           <button
             onClick={async () => {
               if (confirm('EMERGENCY STOP: This will halt all trading immediately. Continue?')) {

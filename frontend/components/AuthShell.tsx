@@ -78,14 +78,29 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
   );
 }
 
-// Custom dropdown that uses useClerk().signOut() directly, with an explicit
-// hard-redirect to /sign-in. We use this instead of <UserButton/>'s built-in
-// "Sign out" item because the popover's React tree is unmounted the instant
-// the session is destroyed (since AuthGate flips to SignedOutLanding), which
-// can interrupt UserButton's internal navigation. Calling signOut with
-// redirectUrl gives Clerk a chance to do a hard window.location redirect
-// before any tree unmounts.
 function HeaderUserInner() {
+  const { isLoaded, isSignedIn } = useAuth();
+  if (!isLoaded || !isSignedIn) return null;
+  // afterSignOutUrl is set on ClerkProvider above (v7), which makes the
+  // built-in "Sign out" item in the UserButton popover redirect properly.
+  return <UserButton />;
+}
+
+export function HeaderUser() {
+  if (!PUB_KEY) return null;
+  return <HeaderUserInner />;
+}
+
+/**
+ * Standalone "Sign out" button suitable for nav drawers / sidebars.
+ *
+ * Used by the mobile sidebar (where <UserButton/> would otherwise sit
+ * behind the hamburger menu icon and be unreachable). Calls
+ * useClerk().signOut() with an explicit redirectUrl so the redirect
+ * fires before any React tree unmounts can interrupt it. Falls back
+ * to a hard window.location navigation if signOut() rejects.
+ */
+function SidebarSignOutInner() {
   const { isLoaded, isSignedIn } = useAuth();
   const clerk = useClerk();
   if (!isLoaded || !isSignedIn) return null;
@@ -94,28 +109,44 @@ function HeaderUserInner() {
     try {
       await clerk.signOut({ redirectUrl: AFTER_SIGN_OUT_URL });
     } catch {
-      // Fall back to a hard navigation if Clerk's redirect fails for any
-      // reason (network, racing component unmount, etc.).
       window.location.href = AFTER_SIGN_OUT_URL;
     }
   };
 
   return (
-    <div className="flex items-center gap-2">
-      <UserButton showName={false} />
-      <button
-        type="button"
-        onClick={handleSignOut}
-        className="text-xs text-slate-400 hover:text-slate-200 underline-offset-2 hover:underline"
-        aria-label="Sign out"
+    <button
+      type="button"
+      onClick={handleSignOut}
+      className="
+        w-full flex items-center justify-center gap-2
+        px-3 py-2.5 rounded-xl text-sm font-medium
+        text-slate-200 bg-white/[0.04] hover:bg-white/[0.08]
+        active:scale-[0.98] transition
+        border border-white/[0.06]
+      "
+      aria-label="Sign out"
+    >
+      <svg
+        width="16"
+        height="16"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        aria-hidden="true"
       >
-        Sign out
-      </button>
-    </div>
+        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+        <polyline points="16 17 21 12 16 7" />
+        <line x1="21" y1="12" x2="9" y2="12" />
+      </svg>
+      <span>Sign out</span>
+    </button>
   );
 }
 
-export function HeaderUser() {
+export function SidebarSignOut() {
   if (!PUB_KEY) return null;
-  return <HeaderUserInner />;
+  return <SidebarSignOutInner />;
 }
