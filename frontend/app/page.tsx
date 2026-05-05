@@ -8,6 +8,7 @@ import SignalsPanel from '@/components/dashboard/SignalsPanel';
 import RiskMonitor from '@/components/dashboard/RiskMonitor';
 import TradingViewWidget from '@/components/charts/TradingViewWidget';
 import TradingViewTicker from '@/components/charts/TradingViewTicker';
+import { SidebarSignOut } from '@/components/AuthShell';
 import Link from 'next/link';
 
 const PAIR_TO_TV: Record<string, string> = {
@@ -288,6 +289,14 @@ export default function Dashboard() {
             </div>
           </>
         )}
+      </div>
+
+      {/* Mobile-only Sign out at end of dashboard.
+          Desktop already shows UserButton in the top-right and the
+          sidebar footer, so this is a fallback for mobile browsers
+          where the bottom URL bar can hide the sidebar Sign out. */}
+      <div className="md:hidden pt-2 pb-4">
+        <SidebarSignOut />
       </div>
     </div>
   );
