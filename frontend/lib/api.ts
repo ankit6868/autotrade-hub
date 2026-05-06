@@ -97,6 +97,11 @@ export const api = {
     },
     forceClose: (id: number) => request<any>(`/api/trade/force-close/${id}`, { method: 'POST' }),
     emergencyStop: () => request<any>('/api/trade/emergency-stop', { method: 'POST' }),
+    manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stake = 0) =>
+      request<any>('/api/trade/manual-entry', {
+        method: 'POST',
+        body: JSON.stringify({ pair, direction, stake }),
+      }),
   },
 
   market: {

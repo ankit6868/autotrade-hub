@@ -516,6 +516,58 @@ class NativeTradingEngine:
                 for p in self.positions.values()
             ]
 
+    def manual_entry(self, pair: str, direction: str = "long",
+                     stake_override: float = 0) -> dict:
+        """Immediately enter a paper position at the current market price.
+
+        Used by the 'Buy Now / Sell Now' manual trade buttons on the UI.
+        Fetches the current price from KuCoin, computes SL/TP from the
+        configured stoploss (3%), then records the position exactly as the
+        automated loop would.
+        """
+        try:
+            symbol = pair.replace("/", "-")
+            data = _kucoin_get(f"/api/v1/market/orderbook/level1", {"symbol": symbol})
+            if str(data.get("code")) != "200000":
+                return {"error": f"KuCoin price error: {data.get('msg')}"}
+            price = float(data["data"]["price"])
+        except Exception as e:
+            return {"error": f"Could not fetch price for {pair}: {e}"}
+
+        stake = stake_override or self.balance * self._risk_pct
+        if stake <= 0 or stake > self.balance:
+            return {"error": "Insufficient balance"}
+
+        sl_dist = price * abs(self._stoploss)   # e.g. 3% of price
+        if direction == "long":
+            sl = price - sl_dist
+            tp = price + sl_dist * 3             # 1:3 R:R
+        else:
+            sl = price + sl_dist
+            tp = price - sl_dist * 3
+
+        with self._lock:
+            if pair in self.positions:
+                return {"error": f"Already have an open position in {pair}"}
+            pos = Position(
+                pair=pair, direction=direction,
+                entry=price, sl=sl, tp=tp, size=stake,
+                opened_at=datetime.now(timezone.utc),
+            )
+            self.positions[pair] = pos
+            self.balance -= stake
+
+        return {
+            "entered": True,
+            "pair": pair,
+            "direction": direction,
+            "entry": round(price, 6),
+            "sl": round(sl, 6),
+            "tp": round(tp, 6),
+            "stake": round(stake, 2),
+            "mode": self._mode,
+        }
+
     # ── internal loop ───────────────────────────────────────────────────
 
     def _run_loop(self):

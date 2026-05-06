@@ -183,12 +183,36 @@ export default function SignalsPanel({ pair = 'BTC/USDT', interval = '15m', comp
     setAutoSellLoading(false);
   }
 
-  // ── Go to Buy/Sell trade page ─────────────────────────────────────────────────────────────────────
-  function goTrade(action: 'buy' | 'sell') {
+  // Execute state
+  const [tradeLoading, setTradeLoading] = useState(false);
+  const [tradeResult, setTradeResult] = useState<{ok?: boolean; msg?: string} | null>(null);
+
+  // ── Execute immediate paper/live trade ────────────────────────────────────────────────────────────
+  async function goTrade(action: 'buy' | 'sell') {
     const mode = action === 'buy' ? buyMode : sellMode;
-    const base = mode === 'paper' ? '/paper-trade' : '/live';
-    const q = new URLSearchParams({ pair: selectedPair, timeframe: selectedInterval, action });
-    router.push(`${base}?${q.toString()}`);
+    if (mode === 'live') {
+      // Live trade always goes to the live page for proper confirmation
+      const q = new URLSearchParams({ pair: selectedPair, timeframe: selectedInterval, action });
+      router.push(`/live?${q.toString()}`);
+      setShowBuyModal(false);
+      setShowSellModal(false);
+      return;
+    }
+    // Paper mode — execute immediately via the manual-entry endpoint
+    setTradeLoading(true);
+    try {
+      const direction = action === 'buy' ? 'long' : 'short';
+      const res = await api.trade.manualEntry(selectedPair, direction);
+      if (res?.entered) {
+        setTradeResult({ ok: true, msg: `${action === 'buy' ? 'Bought' : 'Sold'} ${selectedPair} @ ${res.entry} | SL: ${res.sl} | TP: ${res.tp}` });
+      } else {
+        setTradeResult({ ok: false, msg: res?.error || 'Trade failed' });
+      }
+    } catch (e: unknown) {
+      setTradeResult({ ok: false, msg: String(e) });
+    }
+    setTradeLoading(false);
+    setTimeout(() => setTradeResult(null), 5000);
     setShowBuyModal(false);
     setShowSellModal(false);
   }
@@ -314,7 +338,8 @@ export default function SignalsPanel({ pair = 'BTC/USDT', interval = '15m', comp
 
           <button
             onClick={() => goTrade(action)}
-            className={`w-full py-3 rounded-xl font-bold text-sm mb-3 transition-all ${
+            disabled={tradeLoading}
+            className={`w-full py-3 rounded-xl font-bold text-sm mb-3 transition-all disabled:opacity-50 ${
               mode === 'paper'
                 ? isBuy
                   ? 'bg-brand-600 hover:bg-brand-500 text-white'
@@ -322,7 +347,9 @@ export default function SignalsPanel({ pair = 'BTC/USDT', interval = '15m', comp
                 : 'bg-red-600 hover:bg-red-500 text-white'
             }`}
           >
-            {isBuy ? '⚡' : '📉'} Go to {mode === 'paper' ? 'Paper' : 'Live'} Trade →
+            {tradeLoading ? '⏳ Executing...' : mode === 'paper'
+              ? `${isBuy ? '⚡ Execute Paper Buy' : '📉 Execute Paper Sell'} — ${selectedPair}`
+              : `${isBuy ? '⚡' : '📉'} Go to Live Trade →`}
           </button>
 
           <button onClick={onClose} className="w-full py-2 text-slate-400 hover:text-white text-sm transition-colors">
@@ -573,6 +600,17 @@ export default function SignalsPanel({ pair = 'BTC/USDT', interval = '15m', comp
             </div>
           )}
         </>
+      )}
+
+      {/* Trade execution result banner */}
+      {tradeResult && (
+        <div className={`mt-4 p-3 rounded-xl text-sm font-medium border ${
+          tradeResult.ok
+            ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-300'
+            : 'bg-red-500/15 border-red-500/40 text-red-300'
+        }`}>
+          {tradeResult.ok ? '✅' : '❌'} {tradeResult.msg}
+        </div>
       )}
 
       {/* Modals */}

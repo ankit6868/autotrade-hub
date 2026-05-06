@@ -208,6 +208,45 @@ async def get_trade_history(user_id: str = Depends(get_user_id)):
     return {"trades": native_engine_registry.for_user(user_id).get_trades()}
 
 
+class ManualEntryRequest(BaseModel):
+    pair: str = "BTC/USDT"
+    direction: str = "long"   # "long" or "short"
+    stake: float = 0          # 0 = use engine's default risk_pct
+
+
+@router.post("/manual-entry")
+def manual_entry(
+    req: ManualEntryRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Immediately enter a paper position at the current live market price.
+    Used by the Buy Now / Sell Now manual buttons in the UI.
+    The bot does NOT need to be running to use this — it starts a
+    lightweight in-memory session automatically if needed.
+    """
+    from backend.services.native_trading_engine import native_engine_registry
+    eng = native_engine_registry.for_user(user_id)
+
+    # Auto-start in paper mode if not already running
+    if not eng.is_running:
+        cfg = db.execute(
+            select(Config).where(Config.user_id == user_id).limit(1)
+        ).scalar_one_or_none()
+        wallet = (cfg.bot_wallet or 1000.0) if cfg else 1000.0
+        stoploss = (cfg.bot_stoploss or -0.03) if cfg else -0.03
+        eng._wallet  = wallet
+        eng._stoploss = stoploss
+        eng._risk_pct = (cfg.max_position_pct or 5.0) / 100.0 if cfg else 0.05
+        eng.balance  = eng.balance if eng.balance > 0 else wallet
+        eng._mode    = "paper"
+
+    result = eng.manual_entry(req.pair, req.direction, req.stake)
+    log_event(db, user_id, "trade.manual_entry", None,
+              payload={"pair": req.pair, "direction": req.direction, "result": result})
+    return result
+
+
 @router.post("/sync")
 def sync_from_freqtrade(
     db: Session = Depends(get_db),
