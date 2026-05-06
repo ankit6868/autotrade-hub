@@ -121,12 +121,18 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
     try {
       const [sigData, histData] = await Promise.all([
         api.market.signals(pair, timeframe) as Promise<{ summary?: { recommendation: string }; indicators?: Record<string, number | null> }>,
-        api.trade.history({ mode: 'paper', limit: '100' }) as Promise<{ trades: Array<{ profit_abs: number; close_date: string }> }>,
+        api.trade.history({ mode: 'paper', limit: '100' }) as Promise<{ trades: Array<{ profit_abs: number; close_date: string; exit_reason?: string; open_reason?: string }> }>,
       ]);
       const rec = sigData?.summary?.recommendation || 'NEUTRAL';
-      const trades = histData?.trades || [];
-      const lastTrade = trades.length > 0 ? (trades[0]?.close_date || null) : null;
-      setStatus(buildStatus(strategyName, sigData?.indicators, rec, trades.length, lastTrade));
+      const allTrades = histData?.trades || [];
+      // "Fired" = strategy auto-entered, NOT manually force-closed by user
+      const strategyTrades = allTrades.filter(
+        (t) => t.exit_reason !== 'force_closed' && t.open_reason !== 'manual'
+      );
+      const lastTrade = strategyTrades.length > 0
+        ? (strategyTrades[0]?.close_date || null)
+        : null;
+      setStatus(buildStatus(strategyName, sigData?.indicators, rec, strategyTrades.length, lastTrade));
     } catch {
       setStatus(null);
     }
@@ -215,8 +221,8 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
                 />
               </div>
             </div>
-            <div className="text-right">
-              <div className="text-xs text-slate-400">Fired total</div>
+            <div className="text-right" title="Auto-entries by the strategy (excludes manually force-closed trades)">
+              <div className="text-xs text-slate-400">Auto-fired</div>
               <div className="text-xl font-bold text-white">{status.fireCount}</div>
             </div>
           </div>
@@ -239,12 +245,12 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
             ))}
           </div>
 
-          {/* Last fired + stats */}
+          {/* Last auto-fired + stats */}
           {status.fireCount > 0 && (
             <div className="flex gap-3 mb-4 text-xs text-slate-400">
-              <span>Last fired: <span className="text-white">{status.lastFired ? new Date(status.lastFired).toLocaleString() : 'N/A'}</span></span>
+              <span>Last auto-trade: <span className="text-white">{status.lastFired ? new Date(status.lastFired).toLocaleString() : 'N/A'}</span></span>
               <span className="text-slate-600">|</span>
-              <span>Total trades: <span className="text-white">{status.fireCount}</span></span>
+              <span>Strategy wins: <span className="text-white">{status.fireCount}</span></span>
             </div>
           )}
 
