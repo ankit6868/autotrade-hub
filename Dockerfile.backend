@@ -1,13 +1,14 @@
 # syntax=docker/dockerfile:1.7
 # ---- Builder ----------------------------------------------------------------
-FROM python:3.12-slim AS builder
+# Pin to bookworm (Debian 12 stable) — libta-lib-dev 0.4.0 is in bookworm/main.
+# Do NOT use plain python:3.12-slim which may resolve to trixie (Debian 13).
+FROM python:3.12-slim-bookworm AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Build deps: C extensions (psycopg, cryptography) + TA-Lib headers
-# libta-lib-dev is in Debian Bookworm — no source compilation needed (~30s vs ~10min)
+# Build deps: C extensions + TA-Lib dev headers (pre-packaged, no source compile)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
@@ -24,14 +25,14 @@ RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install "freqtrade>=2024.1"
 
 # ---- Runtime ---------------------------------------------------------------
-FROM python:3.12-slim AS runtime
+FROM python:3.12-slim-bookworm AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH"
 
 # libpq for psycopg, curl for healthcheck, tini for PID1.
-# libta-lib0 provides the TA-Lib shared library that freqtrade needs at runtime.
+# libta-lib0 provides the shared library freqtrade needs at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         curl \
