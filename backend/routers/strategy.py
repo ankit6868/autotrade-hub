@@ -50,8 +50,11 @@ def _get_openrouter_key(db: Session, user_id: str) -> str:
         raise ValueError("OpenRouter key not configured. Visit /setup to add one.")
     try:
         return decrypt(config.openrouter_key_enc, user_id)
-    except DecryptError as e:
-        raise ValueError(str(e))
+    except DecryptError:
+        raise ValueError(
+            "Your OpenRouter API key could not be decrypted (server secret changed). "
+            "Please go to Setup and re-enter your OpenRouter key to continue."
+        )
 
 
 def _get_preferred_model(db: Session, user_id: str) -> str:

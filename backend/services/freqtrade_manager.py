@@ -30,6 +30,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import httpx          # used for KuCoin OHLCV download (no requests needed)
+import pandas as pd   # used for DataFrame construction in _download_pair_from_kucoin
+
 FREQTRADE_PATH = os.getenv("FREQTRADE_PATH", "freqtrade")
 FREQTRADE_USERDIR_ROOT = os.getenv("FREQTRADE_USERDIR", "./user_data")
 
@@ -371,12 +374,6 @@ class FreqtradeManager:
 
         Returns None on success, error dict on failure.
         """
-        try:
-            import httpx  # already in requirements.txt
-            import pandas as pd
-        except ImportError as e:
-            return {"error": f"Missing dependency for data download: {e}"}
-
         kline_type, tf_secs = self._TF_INFO.get(timeframe, ("15min", 900))
         symbol = pair.replace("/", "-")          # BTC/USDT → BTC-USDT
         chunk_secs = 1500 * tf_secs              # KuCoin max 1 500 candles/request
