@@ -222,6 +222,26 @@ def get_open_trades(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
+    from backend.services.native_trading_engine import native_engine_registry
+
+    # 1. Native engine open positions (paper/live bot running in this container)
+    native_positions = native_engine_registry.for_user(user_id).get_open_positions()
+    native_trades = [
+        {
+            "id": f"native-{p['pair']}",
+            "pair": p["pair"],
+            "side": "long" if p.get("direction") == "long" else "short",
+            "entry_price": p.get("entry"),
+            "amount": p.get("stake", 0),
+            "stoploss_price": p.get("sl"),
+            "entry_time": p.get("opened_at"),
+            "mode": "paper",
+            "unrealized_pnl": 0,
+        }
+        for p in native_positions
+    ]
+
+    # 2. DB-persisted trades (from Freqtrade sync or previous sessions)
     try:
         sync_trades(db, user_id)
     except Exception:
@@ -231,22 +251,25 @@ def get_open_trades(
         .where(Trade.status == "open", Trade.user_id == user_id)
         .order_by(desc(Trade.entry_time))
     )
-    trades = result.scalars().all()
-    return {
-        "trades": [
-            {
-                "id": t.id,
-                "pair": t.pair,
-                "side": t.side,
-                "entry_price": t.entry_price,
-                "amount": t.amount,
-                "stoploss_price": t.stoploss_price,
-                "entry_time": str(t.entry_time),
-                "mode": t.mode,
-            }
-            for t in trades
-        ]
-    }
+    db_trades = [
+        {
+            "id": t.id,
+            "pair": t.pair,
+            "side": t.side,
+            "entry_price": t.entry_price,
+            "amount": t.amount,
+            "stoploss_price": t.stoploss_price,
+            "entry_time": str(t.entry_time),
+            "mode": t.mode,
+            "unrealized_pnl": 0,
+        }
+        for t in result.scalars().all()
+    ]
+
+    # Merge: native positions take priority; avoid duplicates by pair
+    pairs_in_native = {p["pair"] for p in native_positions}
+    merged = native_trades + [t for t in db_trades if t["pair"] not in pairs_in_native]
+    return {"trades": merged}
 
 
 @router.get("/history")
@@ -258,6 +281,31 @@ def get_trade_history(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
+    from backend.services.native_trading_engine import native_engine_registry
+
+    # 1. In-memory closed trades from native engine (current session)
+    native_closed = native_engine_registry.for_user(user_id).get_trades()
+    native_trade_list = [
+        {
+            "id": f"native-{i}",
+            "pair": t.get("pair"),
+            "side": t.get("direction", "long"),
+            "entry_price": t.get("open_rate"),
+            "exit_price": t.get("close_rate"),
+            "amount": t.get("stake", 0),
+            "profit_pct": t.get("profit_pct", 0),
+            "profit_abs": t.get("profit_abs", 0),
+            "entry_time": t.get("open_date"),
+            "exit_time": t.get("close_date"),
+            "exit_reason": t.get("exit_reason"),
+            "mode": "paper",
+            "strategy_id": None,
+        }
+        for i, t in enumerate(native_closed)
+        if not mode or mode == "paper"
+    ]
+
+    # 2. DB-persisted trades from Freqtrade sync / previous sessions
     try:
         sync_trades(db, user_id)
     except Exception:
@@ -267,36 +315,33 @@ def get_trade_history(
         .where(Trade.status == "closed", Trade.user_id == user_id)
         .order_by(desc(Trade.exit_time))
     )
-
     if mode:
         query = query.where(Trade.mode == mode)
     if strategy_id:
         query = query.where(Trade.strategy_id == strategy_id)
-
     query = query.limit(limit).offset(offset)
-    result = db.execute(query)
-    trades = result.scalars().all()
+    db_trades = [
+        {
+            "id": t.id,
+            "pair": t.pair,
+            "side": t.side,
+            "entry_price": t.entry_price,
+            "exit_price": t.exit_price,
+            "amount": t.amount,
+            "profit_pct": t.profit_pct,
+            "profit_abs": t.profit_abs,
+            "entry_time": str(t.entry_time),
+            "exit_time": str(t.exit_time),
+            "exit_reason": t.exit_reason,
+            "mode": t.mode,
+            "strategy_id": t.strategy_id,
+        }
+        for t in db.execute(query).scalars().all()
+    ]
 
-    return {
-        "trades": [
-            {
-                "id": t.id,
-                "pair": t.pair,
-                "side": t.side,
-                "entry_price": t.entry_price,
-                "exit_price": t.exit_price,
-                "amount": t.amount,
-                "profit_pct": t.profit_pct,
-                "profit_abs": t.profit_abs,
-                "entry_time": str(t.entry_time),
-                "exit_time": str(t.exit_time),
-                "exit_reason": t.exit_reason,
-                "mode": t.mode,
-                "strategy_id": t.strategy_id,
-            }
-            for t in trades
-        ]
-    }
+    # Merge native + DB trades, native first (most recent session)
+    merged = native_trade_list + db_trades
+    return {"trades": merged[:limit]}
 
 
 @router.post("/force-close/{trade_id}")
