@@ -57,12 +57,16 @@ def start_trading(
             strategy_name = line.split("(")[0].replace("class ", "").strip()
             break
 
-    # Use Freqtrade if available, otherwise fall back to native engine
+    # Use Freqtrade if actually importable; otherwise use the native engine.
+    # shutil.which / path checks are unreliable when FREQTRADE_PATH points to
+    # a non-existent file (e.g. /opt/venv/bin/freqtrade on Railway without it).
     from backend.services.native_trading_engine import native_engine_registry
-    from backend.services.freqtrade_manager import _resolve_freqtrade_cmd
-    import shutil
-    _ft_cmd = _resolve_freqtrade_cmd()
-    _ft_available = bool(_ft_cmd and _ft_cmd[0] != "freqtrade" or shutil.which("freqtrade"))
+    try:
+        import freqtrade as _ft_mod  # noqa: F401
+        _ft_available = True
+    except ImportError:
+        _ft_available = False
+
     if _ft_available:
         mgr_engine = freqtrade_mgr.for_user(user_id)
         _use_native = False
