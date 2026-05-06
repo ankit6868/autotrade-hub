@@ -223,11 +223,18 @@ function PaperTradeInner() {
       : 0;
   const isRunning = Boolean(botStatus.running);
 
-  // Compute unrealized P&L for open trades
+  // Compute unrealized P&L for open trades.
+  // The backend returns unrealized_pnl directly when available (native engine).
+  // Fallback: stake * (current - entry) / entry  (amount field = USDT stake, not BTC qty)
   function getUnrealizedPnl(t: Record<string, unknown>): number {
+    if (t.unrealized_pnl !== undefined && t.unrealized_pnl !== null) {
+      return Number(t.unrealized_pnl);
+    }
     const current = currentPrices[String(t.pair)] || 0;
-    if (!current) return 0;
-    return (current - Number(t.entry_price)) * Number(t.amount);
+    const entry = Number(t.entry_price);
+    const stake = Number(t.amount);   // amount = USDT stake
+    if (!current || !entry || !stake) return 0;
+    return stake * (current - entry) / entry;
   }
 
   const totalUnrealizedPnl = openTrades.reduce((sum, t) => sum + getUnrealizedPnl(t), 0);

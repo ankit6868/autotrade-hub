@@ -205,12 +205,16 @@ function LiveTradingInner() {
   }
 
   function getUnrealizedPnl(t: Record<string, unknown>): number {
+    // Use backend-computed value when available (most accurate)
+    if (t.unrealized_pnl !== undefined && t.unrealized_pnl !== null) {
+      return Number(t.unrealized_pnl);
+    }
     const pair = String(t.pair);
     const entry = Number(t.entry_price) || 0;
-    const amount = Number(t.amount) || 0;
+    const stake = Number(t.amount) || 0;  // amount = USDT stake, not BTC qty
     const cur = currentPrices[pair] || 0;
-    if (!cur || !entry) return 0;
-    return (cur - entry) * amount;
+    if (!cur || !entry || !stake) return 0;
+    return stake * (cur - entry) / entry;
   }
 
   const totalPnl = tradeHistory.reduce((sum, t) => sum + (Number(t.profit_abs) || 0), 0);
