@@ -6,27 +6,14 @@ ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Build deps: C extensions (psycopg, cryptography) + TA-Lib compilation
+# Build deps: C extensions (psycopg, cryptography) + TA-Lib headers
+# libta-lib-dev is in Debian Bookworm — no source compilation needed (~30s vs ~10min)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
         curl \
-        wget \
-        autoconf \
-        automake \
-        libtool \
-        pkg-config \
+        libta-lib-dev \
     && rm -rf /var/lib/apt/lists/*
-
-# ── Install TA-Lib C library from source (required by freqtrade) ─────────────
-RUN wget -q https://github.com/ta-lib/ta-lib/releases/download/v0.4.0/ta-lib-0.4.0-src.tar.gz \
-    && tar -xzf ta-lib-0.4.0-src.tar.gz \
-    && cd ta-lib \
-    && ./configure --prefix=/usr \
-    && make -j$(nproc) \
-    && make install \
-    && ldconfig \
-    && cd .. && rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
 WORKDIR /build
 
@@ -44,18 +31,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
 # libpq for psycopg, curl for healthcheck, tini for PID1.
-# Also copy TA-Lib shared lib so freqtrade works at runtime.
+# libta-lib0 provides the TA-Lib shared library that freqtrade needs at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         curl \
         tini \
+        libta-lib0 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1001 app \
     && useradd  --system --uid 1001 --gid app --home /app --shell /usr/sbin/nologin app
-
-# Copy TA-Lib shared libraries from builder so Python can find them at runtime
-COPY --from=builder /usr/lib/libta_lib.so* /usr/lib/
-RUN ldconfig
 
 COPY --from=builder /opt/venv /opt/venv
 
