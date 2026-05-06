@@ -8,6 +8,7 @@ import MetricCard from '@/components/ui/MetricCard';
 import StatusBadge from '@/components/ui/StatusBadge';
 import TradingViewWidget from '@/components/charts/TradingViewWidget';
 import SignalsPanel from '@/components/dashboard/SignalsPanel';
+import StrategySignalMonitor from '@/components/dashboard/StrategySignalMonitor';
 import PairPicker from '@/components/ui/PairPicker';
 import SignalContextPanel from '@/components/dashboard/SignalContextPanel';
 
@@ -482,6 +483,18 @@ function LiveTradingInner() {
         <MetricCard title="Win Rate" value={`${winRate.toFixed(1)}%`} />
         <MetricCard title="Total Trades" value={tradeHistory.length} />
       </div>
+
+      {/* Strategy Signal Monitor */}
+      {strategyId && (
+        <StrategySignalMonitor
+          strategyName={String(botStatus.strategy || strategies.find((s: {id: number; name: string}) => s.id === strategyId)?.name || 'Strategy')}
+          pair={pairs[0] || 'BTC/USDT'}
+          timeframe={timeframe}
+          isRunning={isRunning}
+          onManualBuy={() => refreshData()}
+          onManualSell={() => refreshData()}
+        />
+      )}
 
       {/* Live Chart + Signals */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
