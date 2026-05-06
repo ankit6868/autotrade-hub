@@ -49,7 +49,26 @@ def run_backtest(
         starting_balance=req.starting_balance,
     )
 
+    # If Freqtrade is not available or fails (common on Railway where the
+    # freqtrade subprocess is not installed), fall back to the native
+    # Python backtester which uses only stdlib + pandas.
     if "error" in bt_result:
+        ft_err = bt_result["error"]
+        use_native = any(k in ft_err.lower() for k in [
+            "freqtrade not found", "no such file", "filenotfound",
+            "could not load markets", "exchangenotavailable",
+            "temporaryerror", "missing dependency",
+        ])
+        if use_native:
+            from backend.services import native_backtester
+            return native_backtester.run(
+                strategy_name=strategy_name,
+                pairs=req.pairs,
+                timeframe=req.timeframe,
+                timerange=req.timerange,
+                stoploss=req.stoploss,
+                starting_balance=req.starting_balance,
+            )
         return bt_result
 
     # Parse results

@@ -8,12 +8,15 @@ ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Build deps: C extensions + TA-Lib dev headers (pre-packaged, no source compile)
+# Build deps: only C extensions needed for psycopg/cryptography.
+# TA-Lib and freqtrade are NOT installed here — the app uses its own
+# native Python backtester (pandas-based) which needs no C libraries.
+# Freqtrade subprocess is used as an optional enhancement when available
+# at the FREQTRADE_PATH env var; the app degrades gracefully without it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
         curl \
-        libta-lib-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -21,8 +24,7 @@ WORKDIR /build
 COPY requirements.txt .
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
-    && /opt/venv/bin/pip install -r requirements.txt \
-    && /opt/venv/bin/pip install "freqtrade>=2024.1"
+    && /opt/venv/bin/pip install -r requirements.txt
 
 # ---- Runtime ---------------------------------------------------------------
 FROM python:3.12-slim-bookworm AS runtime
@@ -37,7 +39,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         curl \
         tini \
-        libta-lib0 \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1001 app \
     && useradd  --system --uid 1001 --gid app --home /app --shell /usr/sbin/nologin app
