@@ -564,7 +564,7 @@ function LiveTradingInner() {
                         <button
                           onClick={async () => {
                             if (confirm(`Force close ${pair} position? This will sell at market price using REAL money.`)) {
-                              await api.trade.forceClose(Number(t.id));
+                              await api.trade.forceClose(t.id);
                               refreshData();
                             }
                           }}

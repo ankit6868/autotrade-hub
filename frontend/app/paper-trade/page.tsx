@@ -164,7 +164,7 @@ function PaperTradeInner() {
     }
   }
 
-  async function forceClose(tradeId: number) {
+  async function forceClose(tradeId: string | number) {
     if (!confirm('Close this position now? This will mark the trade as closed at current price.')) return;
     try {
       await api.trade.forceClose(tradeId);
@@ -603,7 +603,7 @@ function PaperTradeInner() {
                       <td className="py-3 px-2 text-slate-400 text-xs">{formatDuration(String(t.entry_time))}</td>
                       <td className="py-3 px-2 text-right">
                         <button
-                          onClick={() => forceClose(Number(t.id))}
+                          onClick={() => forceClose(t.id)}
                           className="px-3 py-1 rounded-lg text-xs font-semibold bg-red-500/20 border border-red-500/30 text-red-400 hover:bg-red-500/30 transition-colors"
                         >
                           📉 Close

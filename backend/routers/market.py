@@ -103,11 +103,29 @@ async def get_pair_signals(pair: str, interval: str = "15m"):
     payload = kucoin_indicators.fetch(pair, interval)
     if not payload:
         return {"symbol": pair, "interval": interval, "error": "no_data"}
+
+    raw_ind = payload.get("indicators") or {}
+    # Normalise keys to snake_case so the frontend StrategySignalMonitor
+    # can read them regardless of TradingView-style naming.
+    normalised = {
+        "rsi":         raw_ind.get("RSI"),
+        "macd":        raw_ind.get("MACD.macd"),
+        "macd_signal": raw_ind.get("MACD.signal"),
+        "bb_upper":    raw_ind.get("BB.upper"),
+        "bb_lower":    raw_ind.get("BB.lower"),
+        "ema_20":      raw_ind.get("EMA20"),
+        "sma_50":      raw_ind.get("SMA50"),
+        "adx":         raw_ind.get("ADX"),
+        "close":       raw_ind.get("close"),
+    }
+    # Also keep original keys for backwards compat with other consumers
+    normalised.update(raw_ind)
+
     return {
         "symbol": pair,
         "interval": interval,
         "summary": payload.get("summary"),
-        "indicators": payload.get("indicators"),
+        "indicators": normalised,
         "oscillators": payload.get("oscillators"),
         "moving_averages": payload.get("moving_averages"),
         "source": payload.get("source", "kucoin_klines"),
