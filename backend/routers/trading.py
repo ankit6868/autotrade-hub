@@ -57,7 +57,19 @@ def start_trading(
             strategy_name = line.split("(")[0].replace("class ", "").strip()
             break
 
-    mgr = freqtrade_mgr.for_user(user_id)
+    # Use Freqtrade if available, otherwise fall back to native engine
+    from backend.services.native_trading_engine import native_engine_registry
+    from backend.services.freqtrade_manager import _resolve_freqtrade_cmd
+    import shutil
+    _ft_cmd = _resolve_freqtrade_cmd()
+    _ft_available = bool(_ft_cmd and _ft_cmd[0] != "freqtrade" or shutil.which("freqtrade"))
+    if _ft_available:
+        mgr_engine = freqtrade_mgr.for_user(user_id)
+        _use_native = False
+    else:
+        mgr_engine = native_engine_registry.for_user(user_id)
+        _use_native = True
+
     if req.mode == "live":
         if req.confirmation != "CONFIRM":
             return {"error": "Must type 'CONFIRM' to start live trading"}
@@ -86,7 +98,7 @@ def start_trading(
                 )
             }
 
-        result = mgr.start_live(
+        result = mgr_engine.start_live(
             strategy_name=strategy_name,
             pairs=req.pairs,
             timeframe=req.timeframe,
@@ -102,7 +114,7 @@ def start_trading(
             position_adjustment=bool(getattr(config, "position_adjustment", False)),
         )
     else:
-        result = mgr.start_paper(
+        result = mgr_engine.start_paper(
             strategy_name=strategy_name,
             pairs=req.pairs,
             timeframe=req.timeframe,
@@ -135,14 +147,36 @@ async def stop_trading(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    result = freqtrade_mgr.for_user(user_id).stop()
+    from backend.services.native_trading_engine import native_engine_registry
+    # Stop whichever engine is running
+    ft_result  = freqtrade_mgr.for_user(user_id).stop()
+    nat_result = native_engine_registry.for_user(user_id).stop()
+    result = ft_result if ft_result.get("stopped") else nat_result
     log_event(db, user_id, "trade.stop", request, payload={"result": result})
     return result
 
 
 @router.get("/status")
 async def get_status(user_id: str = Depends(get_user_id)):
-    return freqtrade_mgr.for_user(user_id).status
+    from backend.services.native_trading_engine import native_engine_registry
+    ft_status  = freqtrade_mgr.for_user(user_id).status
+    nat_status = native_engine_registry.for_user(user_id).status
+    # Return whichever is running (native takes priority on Railway)
+    if nat_status.get("running"):
+        return nat_status
+    return ft_status
+
+
+@router.get("/open-positions")
+async def get_open_positions(user_id: str = Depends(get_user_id)):
+    from backend.services.native_trading_engine import native_engine_registry
+    return {"positions": native_engine_registry.for_user(user_id).get_open_positions()}
+
+
+@router.get("/trade-history")
+async def get_trade_history(user_id: str = Depends(get_user_id)):
+    from backend.services.native_trading_engine import native_engine_registry
+    return {"trades": native_engine_registry.for_user(user_id).get_trades()}
 
 
 @router.post("/sync")
