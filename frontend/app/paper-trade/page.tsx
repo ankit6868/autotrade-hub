@@ -72,6 +72,8 @@ function PaperTradeInner() {
   const [currentPrices, setCurrentPrices] = useState<Record<string, number>>({});
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState('');
+  const [closingId, setClosingId] = useState<string | number | null>(null);
+  const [closeError, setCloseError] = useState<string>('');
 
   // Quick Backtest state
   const [qbRunning, setQbRunning] = useState(false);
@@ -165,12 +167,21 @@ function PaperTradeInner() {
   }
 
   async function forceClose(tradeId: string | number) {
-    if (!confirm('Close this position now? This will mark the trade as closed at current price.')) return;
+    // First click: ask for confirmation inline (no blocking dialog)
+    if (closingId !== tradeId) {
+      setClosingId(tradeId);
+      setCloseError('');
+      return;
+    }
+    // Second click (confirmed): execute close
+    setCloseError('');
     try {
       await api.trade.forceClose(tradeId);
+      setClosingId(null);
       await refreshData();
     } catch (e) {
-      alert(String(e));
+      setCloseError(String(e));
+      setClosingId(null);
     }
   }
 
@@ -602,18 +613,41 @@ function PaperTradeInner() {
                       </td>
                       <td className="py-3 px-2 text-slate-400 text-xs">{formatDuration(String(t.entry_time))}</td>
                       <td className="py-3 px-2 text-right">
-                        <button
-                          onClick={() => forceClose(t.id)}
-                          className="px-3 py-1 rounded-lg text-xs font-semibold bg-red-500/20 border border-red-500/30 text-red-400 hover:bg-red-500/30 transition-colors"
-                        >
-                          📉 Close
-                        </button>
+                        {closingId === t.id ? (
+                          <div className="flex items-center gap-1 justify-end">
+                            <span className="text-xs text-amber-400 mr-1">Sure?</span>
+                            <button
+                              onClick={() => forceClose(t.id)}
+                              className="px-2 py-1 rounded-lg text-xs font-semibold bg-red-500/30 border border-red-500/50 text-red-300 hover:bg-red-500/50 transition-colors"
+                            >
+                              ✓ Yes
+                            </button>
+                            <button
+                              onClick={() => setClosingId(null)}
+                              className="px-2 py-1 rounded-lg text-xs font-semibold bg-slate-700/40 border border-slate-600/40 text-slate-400 hover:text-white transition-colors"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => forceClose(t.id)}
+                            className="px-3 py-1 rounded-lg text-xs font-semibold bg-red-500/20 border border-red-500/30 text-red-400 hover:bg-red-500/30 transition-colors"
+                          >
+                            📉 Close
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+        {closeError && (
+          <div className="mt-3 p-2 rounded-lg bg-red-500/15 border border-red-500/30 text-red-400 text-xs">
+            ❌ Close failed: {closeError}
           </div>
         )}
       </div>

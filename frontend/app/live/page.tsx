@@ -72,6 +72,8 @@ function LiveTradingInner() {
   const [starting, setStarting] = useState(false);
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [error, setError] = useState('');
+  const [closingId, setClosingId] = useState<string | number | null>(null);
+  const [closeError, setCloseError] = useState<string>('');
 
   // Live current prices for unrealized P&L
   const [currentPrices, setCurrentPrices] = useState<Record<string, number>>({});
@@ -561,23 +563,51 @@ function LiveTradingInner() {
                         {formatDuration(String(t.entry_time))}
                       </td>
                       <td className="py-3 px-2 text-right">
-                        <button
-                          onClick={async () => {
-                            if (confirm(`Force close ${pair} position? This will sell at market price using REAL money.`)) {
-                              await api.trade.forceClose(t.id);
-                              refreshData();
-                            }
-                          }}
-                          className="text-xs px-2 py-1 rounded bg-red-500/15 border border-red-500/30 text-red-400 hover:bg-red-500/25 transition-colors"
-                        >
-                          📉 Force Close
-                        </button>
+                        {closingId === t.id ? (
+                          <div className="flex items-center gap-1 justify-end">
+                            <span className="text-xs text-amber-400 mr-1">Sure? REAL money</span>
+                            <button
+                              onClick={async () => {
+                                setCloseError('');
+                                try {
+                                  await api.trade.forceClose(t.id);
+                                  setClosingId(null);
+                                  refreshData();
+                                } catch (e) {
+                                  setCloseError(String(e));
+                                  setClosingId(null);
+                                }
+                              }}
+                              className="text-xs px-2 py-1 rounded bg-red-500/30 border border-red-500/50 text-red-300 hover:bg-red-500/50 transition-colors font-semibold"
+                            >
+                              ✓ Yes, Close
+                            </button>
+                            <button
+                              onClick={() => setClosingId(null)}
+                              className="text-xs px-2 py-1 rounded bg-slate-700/40 border border-slate-600/40 text-slate-400 hover:text-white transition-colors"
+                            >
+                              ✕
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            onClick={() => { setClosingId(t.id); setCloseError(''); }}
+                            className="text-xs px-2 py-1 rounded bg-red-500/15 border border-red-500/30 text-red-400 hover:bg-red-500/25 transition-colors"
+                          >
+                            📉 Force Close
+                          </button>
+                        )}
                       </td>
                     </tr>
                   );
                 })}
               </tbody>
             </table>
+          </div>
+        )}
+        {closeError && (
+          <div className="mt-3 p-2 rounded-lg bg-red-500/15 border border-red-500/30 text-red-400 text-xs">
+            ❌ Close failed: {closeError}
           </div>
         )}
       </div>
