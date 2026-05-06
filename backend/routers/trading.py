@@ -397,8 +397,18 @@ def get_trade_history(
         for t in db.execute(query).scalars().all()
     ]
 
-    # Merge native + DB trades, native first (most recent session)
-    merged = native_trade_list + db_trades
+    # DB trades now include persisted native trades, so in-memory list is
+    # only a fallback for trades that happened before the persistence fix.
+    # Deduplicate by (pair, entry_price, entry_time) to avoid showing the same trade twice.
+    db_keys = {
+        (str(t["pair"]), str(t["entry_price"]), str(t["entry_time"])[:16])
+        for t in db_trades
+    }
+    unique_native = [
+        t for t in native_trade_list
+        if (str(t["pair"]), str(t["entry_price"]), str(t["entry_time"])[:16]) not in db_keys
+    ]
+    merged = unique_native + db_trades
     return {"trades": merged[:limit]}
 
 
@@ -433,6 +443,9 @@ def force_close(
             eng.balance += pos.pnl_abs
             eng.closed_trades.append(pos)
             del eng.positions[pair]
+        # Persist the closed trade to DB (updates open row if db_id set, else inserts)
+        from backend.services.native_trading_engine import _persist_closed_trade
+        _persist_closed_trade(user_id, pos, eng._mode, eng._strategy_id, pos.db_id)
         log_event(db, user_id, "trade.force_close", request,
                   payload={"pair": pair, "exit_price": exit_price})
         return {"status": "closed", "pair": pair, "exit_price": exit_price,

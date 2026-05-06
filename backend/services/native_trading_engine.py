@@ -41,6 +41,106 @@ import pandas as pd
 
 log = logging.getLogger("native_engine")
 
+
+# ─── DB persistence helpers (open + closed trades) ────────────────────────
+
+def _persist_open_trade(user_id: str, pos: "Position", mode: str, strategy_id: int | None = None) -> int | None:
+    """Insert an open Position into the DB Trade table. Returns the new trade DB id."""
+    try:
+        from backend.models.database import SessionLocal
+        from backend.models.trade import Trade as TradeModel
+        db = SessionLocal()
+        try:
+            trade = TradeModel(
+                user_id        = user_id,
+                mode           = mode if mode in ("paper", "live") else "paper",
+                pair           = pos.pair,
+                side           = pos.direction,
+                entry_price    = round(pos.entry, 8),
+                amount         = round(pos.size, 8),
+                stoploss_price = round(pos.sl, 8),
+                entry_time     = pos.opened_at,
+                status         = "open",
+                strategy_id    = strategy_id,
+            )
+            db.add(trade)
+            db.commit()
+            db.refresh(trade)
+            log.info("[%s] Open trade saved to DB id=%s %s @ %.4f", user_id, trade.id, pos.pair, pos.entry)
+            return trade.id
+        except Exception as e:
+            db.rollback()
+            log.error("[%s] Failed to save open trade to DB: %s", user_id, e)
+            return None
+        finally:
+            db.close()
+    except Exception as e:
+        log.error("DB persistence import error: %s", e)
+        return None
+
+
+def _persist_closed_trade(user_id: str, pos: "Position", mode: str,
+                           strategy_id: int | None = None, db_id: int | None = None) -> None:
+    """Update existing open DB Trade to closed, or insert new closed record."""
+    try:
+        from backend.models.database import SessionLocal
+        from backend.models.trade import Trade as TradeModel
+        from sqlalchemy import select
+        db = SessionLocal()
+        try:
+            trade = None
+            # Try to update existing open record first (matched by db_id or pair+user+open)
+            if db_id:
+                trade = db.get(TradeModel, db_id)
+            if trade is None:
+                # Fallback: find open record by pair + user
+                result = db.execute(
+                    select(TradeModel).where(
+                        TradeModel.user_id == user_id,
+                        TradeModel.pair == pos.pair,
+                        TradeModel.status == "open",
+                    ).order_by(TradeModel.id.desc()).limit(1)
+                )
+                trade = result.scalar_one_or_none()
+
+            if trade:
+                # Update existing row
+                trade.exit_price  = round(pos.exit_price or pos.entry, 8)
+                trade.profit_pct  = round(pos.pnl_pct, 4)
+                trade.profit_abs  = round(pos.pnl_abs, 4)
+                trade.exit_time   = pos.closed_at or datetime.now(timezone.utc)
+                trade.exit_reason = pos.exit_reason or "unknown"
+                trade.status      = "closed"
+            else:
+                # Insert new closed record (fallback for trades opened before this fix)
+                trade = TradeModel(
+                    user_id        = user_id,
+                    mode           = mode if mode in ("paper", "live") else "paper",
+                    pair           = pos.pair,
+                    side           = pos.direction,
+                    entry_price    = round(pos.entry, 8),
+                    exit_price     = round(pos.exit_price or pos.entry, 8),
+                    amount         = round(pos.size, 8),
+                    profit_pct     = round(pos.pnl_pct, 4),
+                    profit_abs     = round(pos.pnl_abs, 4),
+                    stoploss_price = round(pos.sl, 8),
+                    entry_time     = pos.opened_at,
+                    exit_time      = pos.closed_at or datetime.now(timezone.utc),
+                    exit_reason    = pos.exit_reason or "unknown",
+                    status         = "closed",
+                    strategy_id    = strategy_id,
+                )
+                db.add(trade)
+            db.commit()
+            log.info("[%s] Closed trade saved to DB: %s %s pnl=%.4f", user_id, pos.pair, pos.exit_reason, pos.pnl_abs)
+        except Exception as e:
+            db.rollback()
+            log.error("[%s] Failed to save closed trade to DB: %s", user_id, e)
+        finally:
+            db.close()
+    except Exception as e:
+        log.error("DB persistence import error: %s", e)
+
 # ─────────────────────────── constants ────────────────────────────────────
 
 TF_SECONDS = {
@@ -266,6 +366,8 @@ class Position:
     size:         float      # USDT stake
     opened_at:    datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     trail_lock:   Optional[float] = None
+    # DB row id — set after _persist_open_trade so close can UPDATE the same row
+    db_id:        Optional[int] = None
     # result fields (filled on close)
     closed_at:    Optional[datetime] = None
     exit_price:   Optional[float]    = None
@@ -554,6 +656,7 @@ class NativeTradingEngine:
                 entry=price, sl=sl, tp=tp, size=stake,
                 opened_at=datetime.now(timezone.utc),
             )
+            pos.db_id = _persist_open_trade(self.user_id, pos, self._mode, self._strategy_id)
             self.positions[pair] = pos
             self.balance -= stake
 
@@ -645,6 +748,8 @@ class NativeTradingEngine:
                             f"({reason}) P&L={pos.pnl_abs:+.2f} USDT"
                         )
                         log.info("[%s] %s", self.user_id, self.last_action)
+                        # Persist to DB so Trade Log survives restarts
+                        _persist_closed_trade(self.user_id, pos, self._mode, self._strategy_id, pos.db_id)
                         if self._mode == "live":
                             self._place_live_exit(pair, pos, exit_price)
                     continue   # don't look for entry while in position
@@ -704,6 +809,7 @@ class NativeTradingEngine:
                     entry=entry, sl=sl, tp=tp, size=stake,
                     opened_at=now,
                 )
+                pos.db_id = _persist_open_trade(self.user_id, pos, self._mode, self._strategy_id)
                 self.positions[pair] = pos
                 self.balance -= stake
                 seen_signal[pair] = True
@@ -741,6 +847,7 @@ class NativeTradingEngine:
                     f"({reason}) P&L={pos.pnl_abs:+.2f}"
                 )
                 log.info("[%s] %s", self.user_id, self.last_action)
+                _persist_closed_trade(self.user_id, pos, self._mode, self._strategy_id, pos.db_id)
                 if self._mode == "live":
                     self._place_live_exit(pair, pos, exit_price)
             return
@@ -766,6 +873,7 @@ class NativeTradingEngine:
             entry=entry, sl=sl, tp=tp, size=stake,
             opened_at=ts_dt,
         )
+        pos.db_id = _persist_open_trade(self.user_id, pos, self._mode, self._strategy_id)
         self.positions[pair] = pos
         self.balance -= stake
         self.last_action = (
