@@ -168,8 +168,8 @@ function PaperTradeInner() {
 
   async function forceClose(tradeId: string | number) {
     // First click: ask for confirmation inline (no blocking dialog)
-    if (closingId !== tradeId) {
-      setClosingId(tradeId);
+    if (closingId !== String(tradeId)) {
+      setClosingId(String(tradeId));
       setCloseError('');
       return;
     }
@@ -613,11 +613,11 @@ function PaperTradeInner() {
                       </td>
                       <td className="py-3 px-2 text-slate-400 text-xs">{formatDuration(String(t.entry_time))}</td>
                       <td className="py-3 px-2 text-right">
-                        {closingId === t.id ? (
+                        {closingId === String(t.id) ? (
                           <div className="flex items-center gap-1 justify-end">
                             <span className="text-xs text-amber-400 mr-1">Sure?</span>
                             <button
-                              onClick={() => forceClose(t.id)}
+                              onClick={() => forceClose(String(t.id))}
                               className="px-2 py-1 rounded-lg text-xs font-semibold bg-red-500/30 border border-red-500/50 text-red-300 hover:bg-red-500/50 transition-colors"
                             >
                               ✓ Yes
@@ -631,7 +631,7 @@ function PaperTradeInner() {
                           </div>
                         ) : (
                           <button
-                            onClick={() => forceClose(t.id)}
+                            onClick={() => forceClose(String(t.id))}
                             className="px-3 py-1 rounded-lg text-xs font-semibold bg-red-500/20 border border-red-500/30 text-red-400 hover:bg-red-500/30 transition-colors"
                           >
                             📉 Close

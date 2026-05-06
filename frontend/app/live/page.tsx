@@ -570,7 +570,7 @@ function LiveTradingInner() {
                               onClick={async () => {
                                 setCloseError('');
                                 try {
-                                  await api.trade.forceClose(t.id);
+                                  await api.trade.forceClose(String(t.id));
                                   setClosingId(null);
                                   refreshData();
                                 } catch (e) {
@@ -591,7 +591,7 @@ function LiveTradingInner() {
                           </div>
                         ) : (
                           <button
-                            onClick={() => { setClosingId(t.id); setCloseError(''); }}
+                            onClick={() => { setClosingId(String(t.id)); setCloseError(''); }}
                             className="text-xs px-2 py-1 rounded bg-red-500/15 border border-red-500/30 text-red-400 hover:bg-red-500/25 transition-colors"
                           >
                             📉 Force Close
