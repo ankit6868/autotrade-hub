@@ -25,6 +25,7 @@ alembic==1.14.0               # Schema migrations
 # Indicator math
 numpy==2.2.1
 pandas==2.2.3
+pyarrow==18.1.0       # required by pandas for feather/parquet I/O
 
 # Security
 cryptography==44.0.0

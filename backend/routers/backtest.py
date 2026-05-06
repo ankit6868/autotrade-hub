@@ -58,6 +58,8 @@ def run_backtest(
             "freqtrade not found", "no such file", "filenotfound",
             "could not load markets", "exchangenotavailable",
             "temporaryerror", "missing dependency",
+            "pyarrow", "missing optional", "importerror",
+            "no module named", "modulenotfounderror",
         ])
         if use_native:
             from backend.services import native_backtester
