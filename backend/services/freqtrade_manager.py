@@ -25,13 +25,12 @@ import shutil
 import subprocess
 import sys
 import threading
+import urllib.parse
+import urllib.request
 import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-
-import httpx          # used for KuCoin OHLCV download (no requests needed)
-import pandas as pd   # used for DataFrame construction in _download_pair_from_kucoin
 
 FREQTRADE_PATH = os.getenv("FREQTRADE_PATH", "freqtrade")
 FREQTRADE_USERDIR_ROOT = os.getenv("FREQTRADE_USERDIR", "./user_data")
@@ -374,6 +373,8 @@ class FreqtradeManager:
 
         Returns None on success, error dict on failure.
         """
+        import pandas as pd  # local import keeps startup fast; pandas is always installed
+
         kline_type, tf_secs = self._TF_INFO.get(timeframe, ("15min", 900))
         symbol = pair.replace("/", "-")          # BTC/USDT → BTC-USDT
         chunk_secs = 1500 * tf_secs              # KuCoin max 1 500 candles/request
@@ -384,17 +385,17 @@ class FreqtradeManager:
         while current_start < end_ts:
             current_end = min(current_start + chunk_secs, end_ts)
             try:
-                with httpx.Client(timeout=30) as http:
-                    resp = http.get(
-                        "https://api.kucoin.com/api/v1/market/candles",
-                        params={
-                            "type": kline_type,
-                            "symbol": symbol,
-                            "startAt": current_start,
-                            "endAt": current_end,
-                        },
-                    )
-                data = resp.json()
+                # Use stdlib urllib — zero pip dependencies, always available
+                qs = urllib.parse.urlencode({
+                    "type": kline_type,
+                    "symbol": symbol,
+                    "startAt": current_start,
+                    "endAt": current_end,
+                })
+                url = f"https://api.kucoin.com/api/v1/market/candles?{qs}"
+                req = urllib.request.Request(url, headers={"User-Agent": "AutoTradeHub/1.0"})
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    data = json.loads(resp.read().decode())
             except Exception as exc:
                 return {"error": f"KuCoin API network error for {pair}: {exc}"}
 
