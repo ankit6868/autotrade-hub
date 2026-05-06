@@ -265,20 +265,39 @@ def get_open_trades(
 
     # 1. Native engine open positions (paper/live bot running in this container)
     native_positions = native_engine_registry.for_user(user_id).get_open_positions()
-    native_trades = [
-        {
+    # Fetch live prices for unrealized P&L calculation
+    live_prices: dict[str, float] = {}
+    for p in native_positions:
+        try:
+            sym = p["pair"].replace("/", "-")
+            data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
+            if str(data.get("code")) == "200000":
+                live_prices[p["pair"]] = float(data["data"]["price"])
+        except Exception:
+            pass
+
+    native_trades = []
+    for p in native_positions:
+        entry = p.get("entry", 0)
+        stake = p.get("stake", 0)
+        cur = live_prices.get(p["pair"], entry)
+        direction = p.get("direction", "long")
+        if direction == "long":
+            unreal = (cur - entry) / entry * stake if entry else 0
+        else:
+            unreal = (entry - cur) / entry * stake if entry else 0
+        native_trades.append({
             "id": f"native-{p['pair']}",
             "pair": p["pair"],
-            "side": "long" if p.get("direction") == "long" else "short",
-            "entry_price": p.get("entry"),
-            "amount": p.get("stake", 0),
+            "side": direction,
+            "entry_price": entry,
+            "current_price": round(cur, 6),
+            "amount": stake,
             "stoploss_price": p.get("sl"),
             "entry_time": p.get("opened_at"),
             "mode": "paper",
-            "unrealized_pnl": 0,
-        }
-        for p in native_positions
-    ]
+            "unrealized_pnl": round(unreal, 4),
+        })
 
     # 2. DB-persisted trades (from Freqtrade sync or previous sessions)
     try:
@@ -383,16 +402,51 @@ def get_trade_history(
     return {"trades": merged[:limit]}
 
 
-@router.post("/force-close/{trade_id}")
+@router.post("/force-close/{trade_id:path}")
 def force_close(
-    trade_id: int,
+    trade_id: str,
     request: Request,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
+    """Close a trade — handles both native engine positions (id='native-BTC/USDT')
+    and DB-persisted trades (id='42')."""
+    from backend.services.native_trading_engine import native_engine_registry, _kucoin_get
+
+    # ── Native engine position (id starts with "native-") ──────────────
+    if trade_id.startswith("native-"):
+        pair = trade_id[len("native-"):]   # e.g. "BTC/USDT"
+        eng = native_engine_registry.for_user(user_id)
+        with eng._lock:
+            pos = eng.positions.get(pair)
+            if pos is None:
+                return {"error": f"No open native position for {pair}"}
+            # Fetch current price for a realistic exit
+            try:
+                symbol = pair.replace("/", "-")
+                data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": symbol})
+                exit_price = float(data["data"]["price"]) if str(data.get("code")) == "200000" else pos.entry
+            except Exception:
+                exit_price = pos.entry
+            from datetime import timezone as _tz
+            pos.close(exit_price, "force_closed", datetime.now(_tz.utc))
+            eng.balance += pos.pnl_abs
+            eng.closed_trades.append(pos)
+            del eng.positions[pair]
+        log_event(db, user_id, "trade.force_close", request,
+                  payload={"pair": pair, "exit_price": exit_price})
+        return {"status": "closed", "pair": pair, "exit_price": exit_price,
+                "pnl_abs": round(pos.pnl_abs, 4)}
+
+    # ── DB trade (numeric id) ───────────────────────────────────────────
+    try:
+        int_id = int(trade_id)
+    except ValueError:
+        return {"error": f"Invalid trade_id '{trade_id}'"}
+
     result = db.execute(
         select(Trade).where(
-            Trade.id == trade_id,
+            Trade.id == int_id,
             Trade.status == "open",
             Trade.user_id == user_id,
         )
@@ -409,9 +463,9 @@ def force_close(
     log_event(
         db, user_id, "trade.force_close", request,
         mode=trade.mode, strategy_id=trade.strategy_id, pair=trade.pair,
-        payload={"trade_id": trade_id},
+        payload={"trade_id": int_id},
     )
-    return {"status": "closed", "trade_id": trade_id}
+    return {"status": "closed", "trade_id": int_id}
 
 
 @router.post("/emergency-stop")
