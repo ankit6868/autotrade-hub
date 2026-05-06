@@ -34,6 +34,14 @@ class Config(Base):
     # --- Auto-sell engine ---
     auto_sell_enabled = Column(Boolean, default=False)        # auto-sell on SELL/STRONG_SELL signals
     auto_sell_mode = Column(Text, default="paper")            # 'paper' or 'live'
+    # --- Paper/Live bot persistence (24/7 auto-resume after container restart) ---
+    bot_running = Column(Boolean, default=False)              # True if paper/live bot was running
+    bot_mode = Column(Text, default="paper")                  # 'paper' or 'live'
+    bot_strategy_name = Column(Text, nullable=True)           # e.g. 'MacdCrossoverStrategy'
+    bot_pairs = Column(Text, nullable=True)                   # CSV e.g. 'BTC/USDT,ETH/USDT'
+    bot_timeframe = Column(Text, default="15m")
+    bot_wallet = Column(Float, default=1000.0)
+    bot_stoploss = Column(Float, default=-0.03)
     # --- Notifications ---
     telegram_token = Column(Text)
     telegram_chat_id = Column(Text)

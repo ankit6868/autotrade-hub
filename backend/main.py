@@ -40,17 +40,52 @@ import jwt  # noqa: E402
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    # Start an auto-trade engine for every user who has the flag on. Two
-    # users with auto-trade enabled => two parallel engine threads, each
-    # driving its own per-user freqtrade subprocess.
+    # ── Auto-resume all engines that were running before a container restart ──
     try:
+        from backend.services.native_trading_engine import native_engine_registry
         with SessionLocal() as db:
-            rows = db.execute(
-                select(Config).where(Config.auto_trade_enabled == True)  # noqa: E712
-            ).scalars().all()
+            rows = db.execute(select(Config)).scalars().all()
             for cfg in rows:
-                if cfg.user_id:
-                    autotrade_engine.for_user(cfg.user_id).start()
+                if not cfg.user_id:
+                    continue
+                # 1. Auto-trade engine
+                if cfg.auto_trade_enabled:
+                    try:
+                        autotrade_engine.for_user(cfg.user_id).start()
+                    except Exception:
+                        pass
+                # 2. Paper / live bot — auto-resume if it was running
+                if cfg.bot_running and cfg.bot_strategy_name:
+                    try:
+                        pairs = [p.strip() for p in (cfg.bot_pairs or "BTC/USDT").split(",") if p.strip()]
+                        eng = native_engine_registry.for_user(cfg.user_id)
+                        if cfg.bot_mode == "live":
+                            # Live requires credentials — skip if not decryptable
+                            from backend.utils.encryption import decrypt, DecryptError
+                            try:
+                                kk = decrypt(cfg.kucoin_key_enc or "", cfg.user_id)
+                                ks = decrypt(cfg.kucoin_secret_enc or "", cfg.user_id)
+                                kp = decrypt(cfg.kucoin_passphrase_enc or "", cfg.user_id)
+                                eng.start_live(
+                                    strategy_name=cfg.bot_strategy_name,
+                                    pairs=pairs,
+                                    timeframe=cfg.bot_timeframe or "15m",
+                                    stoploss=cfg.bot_stoploss or -0.03,
+                                    kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
+                                    wallet=cfg.bot_wallet or 1000.0,
+                                )
+                            except DecryptError:
+                                pass  # Credentials changed; user must restart manually
+                        else:
+                            eng.start_paper(
+                                strategy_name=cfg.bot_strategy_name,
+                                pairs=pairs,
+                                timeframe=cfg.bot_timeframe or "15m",
+                                stoploss=cfg.bot_stoploss or -0.03,
+                                wallet=cfg.bot_wallet or 1000.0,
+                            )
+                    except Exception:
+                        pass
     except Exception:
         pass
     yield

@@ -131,6 +131,20 @@ def start_trading(
             position_adjustment=bool(getattr(config, "position_adjustment", False)),
         )
 
+    # Persist bot state to DB so it auto-resumes after container restart
+    if result.get("started"):
+        try:
+            config.bot_running = True
+            config.bot_mode = req.mode
+            config.bot_strategy_name = strategy_name
+            config.bot_pairs = ",".join(req.pairs)
+            config.bot_timeframe = req.timeframe
+            config.bot_wallet = req.wallet
+            config.bot_stoploss = req.stoploss
+            db.commit()
+        except Exception:
+            pass
+
     log_event(
         db, user_id, "trade.start", request,
         mode=req.mode, strategy_id=req.strategy_id, pair=",".join(req.pairs),
@@ -156,6 +170,17 @@ async def stop_trading(
     ft_result  = freqtrade_mgr.for_user(user_id).stop()
     nat_result = native_engine_registry.for_user(user_id).stop()
     result = ft_result if ft_result.get("stopped") else nat_result
+
+    # Clear bot_running flag so it does NOT auto-resume on next container restart
+    try:
+        from sqlalchemy import select as _sel
+        cfg = db.execute(_sel(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+        if cfg:
+            cfg.bot_running = False
+            db.commit()
+    except Exception:
+        pass
+
     log_event(db, user_id, "trade.stop", request, payload={"result": result})
     return result
 
