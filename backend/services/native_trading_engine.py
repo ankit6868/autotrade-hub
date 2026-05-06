@@ -571,65 +571,161 @@ class NativeTradingEngine:
     # ── internal loop ───────────────────────────────────────────────────
 
     def _run_loop(self):
-        """Main trading loop — runs in a background daemon thread."""
-        tf_secs   = TF_SECONDS.get(self._timeframe, 900)
+        """Continuous trading loop — checks every 60s regardless of timeframe.
+
+        Signal scanning: uses closed candles (strategy logic runs on candle data).
+        TP/SL management: runs on LIVE ticker price every tick for instant exits.
+        Entry: executes at current live price the moment signal conditions are met.
+        """
         signal_fn = _get_signal_fn(self._strategy)
-        log.info("[%s] engine started — strategy=%s pairs=%s mode=%s",
+        log.info("[%s] engine started (continuous) — strategy=%s pairs=%s mode=%s",
                  self.user_id, self._strategy, self._pairs, self._mode)
 
-        # stagger startup per pair to avoid rate limits
-        seen_ts: dict[str, int] = {}
+        seen_signal: dict[str, bool] = {}   # pair → signal already acted on
 
         while not self._stop_evt.is_set():
             try:
-                self._tick(signal_fn, seen_ts, tf_secs)
+                self._tick_continuous(signal_fn, seen_signal)
             except Exception as exc:
                 with self._lock:
                     self.errors += 1
                     self.last_action = f"error: {exc}"
                 log.warning("[%s] engine error: %s", self.user_id, exc)
-                # back-off on repeated errors
                 backoff = min(60, 5 * self.errors)
                 self._stop_evt.wait(backoff)
 
-            # sleep until next candle close (wake 5s after close)
-            self._stop_evt.wait(max(10, tf_secs))
+            # Check every 60 seconds — fast enough to catch signals
+            # without hammering KuCoin (rate limit: ~30 req/s per IP)
+            self._stop_evt.wait(60)
 
         log.info("[%s] engine stopped", self.user_id)
 
-    def _tick(self, signal_fn, seen_ts: dict, tf_secs: int):
+    def _get_live_price(self, pair: str) -> Optional[float]:
+        """Fetch the current ticker price from KuCoin (no candle needed)."""
+        try:
+            symbol = pair.replace("/", "-")
+            data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": symbol})
+            if str(data.get("code")) == "200000":
+                return float(data["data"]["price"])
+        except Exception:
+            pass
+        return None
+
+    def _tick_continuous(self, signal_fn, seen_signal: dict):
+        """One continuous tick — signal scan + live TP/SL check."""
         for pair in self._pairs:
             if self._stop_evt.is_set():
                 return
-            symbol = pair.replace("/", "-")
+
+            # ── 1. Live price for TP/SL management ─────────────────────
+            live_price = self._get_live_price(pair)
+            if live_price is None:
+                continue
+
+            now = datetime.now(timezone.utc)
+
+            with self._lock:
+                self.ticks += 1
+
+                # ── 2. Manage open position with LIVE price ─────────────
+                if pair in self.positions:
+                    pos = self.positions[pair]
+                    pos.update_trail(live_price)
+                    # Use live price as both high and low for instant exit detection
+                    exit_info = pos.check_exit(live_price, live_price)
+                    if exit_info:
+                        exit_price, reason = exit_info
+                        pos.close(exit_price, reason, now)
+                        self.balance += pos.pnl_abs
+                        self.closed_trades.append(pos)
+                        del self.positions[pair]
+                        seen_signal[pair] = False  # allow re-entry
+                        self.last_action = (
+                            f"CLOSED {pair} {pos.direction} @ {exit_price:.4f} "
+                            f"({reason}) P&L={pos.pnl_abs:+.2f} USDT"
+                        )
+                        log.info("[%s] %s", self.user_id, self.last_action)
+                        if self._mode == "live":
+                            self._place_live_exit(pair, pos, exit_price)
+                    continue   # don't look for entry while in position
+
+                # ── 3. No open position — check entry signal ────────────
+                if len(self.positions) >= self._max_open:
+                    continue
+
+            # Fetch candle history for indicator calculation
+            # (done outside lock to avoid blocking other pairs)
             try:
-                candles = _fetch_candles(symbol, self._timeframe)
+                candles = _fetch_candles(pair.replace("/", "-"), self._timeframe)
             except Exception as e:
-                log.warning("[%s] candle fetch error for %s: %s", self.user_id, pair, e)
+                log.warning("[%s] candle fetch %s: %s", self.user_id, pair, e)
                 continue
 
             if not candles:
                 continue
-            latest_ts = candles[-1]["ts"]
-            if seen_ts.get(pair) == latest_ts:
-                continue   # same candle, no update
-            seen_ts[pair] = latest_ts
 
             df = _build_df(candles)
             if df.empty:
                 continue
 
+            sig = signal_fn(df)
+            if sig is None:
+                seen_signal[pair] = False
+                continue
+
+            # Signal fired — enter at LIVE price (not candle close)
+            entry_strategy, sl_strategy, tp_strategy, direction = sig
+
+            # Use live price as entry for immediate fill
+            entry = live_price
+            # Keep strategy-derived SL/TP distances, shift to live price
+            sl_dist = abs(entry_strategy - sl_strategy)
+            tp_dist = abs(tp_strategy - entry_strategy)
+            if direction == "long":
+                sl = entry - sl_dist
+                tp = entry + tp_dist
+            else:
+                sl = entry + sl_dist
+                tp = entry - tp_dist
+
+            risk_pct = sl_dist / entry if entry > 0 else 0
+            if risk_pct > abs(self._stoploss) * 2:
+                continue
+
             with self._lock:
-                self.ticks += 1
-                self._process_pair(pair, df, signal_fn)
+                if pair in self.positions:
+                    continue   # race condition guard
+                stake = self.balance * self._risk_pct
+                if stake < 1.0 or stake > self.balance:
+                    continue
+
+                pos = Position(
+                    pair=pair, direction=direction,
+                    entry=entry, sl=sl, tp=tp, size=stake,
+                    opened_at=now,
+                )
+                self.positions[pair] = pos
+                self.balance -= stake
+                seen_signal[pair] = True
+                self.last_action = (
+                    f"OPENED {direction} {pair} @ {entry:.4f} "
+                    f"SL={sl:.4f} TP={tp:.4f} stake={stake:.2f}"
+                )
+                log.info("[%s] %s", self.user_id, self.last_action)
+                if self._mode == "live":
+                    self._place_live_entry(pair, pos)
+
+    # ── legacy tick kept for compatibility ─────────────────────────────
+    def _tick(self, signal_fn, seen_ts: dict, tf_secs: int):
+        """Unused — kept for backwards compat. Bot now uses _tick_continuous."""
+        pass
 
     def _process_pair(self, pair: str, df: pd.DataFrame, signal_fn):
-        """Process one candle tick for one pair (called under lock)."""
+        """Unused — logic moved into _tick_continuous."""
         row = df.iloc[-1]
         hi, lo = row["high"], row["low"]
         ts_dt  = row["date"]
 
-        # ── manage existing position ────────────────────────────────────
         if pair in self.positions:
             pos = self.positions[pair]
             pos.update_trail(row["close"])
@@ -649,7 +745,6 @@ class NativeTradingEngine:
                     self._place_live_exit(pair, pos, exit_price)
             return
 
-        # ── look for new entry ──────────────────────────────────────────
         if len(self.positions) >= self._max_open:
             return
 
@@ -658,9 +753,8 @@ class NativeTradingEngine:
             return
 
         entry, sl, tp, direction = sig
-        # Validate SL against config stoploss limit
         risk_pct = abs(entry - sl) / entry
-        if risk_pct > abs(self._stoploss) * 2:   # never risk more than 2× config SL
+        if risk_pct > abs(self._stoploss) * 2:
             return
 
         stake = self.balance * self._risk_pct
@@ -673,7 +767,7 @@ class NativeTradingEngine:
             opened_at=ts_dt,
         )
         self.positions[pair] = pos
-        self.balance -= stake   # reserve stake
+        self.balance -= stake
         self.last_action = (
             f"opened {direction} {pair} @ {entry:.4f} "
             f"SL={sl:.4f} TP={tp:.4f} stake={stake:.2f}"
