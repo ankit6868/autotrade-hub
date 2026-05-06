@@ -6,19 +6,35 @@ ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PYTHONDONTWRITEBYTECODE=1
 
-# Build deps for any C extensions in our pinned wheels (psycopg, cryptography).
+# Build deps: C extensions (psycopg, cryptography) + TA-Lib compilation
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         libpq-dev \
         curl \
+        wget \
+        autoconf \
+        automake \
+        libtool \
+        pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+# ── Install TA-Lib C library from source (required by freqtrade) ─────────────
+RUN wget -q https://github.com/ta-lib/ta-lib/releases/download/v0.4.0/ta-lib-0.4.0-src.tar.gz \
+    && tar -xzf ta-lib-0.4.0-src.tar.gz \
+    && cd ta-lib \
+    && ./configure --prefix=/usr \
+    && make -j$(nproc) \
+    && make install \
+    && ldconfig \
+    && cd .. && rm -rf ta-lib ta-lib-0.4.0-src.tar.gz
 
 WORKDIR /build
 
 COPY requirements.txt .
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
-    && /opt/venv/bin/pip install -r requirements.txt
+    && /opt/venv/bin/pip install -r requirements.txt \
+    && /opt/venv/bin/pip install "freqtrade>=2024.1"
 
 # ---- Runtime ---------------------------------------------------------------
 FROM python:3.12-slim AS runtime
@@ -27,7 +43,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH"
 
-# libpq is needed at runtime for psycopg; curl is for the healthcheck.
+# libpq for psycopg, curl for healthcheck, tini for PID1.
+# Also copy TA-Lib shared lib so freqtrade works at runtime.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
         curl \
@@ -35,6 +52,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1001 app \
     && useradd  --system --uid 1001 --gid app --home /app --shell /usr/sbin/nologin app
+
+# Copy TA-Lib shared libraries from builder so Python can find them at runtime
+COPY --from=builder /usr/lib/libta_lib.so* /usr/lib/
+RUN ldconfig
 
 COPY --from=builder /opt/venv /opt/venv
 

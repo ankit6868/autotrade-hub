@@ -30,7 +30,7 @@ from backend.models.trade import Trade
 from backend.services.freqtrade_manager import freqtrade_mgr
 from backend.services.opportunity_scanner import scan
 from backend.services.kucoin_volume import top_usdt_pairs
-from backend.utils.encryption import decrypt
+from backend.utils.encryption import decrypt, DecryptError
 
 log = logging.getLogger("autotrade")
 
@@ -167,11 +167,18 @@ class AutoTradeEngine:
             if not (cfg.kucoin_key_enc and cfg.kucoin_secret_enc and cfg.kucoin_passphrase_enc):
                 self.state.last_action = "live requested but no KuCoin keys"
                 return None
+            try:
+                kucoin_key = decrypt(cfg.kucoin_key_enc, self.user_id)
+                kucoin_secret = decrypt(cfg.kucoin_secret_enc, self.user_id)
+                kucoin_passphrase = decrypt(cfg.kucoin_passphrase_enc, self.user_id)
+            except DecryptError:
+                self.state.last_action = "live deploy failed: credentials could not be decrypted (re-enter in Setup)"
+                return None
             res = bot.start_live(
                 **common,
-                kucoin_key=decrypt(cfg.kucoin_key_enc, self.user_id),
-                kucoin_secret=decrypt(cfg.kucoin_secret_enc, self.user_id),
-                kucoin_passphrase=decrypt(cfg.kucoin_passphrase_enc, self.user_id),
+                kucoin_key=kucoin_key,
+                kucoin_secret=kucoin_secret,
+                kucoin_passphrase=kucoin_passphrase,
             )
         else:
             res = bot.start_paper(**common)

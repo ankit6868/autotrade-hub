@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from backend.models import get_db, Config, Strategy
 from backend.models.trade import Trade
-from backend.utils.encryption import decrypt
+from backend.utils.encryption import decrypt, DecryptError
 from backend.utils.clerk_auth import get_user_id
 from backend.utils.audit import log_event
 from backend.utils.rate_limit import limiter, TRADE_LIMIT
@@ -74,14 +74,26 @@ def start_trading(
                 user_id, safety["errors"],
             )
 
+        try:
+            kucoin_key = decrypt(config.kucoin_key_enc, user_id)
+            kucoin_secret = decrypt(config.kucoin_secret_enc, user_id)
+            kucoin_passphrase = decrypt(config.kucoin_passphrase_enc, user_id)
+        except DecryptError:
+            return {
+                "error": (
+                    "Your KuCoin API credentials could not be decrypted. "
+                    "Please go to Setup and re-enter your KuCoin API keys."
+                )
+            }
+
         result = mgr.start_live(
             strategy_name=strategy_name,
             pairs=req.pairs,
             timeframe=req.timeframe,
             stoploss=req.stoploss,
-            kucoin_key=decrypt(config.kucoin_key_enc, user_id),
-            kucoin_secret=decrypt(config.kucoin_secret_enc, user_id),
-            kucoin_passphrase=decrypt(config.kucoin_passphrase_enc, user_id),
+            kucoin_key=kucoin_key,
+            kucoin_secret=kucoin_secret,
+            kucoin_passphrase=kucoin_passphrase,
             wallet=req.wallet,
             max_open_trades=config.max_open_trades or 3,
             max_position_pct=config.max_position_pct or 5.0,

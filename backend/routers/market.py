@@ -1,3 +1,4 @@
+import httpx
 from fastapi import APIRouter, Depends
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -23,8 +24,11 @@ def _get_kucoin_client(db: Session, user_id: str) -> KuCoinClient:
             api_secret=decrypt(config.kucoin_secret_enc, user_id),
             passphrase=decrypt(config.kucoin_passphrase_enc, user_id),
         )
-    except DecryptError as e:
-        raise ValueError(str(e))
+    except DecryptError:
+        raise ValueError(
+            "Your API credentials could not be decrypted. "
+            "Please go to Setup and re-enter your KuCoin API keys."
+        )
 
 
 @router.get("/pairs")
@@ -32,9 +36,25 @@ async def get_pairs(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
+    """Return all tradeable KuCoin USDT pairs using the public API (no credentials needed)."""
     try:
-        client = _get_kucoin_client(db, user_id)
-        symbols = await client.get_symbols()
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get("https://api.kucoin.com/api/v2/symbols")
+            data = resp.json()
+        if str(data.get("code")) == "200000":
+            usdt_pairs = sorted([
+                f"{s['baseCurrency']}/{s['quoteCurrency']}"
+                for s in data.get("data", [])
+                if s.get("quoteCurrency") == "USDT" and s.get("enableTrading")
+            ])
+            return {"pairs": usdt_pairs}
+    except Exception:
+        pass
+
+    # Fallback: use authenticated KuCoin client if public API fails
+    try:
+        kucoin = _get_kucoin_client(db, user_id)
+        symbols = await kucoin.get_symbols()
         usdt_pairs = [s for s in symbols if s.endswith("/USDT")]
         return {"pairs": sorted(usdt_pairs)}
     except ValueError as e:

@@ -42,3 +42,6 @@ slowapi==0.1.9
 python-dotenv==1.0.1
 pydantic==2.10.4
 pydantic-settings==2.7.0
+
+# HTTP (sync fallback used by data-download helpers)
+requests>=2.31.0

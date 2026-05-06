@@ -39,14 +39,19 @@ def _resolve_freqtrade_cmd() -> list[str]:
 
     Order of preference:
     1) FREQTRADE_PATH env var if it resolves.
-    2) `freqtrade` on PATH.
-    3) `python -m freqtrade` when the package is importable but the script
+    2) `freqtrade` on PATH (covers /opt/venv/bin on Railway).
+    3) Common venv locations checked explicitly.
+    4) `python -m freqtrade` when the package is importable but the script
        isn't on PATH (common on Windows pip installs).
     """
     if FREQTRADE_PATH and shutil.which(FREQTRADE_PATH):
         return [shutil.which(FREQTRADE_PATH)]
     if shutil.which("freqtrade"):
         return [shutil.which("freqtrade")]
+    # Explicit venv paths for Docker / Railway / Render environments
+    for candidate in ["/opt/venv/bin/freqtrade", "/usr/local/bin/freqtrade"]:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return [candidate]
     try:
         import freqtrade  # noqa: F401
         return [sys.executable, "-m", "freqtrade"]
@@ -367,7 +372,7 @@ class FreqtradeManager:
         Returns None on success, error dict on failure.
         """
         try:
-            import requests  # stdlib-compatible; requests is a FastAPI dep
+            import httpx  # already in requirements.txt
             import pandas as pd
         except ImportError as e:
             return {"error": f"Missing dependency for data download: {e}"}
@@ -382,16 +387,16 @@ class FreqtradeManager:
         while current_start < end_ts:
             current_end = min(current_start + chunk_secs, end_ts)
             try:
-                resp = requests.get(
-                    "https://api.kucoin.com/api/v1/market/candles",
-                    params={
-                        "type": kline_type,
-                        "symbol": symbol,
-                        "startAt": current_start,
-                        "endAt": current_end,
-                    },
-                    timeout=30,
-                )
+                with httpx.Client(timeout=30) as http:
+                    resp = http.get(
+                        "https://api.kucoin.com/api/v1/market/candles",
+                        params={
+                            "type": kline_type,
+                            "symbol": symbol,
+                            "startAt": current_start,
+                            "endAt": current_end,
+                        },
+                    )
                 data = resp.json()
             except Exception as exc:
                 return {"error": f"KuCoin API network error for {pair}: {exc}"}
