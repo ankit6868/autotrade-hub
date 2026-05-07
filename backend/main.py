@@ -24,6 +24,9 @@ from sqlalchemy import select  # noqa: E402
 
 from backend.models import init_db, SessionLocal, Config  # noqa: E402
 from backend.routers import auth, strategy, backtest, trading, market, analysis, autotrade, webhook  # noqa: E402
+from backend.routers import futures as futures_router  # noqa: E402
+from backend.routers import copy_trading as copy_router  # noqa: E402
+from backend.routers import multi_strategy as multi_router  # noqa: E402
 from backend.services.freqtrade_manager import freqtrade_mgr  # noqa: E402
 from backend.services.autotrade_engine import autotrade_engine  # noqa: E402
 from backend.utils.clerk_auth import (  # noqa: E402
@@ -127,6 +130,16 @@ async def lifespan(app: FastAPI):
                         pass
     except Exception:
         pass
+    # 3. Resume multi-strategy instances (spot + futures, paper + live)
+    try:
+        from backend.services.multi_strategy import multi_strategy_manager
+        with SessionLocal() as db:
+            resumed = multi_strategy_manager.resume_all(db)
+            if resumed:
+                import logging
+                logging.getLogger("startup").info("Resumed %d multi-strategy instances", resumed)
+    except Exception:
+        pass
     yield
     try:
         autotrade_engine.stop_all()
@@ -206,6 +219,9 @@ app.include_router(market.router)
 app.include_router(analysis.router)
 app.include_router(autotrade.router)
 app.include_router(webhook.router)
+app.include_router(futures_router.router)
+app.include_router(copy_router.router)
+app.include_router(multi_router.router)
 
 
 @app.get("/")

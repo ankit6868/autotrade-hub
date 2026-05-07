@@ -44,7 +44,9 @@ log = logging.getLogger("native_engine")
 
 # ─── DB persistence helpers (open + closed trades) ────────────────────────
 
-def _persist_open_trade(user_id: str, pos: "Position", mode: str, strategy_id: int | None = None) -> int | None:
+def _persist_open_trade(user_id: str, pos: "Position", mode: str,
+                        strategy_id: int | None = None,
+                        leverage: int = 1, market_type: str = "spot") -> int | None:
     """Insert an open Position into the DB Trade table. Returns the new trade DB id."""
     try:
         from backend.models.database import SessionLocal
@@ -52,16 +54,19 @@ def _persist_open_trade(user_id: str, pos: "Position", mode: str, strategy_id: i
         db = SessionLocal()
         try:
             trade = TradeModel(
-                user_id        = user_id,
-                mode           = mode if mode in ("paper", "live") else "paper",
-                pair           = pos.pair,
-                side           = pos.direction,
-                entry_price    = round(pos.entry, 8),
-                amount         = round(pos.size, 8),
-                stoploss_price = round(pos.sl, 8),
-                entry_time     = pos.opened_at,
-                status         = "open",
-                strategy_id    = strategy_id,
+                user_id           = user_id,
+                mode              = mode if mode in ("paper", "live") else "paper",
+                market_type       = market_type,
+                pair              = pos.pair,
+                side              = pos.direction,
+                leverage          = leverage,
+                liquidation_price = getattr(pos, "liquidation_price", None),
+                entry_price       = round(pos.entry, 8),
+                amount            = round(pos.size, 8),
+                stoploss_price    = round(pos.sl, 8),
+                entry_time        = pos.opened_at,
+                status            = "open",
+                strategy_id       = strategy_id,
             )
             db.add(trade)
             db.commit()
@@ -169,8 +174,9 @@ def _kucoin_get(path: str, params: dict | None = None) -> dict:
 
 
 def _kucoin_post_signed(path: str, body: dict, api_key: str,
-                         api_secret: str, passphrase: str) -> dict:
-    """POST to KuCoin private REST API (signed)."""
+                         api_secret: str, passphrase: str,
+                         base_url: str = KUCOIN_BASE) -> dict:
+    """POST to KuCoin private REST API (signed). base_url allows switching to Futures API."""
     import base64, hashlib, hmac as _hmac
     ts = str(int(time.time() * 1000))
     body_str = json.dumps(body)
@@ -189,7 +195,7 @@ def _kucoin_post_signed(path: str, body: dict, api_key: str,
         "KC-API-KEY-VERSION": "2",
         "Content-Type": "application/json",
     }
-    url = f"{KUCOIN_BASE}{path}"
+    url = f"{base_url}{path}"
     data = body_str.encode()
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
     with urllib.request.urlopen(req, timeout=20) as resp:

@@ -166,6 +166,43 @@ export const api = {
     },
   },
 
+  futures: {
+    start: (data: Record<string, unknown>) =>
+      request<any>('/api/futures/start', { method: 'POST', body: JSON.stringify(data) }),
+    stop: () => request<any>('/api/futures/stop', { method: 'POST' }),
+    status: () => request<any>('/api/futures/status'),
+    open: (mode?: 'paper' | 'live') =>
+      request<{ trades: any[] }>(`/api/futures/open${mode ? `?mode=${mode}` : ''}`),
+    history: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ trades: any[] }>(`/api/futures/history${qs}`);
+    },
+    forceClose: (pair: string) =>
+      request<any>(`/api/futures/force-close/${pair}`, { method: 'POST' }),
+  },
+
+  copy: {
+    becomeMaster: (strategy_id?: number) =>
+      request<any>('/api/copy/become-master', { method: 'POST', body: JSON.stringify({ strategy_id }) }),
+    mySignals: (limit = 50) => request<any>(`/api/copy/my-signals?limit=${limit}`),
+    myFollowers: () => request<any>('/api/copy/my-followers'),
+    subscribe: (data: Record<string, unknown>) =>
+      request<any>('/api/copy/subscribe', { method: 'POST', body: JSON.stringify(data) }),
+    unsubscribe: (masterId: string) =>
+      request<any>(`/api/copy/unsubscribe/${masterId}`, { method: 'DELETE' }),
+    mySubscriptions: () => request<any>('/api/copy/my-subscriptions'),
+    feed: (limit = 50) => request<any>(`/api/copy/feed?limit=${limit}`),
+  },
+
+  multiStrategy: {
+    list: () => request<any>('/api/strategies/instances'),
+    create: (data: Record<string, unknown>) =>
+      request<any>('/api/strategies/instances', { method: 'POST', body: JSON.stringify(data) }),
+    stop: (id: number) =>
+      request<any>(`/api/strategies/instances/${id}`, { method: 'DELETE' }),
+    status: () => request<any>('/api/strategies/instances/status'),
+  },
+
   bulkBacktest: (data: Record<string, unknown>) =>
     request<any>('/api/backtest/bulk', { method: 'POST', body: JSON.stringify(data) }),
 

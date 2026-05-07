@@ -6,17 +6,24 @@ import { useEffect, useState } from 'react';
 import { SidebarSignOut } from '@/components/AuthShell';
 
 const nav = [
-  { href: '/', label: 'Dashboard', icon: '⚡' },
-  { href: '/setup', label: 'Setup', icon: '⚙️' },
-  { href: '/strategy/upload', label: 'Upload Strategy', icon: '📄' },
-  { href: '/strategy/editor', label: 'Strategy Editor', icon: '✏️' },
-  { href: '/strategy/templates', label: 'Templates', icon: '📋' },
-  { href: '/opportunities', label: 'Opportunities', icon: '🎯' },
-  { href: '/backtest', label: 'Backtest', icon: '📊' },
-  { href: '/paper-trade', label: 'Paper Trade', icon: '📝' },
-  { href: '/live', label: 'Live Trading', icon: '🔴' },
-  { href: '/auto-trade', label: 'Auto-Trade', icon: '🤖' },
-  { href: '/history', label: 'History', icon: '📈' },
+  { href: '/',                  label: 'Dashboard',          icon: '⚡' },
+  { href: '/setup',             label: 'Setup',              icon: '⚙️' },
+  { href: '/strategy/upload',   label: 'Upload Strategy',    icon: '📄' },
+  { href: '/strategy/editor',   label: 'Strategy Editor',    icon: '✏️' },
+  { href: '/strategy/templates', label: 'Templates',         icon: '📋' },
+  { href: '/opportunities',     label: 'Opportunities',      icon: '🎯' },
+  { href: '/backtest',          label: 'Backtest',           icon: '📊' },
+  // ── Spot Trading ──────────────────────────────────────────────────
+  { href: '/paper-trade',       label: 'Paper Trade',        icon: '📝' },
+  { href: '/live',              label: 'Live Trading',       icon: '🔴' },
+  // ── Futures Trading ───────────────────────────────────────────────
+  { href: '/futures-paper',     label: 'Futures Paper',      icon: '📊' },
+  { href: '/futures-live',      label: 'Futures Live',       icon: '⚡' },
+  // ── Advanced ──────────────────────────────────────────────────────
+  { href: '/multi-strategy',    label: 'Multi-Strategy',     icon: '⚙️' },
+  { href: '/copy-trading',      label: 'Copy Trading',       icon: '📡' },
+  { href: '/auto-trade',        label: 'Auto-Trade',         icon: '🤖' },
+  { href: '/history',           label: 'History',            icon: '📈' },
 ];
 
 export default function Sidebar() {
