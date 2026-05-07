@@ -93,13 +93,14 @@ def _lightweight_migrate():
 
 
 def init_db():
-    """Idempotent bootstrap. In dev (sqlite) this creates tables and patches
-    schema. In production Alembic owns the schema, so init_db() only ensures
-    the data dir exists and tables are present (no-op if Alembic ran)."""
+    """Idempotent bootstrap — safe to call on every startup."""
     if engine.url.drivername.startswith("sqlite"):
         os.makedirs("data", exist_ok=True)
+    # 1. Create any missing tables (new tables from new models)
     Base.metadata.create_all(bind=engine)
+    # 2. Add any missing columns to existing tables (ALTER TABLE ADD COLUMN)
     _lightweight_migrate()
+    # 3. Ensure indexes exist
     with engine.begin() as conn:
         for table in Base.metadata.sorted_tables:
             for ix in table.indexes:
@@ -107,3 +108,5 @@ def init_db():
                     ix.create(bind=conn, checkfirst=True)
                 except Exception:
                     pass
+    # 4. Run it a second time to catch race conditions on first deploy
+    _lightweight_migrate()

@@ -27,13 +27,13 @@ class Trade(Base):
     id = Column(Integer, primary_key=True)
     user_id = Column(Text, nullable=False, default="local-dev", server_default="local-dev", index=True)
     strategy_id = Column(Integer, ForeignKey("strategies.id"))
-    mode = Column(Text, nullable=False)                    # paper | live
-    market_type = Column(Text, default="spot")             # spot | futures
+    mode = Column(Text, nullable=False)
+    market_type = Column(Text, default="spot", server_default="spot", nullable=True)
     pair = Column(Text, nullable=False)
-    side = Column(Text, default="long")                    # long | short
-    leverage = Column(Integer, default=1)                  # 1 = spot, >1 = futures
-    liquidation_price = Column(Float)                      # futures only
-    copy_source_id = Column(Integer, nullable=True)        # FK copy_signals.id
+    side = Column(Text, default="long")
+    leverage = Column(Integer, default=1, server_default="1", nullable=True)
+    liquidation_price = Column(Float, nullable=True)
+    copy_source_id = Column(Integer, nullable=True)
     entry_price = Column(Float)
     exit_price = Column(Float)
     amount = Column(Float)                                 # USDT stake / margin

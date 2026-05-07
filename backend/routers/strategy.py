@@ -252,12 +252,26 @@ def list_strategies(
     user_id: str = Depends(get_user_id),
 ):
     from sqlalchemy import or_
-    result = db.execute(
-        select(Strategy)
-        .where(or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa: E712
-        .order_by(Strategy.is_template.desc(), Strategy.created_at.desc())
-    )
-    strategies = result.scalars().all()
+    try:
+        result = db.execute(
+            select(Strategy)
+            .where(or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa: E712
+            .order_by(Strategy.is_template.desc(), Strategy.created_at.desc())
+        )
+        strategies = result.scalars().all()
+    except Exception:
+        # Fallback: skip template filter if new columns haven't migrated yet
+        db.rollback()
+        try:
+            result = db.execute(
+                select(Strategy).where(Strategy.user_id == user_id)
+                .order_by(Strategy.created_at.desc())
+            )
+            strategies = result.scalars().all()
+        except Exception:
+            db.rollback()
+            strategies = []
+
     return {
         "strategies": [
             {
@@ -265,7 +279,7 @@ def list_strategies(
                 "name": s.name,
                 "description": s.description,
                 "timeframe": s.timeframe,
-                "is_template": s.is_template,
+                "is_template": getattr(s, "is_template", False),
                 "auto_trade_enabled": bool(getattr(s, "auto_trade_enabled", False)),
                 "auto_trade_mode": getattr(s, "auto_trade_mode", "paper"),
                 "created_at": str(s.created_at),
