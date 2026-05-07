@@ -19,6 +19,26 @@ from backend.utils.audit import log_event
 router = APIRouter(prefix="/api/futures", tags=["futures"])
 
 
+# ── One-time cleanup ──────────────────────────────────────────────────────────
+
+@router.delete("/cleanup-test-trades")
+def cleanup_test_trades(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Delete all open futures trades for this user (removes stale test records)."""
+    from sqlalchemy import delete as sql_delete
+    result = db.execute(
+        sql_delete(Trade).where(
+            Trade.user_id == user_id,
+            Trade.market_type == "futures",
+            Trade.status == "open",
+        )
+    )
+    db.commit()
+    return {"deleted": result.rowcount, "user_id": user_id}
+
+
 # ── Start / Stop ─────────────────────────────────────────────────────────────
 
 @router.post("/start")
