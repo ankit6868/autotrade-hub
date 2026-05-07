@@ -15,7 +15,8 @@ interface Props {
   pair: string;
   timeframe: string;
   isRunning: boolean;
-  isLive?: boolean;   // true = live trading, false/undefined = paper
+  isLive?: boolean;     // true = live trading, false/undefined = paper
+  isFutures?: boolean;  // true = futures engine (isolated from spot)
   onManualBuy?: () => void;
   onManualSell?: () => void;
 }
@@ -136,7 +137,7 @@ function buildStatus(
   return { ready, conditions, recommendation: rec, fireCount: tradeCount, lastFired: lastTrade };
 }
 
-export default function StrategySignalMonitor({ strategyName, pair, timeframe, isRunning, isLive = false, onManualBuy, onManualSell }: Props) {
+export default function StrategySignalMonitor({ strategyName, pair, timeframe, isRunning, isLive = false, isFutures = false, onManualBuy, onManualSell }: Props) {
   const [status, setStatus] = useState<SignalStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [buyLoading, setBuyLoading] = useState(false);
@@ -146,23 +147,25 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      const mode = isLive ? 'live' : 'paper';
       const [sigData, histData] = await Promise.all([
         api.market.signals(pair, timeframe) as Promise<{ summary?: { recommendation: string }; indicators?: Record<string, number | null> }>,
-        api.trade.history({ mode: isLive ? 'live' : 'paper', limit: '100' }) as Promise<{ trades: Array<{ profit_abs: number; close_date?: string; exit_time?: string; exit_reason?: string; open_reason?: string }> }>,
+        // Route to futures history when on a futures page — keeps data isolated
+        isFutures
+          ? (api.futures.history({ mode, limit: '100' }) as Promise<{ trades: Array<{ profit_abs: number; exit_time?: string }> }>)
+          : (api.trade.history({ mode, limit: '100' }) as Promise<{ trades: Array<{ profit_abs: number; close_date?: string; exit_time?: string }> }>),
       ]);
       const rec = sigData?.summary?.recommendation || 'NEUTRAL';
       const allTrades = histData?.trades || [];
-      // Auto-fired = any closed trade (strategy opens all of them automatically)
-      // Use exit_time or close_date whichever is present
       const lastTrade = allTrades.length > 0
-        ? (allTrades[0]?.exit_time || allTrades[0]?.close_date || null)
+        ? (allTrades[0]?.exit_time || (allTrades[0] as any)?.close_date || null)
         : null;
       setStatus(buildStatus(strategyName, sigData?.indicators, rec, allTrades.length, lastTrade));
     } catch {
       setStatus(null);
     }
     setLoading(false);
-  }, [strategyName, pair, timeframe]);
+  }, [strategyName, pair, timeframe, isLive, isFutures]);
 
   useEffect(() => {
     load();
@@ -173,9 +176,15 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
   async function handleManualBuy() {
     setBuyLoading(true);
     try {
-      const res = await api.trade.manualEntry(pair, 'long');
+      // isFutures=true → futures engine (market_type='futures', isolated DB rows)
+      // isFutures=false → spot engine (market_type='spot')
+      const res = isFutures
+        ? await api.futures.manualEntry(pair, 'long')
+        : await api.trade.manualEntry(pair, 'long');
       if (res?.entered) {
-        setTradeMsg({ ok: true, msg: `Bought ${pair} @ ${res.entry} | SL: ${res.sl} | TP: ${res.tp}` });
+        const liqInfo = res.liq ? ` | Liq: ${res.liq}` : '';
+        const levInfo = res.leverage ? ` (${res.leverage}x)` : '';
+        setTradeMsg({ ok: true, msg: `Bought ${pair}${levInfo} @ ${res.entry} | SL: ${res.sl} | TP: ${res.tp}${liqInfo}` });
         onManualBuy?.();
         load();
       } else {
@@ -185,15 +194,19 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
       setTradeMsg({ ok: false, msg: String(e) });
     }
     setBuyLoading(false);
-    setTimeout(() => setTradeMsg(null), 5000);
+    setTimeout(() => setTradeMsg(null), 6000);
   }
 
   async function handleManualSell() {
     setSellLoading(true);
     try {
-      const res = await api.trade.manualEntry(pair, 'short');
+      const res = isFutures
+        ? await api.futures.manualEntry(pair, 'short')
+        : await api.trade.manualEntry(pair, 'short');
       if (res?.entered) {
-        setTradeMsg({ ok: true, msg: `Sold ${pair} @ ${res.entry} | SL: ${res.sl} | TP: ${res.tp}` });
+        const liqInfo = res.liq ? ` | Liq: ${res.liq}` : '';
+        const levInfo = res.leverage ? ` (${res.leverage}x)` : '';
+        setTradeMsg({ ok: true, msg: `Sold ${pair}${levInfo} @ ${res.entry} | SL: ${res.sl} | TP: ${res.tp}${liqInfo}` });
         onManualSell?.();
         load();
       } else {
@@ -203,7 +216,7 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
       setTradeMsg({ ok: false, msg: String(e) });
     }
     setSellLoading(false);
-    setTimeout(() => setTradeMsg(null), 5000);
+    setTimeout(() => setTradeMsg(null), 6000);
   }
 
   const metCount = status?.conditions.filter(c => c.met).length || 0;

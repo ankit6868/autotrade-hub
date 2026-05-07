@@ -251,6 +251,94 @@ def futures_history(
     return {"trades": trades}
 
 
+# ── Manual Entry (futures) ────────────────────────────────────────────────────
+
+@router.post("/manual-entry")
+def futures_manual_entry(
+    req: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """
+    Manually open a futures position at the current market price.
+    Uses the FuturesEngine — 100% isolated from the spot engine.
+    The position appears ONLY in futures open positions / trade log, never spot.
+    """
+    from backend.services.native_trading_engine import _kucoin_get, _persist_open_trade
+    from backend.services.futures_engine import FuturesPosition, _calc_liquidation_price
+    from datetime import datetime, timezone as _tz
+
+    pair      = req.get("pair", "BTC/USDT")
+    direction = req.get("direction", "long")
+    stake_pct = float(req.get("stake_pct", 5.0))
+
+    eng = futures_engine_registry.for_user(user_id)
+
+    # Default sensible values if engine hasn't been started yet
+    leverage = eng._leverage if eng._leverage else 10
+    mode     = eng._mode     if eng._mode     else "paper"
+    balance  = eng.balance   if eng.balance   else 1000.0
+    sl_pct   = abs(eng._stoploss or 0.03)
+    tp_pct   = eng._take_profit_pct if hasattr(eng, "_take_profit_pct") and eng._take_profit_pct else 1.5
+
+    # Fetch current price from KuCoin
+    try:
+        sym  = pair.replace("/", "-")
+        data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
+        if str(data.get("code")) != "200000":
+            return {"error": f"Could not fetch price for {pair}"}
+        entry_price = float(data["data"]["price"])
+    except Exception as e:
+        return {"error": f"Price fetch failed: {e}"}
+
+    stake = balance * (stake_pct / 100)
+
+    if direction == "long":
+        sl_price = round(entry_price * (1 - sl_pct), 6)
+        tp_price = round(entry_price * (1 + tp_pct / 100), 6)
+    else:
+        sl_price = round(entry_price * (1 + sl_pct), 6)
+        tp_price = round(entry_price * (1 - tp_pct / 100), 6)
+
+    # Build a FuturesPosition (liquidation is computed inside __init__)
+    now = datetime.now(_tz.utc)
+    pos = FuturesPosition(
+        pair=pair, direction=direction,
+        entry=entry_price, sl=sl_price, tp=tp_price,
+        size=stake, leverage=leverage, opened_at=now,
+    )
+
+    pos_key = f"{pair}-{direction}-manual-{int(now.timestamp())}"
+    with eng._lock:
+        eng.positions[pos_key] = pos
+
+    # Persist to DB — market_type="futures" ensures it's NOT mixed with spot
+    db_id = _persist_open_trade(
+        user_id, pos, mode,
+        strategy_id  = eng._strategy_id,
+        leverage     = leverage,
+        market_type  = "futures",
+    )
+    pos.db_id = db_id
+
+    log_event(db, user_id, "futures.manual_entry", request, payload={
+        "pair": pair, "direction": direction, "entry": entry_price,
+        "leverage": leverage, "mode": mode,
+    })
+    return {
+        "entered": True,
+        "pair": pair,
+        "direction": direction,
+        "entry": entry_price,
+        "sl": sl_price,
+        "tp": tp_price,
+        "liq": pos.liquidation_price,
+        "leverage": leverage,
+        "mode": mode,
+    }
+
+
 # ── Force Close ───────────────────────────────────────────────────────────────
 
 @router.post("/force-close/{pair:path}")

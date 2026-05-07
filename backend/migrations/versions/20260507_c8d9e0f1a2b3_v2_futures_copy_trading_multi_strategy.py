@@ -25,125 +25,132 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
-def _col_exists(table: str, col: str) -> bool:
-    """Check if a column already exists — safe for repeated migrations."""
-    from sqlalchemy import inspect as sa_inspect
-    bind = op.get_bind()
-    return col in {c["name"] for c in sa_inspect(bind).get_columns(table)}
-
-
-def _table_exists(table: str) -> bool:
-    from sqlalchemy import inspect as sa_inspect
-    bind = op.get_bind()
-    return sa_inspect(bind).has_table(table)
-
-
 def upgrade() -> None:
-    # ── trades: add futures columns (idempotent — skip if already added) ─
-    if not _col_exists("trades", "market_type"):
-        op.add_column("trades", sa.Column(
-            "market_type", sa.Text(), nullable=True, server_default="spot"
-        ))
-    if not _col_exists("trades", "leverage"):
-        op.add_column("trades", sa.Column(
-            "leverage", sa.Integer(), nullable=True, server_default="1"
-        ))
-    if not _col_exists("trades", "liquidation_price"):
-        op.add_column("trades", sa.Column(
-            "liquidation_price", sa.Float(), nullable=True
-        ))
-    if not _col_exists("trades", "copy_source_id"):
-        op.add_column("trades", sa.Column(
-            "copy_source_id", sa.Integer(), nullable=True
-        ))
+    """
+    Nuclear idempotent approach — raw PostgreSQL IF NOT EXISTS.
+    These statements CANNOT raise DuplicateColumn regardless of how many times
+    they run or what state the DB is already in.
+    """
+    from sqlalchemy import text
 
-    # ── strategies: add copy trading columns ─────────────────────────────
-    if not _col_exists("strategies", "allow_copy_trading"):
-        op.add_column("strategies", sa.Column(
-            "allow_copy_trading", sa.Boolean(), nullable=True, server_default="false"
+    # ── trades: add futures columns ───────────────────────────────────────────
+    alter_stmts = [
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS market_type TEXT DEFAULT 'spot'",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS leverage INTEGER DEFAULT 1",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS liquidation_price FLOAT",
+        "ALTER TABLE trades ADD COLUMN IF NOT EXISTS copy_source_id INTEGER",
+        # ── strategies: copy-trading opt-in ───────────────────────────────────
+        "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS allow_copy_trading BOOLEAN DEFAULT false",
+        "ALTER TABLE strategies ADD COLUMN IF NOT EXISTS default_leverage INTEGER DEFAULT 1",
+    ]
+    for stmt in alter_stmts:
+        try:
+            op.execute(text(stmt))
+        except Exception:
+            pass  # already exists or table doesn't exist — safe to ignore
+
+    # ── strategy_instances: multi-strategy per user ───────────────────────────
+    op.execute(text("""
+        CREATE TABLE IF NOT EXISTS strategy_instances (
+            id              SERIAL PRIMARY KEY,
+            user_id         TEXT NOT NULL,
+            strategy_id     INTEGER REFERENCES strategies(id),
+            strategy_name   TEXT NOT NULL,
+            market_type     TEXT DEFAULT 'spot',
+            mode            TEXT DEFAULT 'paper',
+            pairs           TEXT DEFAULT 'BTC/USDT',
+            leverage        INTEGER DEFAULT 1,
+            timeframe       TEXT DEFAULT '15m',
+            stoploss        FLOAT DEFAULT -0.03,
+            takeprofit      FLOAT DEFAULT 0.015,
+            wallet          FLOAT DEFAULT 1000.0,
+            risk_pct        FLOAT DEFAULT 5.0,
+            is_running      BOOLEAN DEFAULT false,
+            engine_key      TEXT UNIQUE,
+            total_trades    INTEGER DEFAULT 0,
+            total_pnl       FLOAT DEFAULT 0.0,
+            created_at      TIMESTAMP DEFAULT NOW(),
+            updated_at      TIMESTAMP DEFAULT NOW()
+        )
+    """))
+    try:
+        op.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_strategy_instances_user_id ON strategy_instances(user_id)"
         ))
-    if not _col_exists("strategies", "default_leverage"):
-        op.add_column("strategies", sa.Column(
-            "default_leverage", sa.Integer(), nullable=True, server_default="1"
+    except Exception:
+        pass
+
+    # ── copy_signals ──────────────────────────────────────────────────────────
+    op.execute(text("""
+        CREATE TABLE IF NOT EXISTS copy_signals (
+            id              SERIAL PRIMARY KEY,
+            master_user_id  TEXT NOT NULL,
+            pair            TEXT NOT NULL,
+            direction       TEXT DEFAULT 'long',
+            market_type     TEXT DEFAULT 'spot',
+            leverage        INTEGER DEFAULT 1,
+            entry_price     FLOAT,
+            sl_price        FLOAT,
+            tp_price        FLOAT,
+            stake_pct       FLOAT DEFAULT 5.0,
+            strategy_name   TEXT,
+            signal_type     TEXT DEFAULT 'entry',
+            profit_pct      FLOAT,
+            profit_abs      FLOAT,
+            broadcasted_at  TIMESTAMP DEFAULT NOW(),
+            expires_at      TIMESTAMP,
+            closed_at       TIMESTAMP
+        )
+    """))
+    try:
+        op.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_copy_signals_master_user_id ON copy_signals(master_user_id)"
         ))
+    except Exception:
+        pass
 
-    # ── strategy_instances: multi-strategy per user ───────────────────────
-    if _table_exists("strategy_instances"):
-        return  # all tables already created — nothing left to do
-    op.create_table(
-        "strategy_instances",
-        sa.Column("id",            sa.Integer(), primary_key=True),
-        sa.Column("user_id",       sa.Text(),    nullable=False, index=True),
-        sa.Column("strategy_id",   sa.Integer(), sa.ForeignKey("strategies.id"), nullable=True),
-        sa.Column("strategy_name", sa.Text(),    nullable=False),
-        sa.Column("market_type",   sa.Text(),    nullable=True, server_default="spot"),
-        sa.Column("mode",          sa.Text(),    nullable=True, server_default="paper"),
-        sa.Column("pairs",         sa.Text(),    nullable=True, server_default="BTC/USDT"),
-        sa.Column("leverage",      sa.Integer(), nullable=True, server_default="1"),
-        sa.Column("timeframe",     sa.Text(),    nullable=True, server_default="15m"),
-        sa.Column("stoploss",      sa.Float(),   nullable=True, server_default="-0.03"),
-        sa.Column("takeprofit",    sa.Float(),   nullable=True, server_default="0.015"),
-        sa.Column("wallet",        sa.Float(),   nullable=True, server_default="1000.0"),
-        sa.Column("risk_pct",      sa.Float(),   nullable=True, server_default="5.0"),
-        sa.Column("is_running",    sa.Boolean(), nullable=True, server_default="false"),
-        sa.Column("engine_key",    sa.Text(),    nullable=True, unique=True),
-        sa.Column("total_trades",  sa.Integer(), nullable=True, server_default="0"),
-        sa.Column("total_pnl",     sa.Float(),   nullable=True, server_default="0.0"),
-        sa.Column("created_at",    sa.DateTime(), server_default=sa.func.now()),
-        sa.Column("updated_at",    sa.DateTime(), server_default=sa.func.now(), onupdate=sa.func.now()),
-    )
-    op.create_index("ix_strategy_instances_user_id", "strategy_instances", ["user_id"])
-
-    # ── copy_signals: master broadcast records ────────────────────────────
-    op.create_table(
-        "copy_signals",
-        sa.Column("id",              sa.Integer(), primary_key=True),
-        sa.Column("master_user_id",  sa.Text(),    nullable=False, index=True),
-        sa.Column("pair",            sa.Text(),    nullable=False),
-        sa.Column("direction",       sa.Text(),    nullable=True, server_default="long"),
-        sa.Column("market_type",     sa.Text(),    nullable=True, server_default="spot"),
-        sa.Column("leverage",        sa.Integer(), nullable=True, server_default="1"),
-        sa.Column("entry_price",     sa.Float(),   nullable=True),
-        sa.Column("sl_price",        sa.Float(),   nullable=True),
-        sa.Column("tp_price",        sa.Float(),   nullable=True),
-        sa.Column("stake_pct",       sa.Float(),   nullable=True, server_default="5.0"),
-        sa.Column("strategy_name",   sa.Text(),    nullable=True),
-        sa.Column("signal_type",     sa.Text(),    nullable=True, server_default="entry"),
-        sa.Column("profit_pct",      sa.Float(),   nullable=True),
-        sa.Column("profit_abs",      sa.Float(),   nullable=True),
-        sa.Column("broadcasted_at",  sa.DateTime(), server_default=sa.func.now()),
-        sa.Column("expires_at",      sa.DateTime(), nullable=True),
-        sa.Column("closed_at",       sa.DateTime(), nullable=True),
-    )
-    op.create_index("ix_copy_signals_master_user_id", "copy_signals", ["master_user_id"])
-
-    # ── copy_subscriptions: follower → master relationships ───────────────
-    op.create_table(
-        "copy_subscriptions",
-        sa.Column("id",                  sa.Integer(), primary_key=True),
-        sa.Column("follower_user_id",    sa.Text(),    nullable=False, index=True),
-        sa.Column("master_user_id",      sa.Text(),    nullable=False, index=True),
-        sa.Column("is_active",           sa.Boolean(), nullable=True, server_default="true"),
-        sa.Column("copy_mode",           sa.Text(),    nullable=True, server_default="paper"),
-        sa.Column("copy_market_type",    sa.Text(),    nullable=True, server_default="spot"),
-        sa.Column("max_leverage",        sa.Integer(), nullable=True, server_default="10"),
-        sa.Column("stake_override_pct",  sa.Float(),   nullable=True),
-        sa.Column("total_copied",        sa.Integer(), nullable=True, server_default="0"),
-        sa.Column("total_profit",        sa.Float(),   nullable=True, server_default="0.0"),
-        sa.Column("win_count",           sa.Integer(), nullable=True, server_default="0"),
-        sa.Column("created_at",          sa.DateTime(), server_default=sa.func.now()),
-    )
-    op.create_index("ix_copy_subscriptions_follower", "copy_subscriptions", ["follower_user_id"])
-    op.create_index("ix_copy_subscriptions_master",   "copy_subscriptions", ["master_user_id"])
+    # ── copy_subscriptions ────────────────────────────────────────────────────
+    op.execute(text("""
+        CREATE TABLE IF NOT EXISTS copy_subscriptions (
+            id                  SERIAL PRIMARY KEY,
+            follower_user_id    TEXT NOT NULL,
+            master_user_id      TEXT NOT NULL,
+            is_active           BOOLEAN DEFAULT true,
+            copy_mode           TEXT DEFAULT 'paper',
+            copy_market_type    TEXT DEFAULT 'spot',
+            max_leverage        INTEGER DEFAULT 10,
+            stake_override_pct  FLOAT,
+            total_copied        INTEGER DEFAULT 0,
+            total_profit        FLOAT DEFAULT 0.0,
+            win_count           INTEGER DEFAULT 0,
+            created_at          TIMESTAMP DEFAULT NOW()
+        )
+    """))
+    try:
+        op.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_copy_subscriptions_follower ON copy_subscriptions(follower_user_id)"
+        ))
+        op.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_copy_subscriptions_master ON copy_subscriptions(master_user_id)"
+        ))
+    except Exception:
+        pass
 
 
 def downgrade() -> None:
-    op.drop_table("copy_subscriptions")
-    op.drop_table("copy_signals")
-    op.drop_table("strategy_instances")
-    op.drop_column("strategies", "default_leverage")
-    op.drop_column("strategies", "allow_copy_trading")
-    op.drop_column("trades", "copy_source_id")
-    op.drop_column("trades", "liquidation_price")
-    op.drop_column("trades", "leverage")
-    op.drop_column("trades", "market_type")
+    from sqlalchemy import text
+    for stmt in [
+        "DROP TABLE IF EXISTS copy_subscriptions",
+        "DROP TABLE IF EXISTS copy_signals",
+        "DROP TABLE IF EXISTS strategy_instances",
+        "ALTER TABLE strategies DROP COLUMN IF EXISTS default_leverage",
+        "ALTER TABLE strategies DROP COLUMN IF EXISTS allow_copy_trading",
+        "ALTER TABLE trades DROP COLUMN IF EXISTS copy_source_id",
+        "ALTER TABLE trades DROP COLUMN IF EXISTS liquidation_price",
+        "ALTER TABLE trades DROP COLUMN IF EXISTS leverage",
+        "ALTER TABLE trades DROP COLUMN IF EXISTS market_type",
+    ]:
+        try:
+            op.execute(text(stmt))
+        except Exception:
+            pass

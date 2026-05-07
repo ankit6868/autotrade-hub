@@ -146,11 +146,12 @@ function FuturesPaperInner() {
         ))}
       </div>
 
-      {/* Signal Monitor */}
+      {/* Signal Monitor — isFutures routes manual buy/sell to FuturesEngine, not spot */}
       {strategyId && (
         <StrategySignalMonitor
           strategyName={strategies.find(s => s.id === strategyId)?.name || 'Strategy'}
-          pair={pairs[0] || 'BTC/USDT'} timeframe={timeframe} isRunning={isRunning}
+          pair={pairs[0] || 'BTC/USDT'} timeframe={timeframe}
+          isRunning={isRunning} isFutures={true}
         />
       )}
 
