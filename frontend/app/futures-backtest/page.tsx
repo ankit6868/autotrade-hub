@@ -1,26 +1,69 @@
 'use client';
+
 import { useEffect, useState, Suspense } from 'react';
 import { api } from '@/lib/api';
-import PairPicker from '@/components/ui/PairPicker';
+import MetricCard from '@/components/ui/MetricCard';
+import LoadingSpinner from '@/components/ui/LoadingSpinner';
+import {
+  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  BarChart, Bar, Cell,
+} from 'recharts';
+
+// ─── Time-range helpers (same as spot backtest) ───────────────────────────────
+const PRESETS = [
+  { label: '1M',     days: 30,   note: '' },
+  { label: '3M',     days: 90,   note: '' },
+  { label: '6M',     days: 180,  note: '' },
+  { label: '1Y',     days: 365,  note: '' },
+  { label: '2Y',     days: 730,  note: '~30s download' },
+  { label: '5Y',     days: 1825, note: '~2 min download' },
+  { label: '10Y',    days: 3650, note: '~5 min download' },
+  { label: 'Custom', days: 0,    note: '' },
+];
+
+function toYMD(d: Date): string {
+  const y  = d.getFullYear();
+  const m  = String(d.getMonth() + 1).padStart(2, '0');
+  const dy = String(d.getDate()).padStart(2, '0');
+  return `${y}${m}${dy}`;
+}
+function fromYMD(s: string): string {
+  if (s.length !== 8) return s;
+  const d = new Date(Number(s.slice(0, 4)), Number(s.slice(4, 6)) - 1, Number(s.slice(6, 8)));
+  return d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+}
+function buildTimerange(days: number): string {
+  const end   = new Date();
+  const start = new Date();
+  start.setDate(end.getDate() - days);
+  return `${toYMD(start)}-${toYMD(end)}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function FuturesBacktestInner() {
-  // ── Config ────────────────────────────────────────────────────────────────
-  const [strategies, setStrategies]     = useState<any[]>([]);
-  const [strategyId, setStrategyId]     = useState<number | null>(null);
-  const [pairs, setPairs]               = useState(['BTC/USDT']);
-  const [timeframe, setTimeframe]       = useState('15m');
-  const [timerange, setTimerange]       = useState('20240101-20241231');
-  const [leverage, setLeverage]         = useState(10);
-  const [startBalance, setStartBalance] = useState(1000);
-  const [stoploss, setStoploss]         = useState(3.0);
-  const [takeProfit, setTakeProfit]     = useState(1.5);
+  // ── Config ─────────────────────────────────────────────────────────────────
+  const [strategies,      setStrategies]      = useState<any[]>([]);
+  const [strategyId,      setStrategyId]      = useState<number | null>(null);
+  const [selectedPreset,  setSelectedPreset]  = useState('1Y');
+  const [timerange,       setTimerange]       = useState(() => buildTimerange(365));
+  const [customRange,     setCustomRange]     = useState('');
+  const [pairs,           setPairs]           = useState<string[]>(['BTC/USDT']);
+  const [pairQuery,       setPairQuery]       = useState('');
+  const [availablePairs,  setAvailablePairs]  = useState<string[]>([]);
+  const [pairsLoading,    setPairsLoading]    = useState(false);
+  const [showPairDrop,    setShowPairDrop]    = useState(false);
+  const [timeframe,       setTimeframe]       = useState('15m');
+  const [startBalance,    setStartBalance]    = useState(1000);
+  const [leverage,        setLeverage]        = useState(10);
+  const [stoploss,        setStoploss]        = useState(3.0);
+  const [takeProfit,      setTakeProfit]      = useState(1.5);
 
-  // ── State ─────────────────────────────────────────────────────────────────
-  const [loading, setLoading]           = useState(false);
-  const [result, setResult]             = useState<any>(null);
-  const [history, setHistory]           = useState<any[]>([]);
-  const [error, setError]               = useState('');
-  const [activeTab, setActiveTab]       = useState<'trades' | 'equity' | 'history'>('trades');
+  // ── State ───────────────────────────────────────────────────────────────────
+  const [running,  setRunning]  = useState(false);
+  const [result,   setResult]   = useState<any>(null);
+  const [history,  setHistory]  = useState<any[]>([]);
+  const [error,    setError]    = useState('');
 
   useEffect(() => {
     api.strategy.list().then(d => {
@@ -28,13 +71,22 @@ function FuturesBacktestInner() {
       if (d.strategies?.length > 0) {
         const first = d.strategies[0];
         setStrategyId(Number(first.id));
-        if (first.stoploss)        setStoploss(Math.abs(Number(first.stoploss) * 100));
-        if (first.take_profit)     setTakeProfit(Number(first.take_profit) * 100);
+        if (first.stoploss)         setStoploss(Math.abs(Number(first.stoploss) * 100));
+        if (first.take_profit)      setTakeProfit(Number(first.take_profit) * 100);
         if (first.default_leverage) setLeverage(Number(first.default_leverage));
-        if (first.timeframe)       setTimeframe(first.timeframe);
+        if (first.timeframe)        setTimeframe(first.timeframe);
       }
     }).catch(() => {});
-    api.futures.backtest.history().then(d => setHistory(d.backtests ?? [])).catch(() => {});
+
+    setPairsLoading(true);
+    api.market.pairs()
+      .then(d => setAvailablePairs((d as any).pairs ?? []))
+      .catch(() => {})
+      .finally(() => setPairsLoading(false));
+
+    api.futures.backtest.history()
+      .then(d => setHistory(d.backtests ?? []))
+      .catch(() => {});
   }, []);
 
   // Auto-fill when strategy changes
@@ -48,84 +100,209 @@ function FuturesBacktestInner() {
     if (s.timeframe)        setTimeframe(s.timeframe);
   }, [strategyId, strategies]);
 
+  function selectPreset(label: string, days: number) {
+    setSelectedPreset(label);
+    if (label !== 'Custom') setTimerange(buildTimerange(days));
+  }
+
+  const filteredPairs = availablePairs
+    .filter(p => p.toLowerCase().includes(pairQuery.toLowerCase()) && !pairs.includes(p))
+    .slice(0, 50);
+
+  function addPair(p: string) {
+    if (!pairs.includes(p)) setPairs([...pairs, p]);
+    setPairQuery(''); setShowPairDrop(false);
+  }
+  function removePair(p: string) { setPairs(pairs.filter(x => x !== p)); }
+
   async function runBacktest() {
     if (!strategyId) return;
-    setLoading(true); setError(''); setResult(null);
+    setRunning(true); setResult(null); setError('');
+    const activeRange = selectedPreset === 'Custom' ? customRange : timerange;
     try {
-      const r = await api.futures.backtest.run({
+      const data = await api.futures.backtest.run({
         strategy_id:      strategyId,
         pairs,
         timeframe,
-        timerange,
+        timerange:        activeRange,
         leverage,
         starting_balance: startBalance,
         stoploss_pct:     stoploss,
         take_profit_pct:  takeProfit,
       });
-      if (r.error) setError(r.error);
+      if (data.error) setError(data.error);
       else {
-        setResult(r);
-        // Refresh history
+        setResult(data);
         api.futures.backtest.history().then(d => setHistory(d.backtests ?? [])).catch(() => {});
       }
     } catch (e) { setError(String(e)); }
-    setLoading(false);
+    setRunning(false);
   }
 
-  const m = result?.metrics;
+  const activeRange   = selectedPreset === 'Custom' ? customRange : timerange;
+  const [rangeStart, rangeEnd] = activeRange.split('-');
+  const currentPreset = PRESETS.find(p => p.label === selectedPreset);
+  const m             = result?.metrics;
+  const trades        = result?.trades ?? [];
+
+  // Build equity curve for chart
+  const equityCurve = [{ trade: 0, equity: startBalance },
+    ...trades.map((t: any, i: number) => ({
+      trade:  i + 1,
+      equity: t.balance,
+    }))
+  ];
 
   return (
     <div className="max-w-6xl mx-auto">
       {/* Header */}
-      <div className="mb-6">
-        <h1 className="heading-xl">📊 Futures Backtest</h1>
-        <p className="text-slate-400 text-sm mt-1">
-          Test your strategy with leverage on historical KuCoin data — includes liquidation simulation
-        </p>
-      </div>
+      <h1 className="heading-xl mb-2">⚡ Futures Backtest</h1>
+      <p className="text-slate-400 mb-6 text-sm">
+        Test leveraged futures strategies on real KuCoin historical data — up to 10 years back.
+        Includes liquidation simulation, funding fees, and long/short breakdown.
+      </p>
 
       {/* Config card */}
-      <div className="card mb-6">
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-          <div>
+      <div className="card mb-8">
+
+        {/* ── Historical Period ──────────────────────────────────────── */}
+        <div className="mb-6">
+          <label className="label mb-2">Historical Period</label>
+
+          {/* Preset chips */}
+          <div className="flex flex-wrap gap-2 mb-3">
+            {PRESETS.map(p => (
+              <button
+                key={p.label}
+                onClick={() => selectPreset(p.label, p.days)}
+                className={`relative px-4 py-2 rounded-xl text-sm font-semibold border transition-all ${
+                  selectedPreset === p.label
+                    ? 'bg-brand-600/30 border-brand-500 text-brand-200 shadow-lg shadow-brand-500/10'
+                    : 'bg-[#1a2236] border-[#2a3a52] text-slate-400 hover:text-white hover:border-slate-500'
+                }`}
+              >
+                {p.label}
+                {p.note && (
+                  <span className="absolute -top-1.5 -right-1 text-[9px] bg-amber-500/20 text-amber-400 border border-amber-500/30 px-1 rounded-full whitespace-nowrap">
+                    {p.note}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* Date display / custom input */}
+          {selectedPreset === 'Custom' ? (
+            <div>
+              <input className="input max-w-xs" value={customRange}
+                onChange={e => setCustomRange(e.target.value)}
+                placeholder="YYYYMMDD-YYYYMMDD" />
+              <p className="text-xs text-slate-500 mt-1">
+                Format: <code className="text-slate-400">YYYYMMDD-YYYYMMDD</code>
+              </p>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 text-sm">
+              <span className="bg-[#0a0f1c] border border-[#2a3a52] rounded-lg px-3 py-1.5 text-slate-300 font-mono text-xs">
+                {fromYMD(rangeStart)} → {fromYMD(rangeEnd)}
+              </span>
+              <span className="text-slate-500 text-xs">({activeRange})</span>
+            </div>
+          )}
+
+          {(selectedPreset === '5Y' || selectedPreset === '10Y') && (
+            <div className="mt-3 flex items-start gap-2 p-3 rounded-lg bg-amber-500/10 border border-amber-500/30">
+              <span className="text-amber-400 mt-0.5">⚠️</span>
+              <p className="text-xs text-amber-300">
+                <strong>{selectedPreset} of data</strong> needs to be downloaded from KuCoin on first run
+                ({selectedPreset === '5Y' ? '~2 minutes' : '~5 minutes'} for 15m candles).
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* ── Strategy / Pairs / Timeframe ───────────────────────────── */}
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
+          <div className="col-span-2">
             <label className="label">Strategy</label>
-            <select className="input" value={strategyId ?? ''} onChange={e => setStrategyId(Number(e.target.value))}>
-              {strategies.map((s: any) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            <select className="input" value={strategyId ?? ''}
+              onChange={e => setStrategyId(Number(e.target.value))}>
+              {strategies.map((s: any) => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
             </select>
           </div>
-          <div className="md:col-span-2">
-            <label className="label">Pairs</label>
-            <PairPicker value={pairs} onChange={setPairs} />
+
+          {/* Pair search — same component as spot backtest */}
+          <div className="col-span-2 md:col-span-3 lg:col-span-2 relative">
+            <label className="label">
+              Pairs
+              {pairsLoading && <span className="text-[10px] text-slate-500 ml-2">loading…</span>}
+            </label>
+            <div className="input flex flex-wrap gap-1.5 min-h-[42px] items-center">
+              {pairs.map(p => (
+                <span key={p} className="flex items-center gap-1 px-2 py-0.5 bg-brand-600/20 text-brand-300 border border-brand-500/30 rounded text-xs">
+                  {p}
+                  <button type="button" onClick={() => removePair(p)}
+                    className="text-brand-300/60 hover:text-white ml-0.5">×</button>
+                </span>
+              ))}
+              <input
+                className="flex-1 bg-transparent outline-none text-sm min-w-[120px]"
+                value={pairQuery}
+                onChange={e => { setPairQuery(e.target.value); setShowPairDrop(true); }}
+                onFocus={() => setShowPairDrop(true)}
+                onBlur={() => setTimeout(() => setShowPairDrop(false), 150)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && pairQuery.trim()) {
+                    e.preventDefault();
+                    const typed = pairQuery.trim().toUpperCase();
+                    const match = availablePairs.find(p => p.toUpperCase() === typed) ?? typed;
+                    addPair(match);
+                  }
+                  if (e.key === 'Backspace' && !pairQuery && pairs.length)
+                    removePair(pairs[pairs.length - 1]);
+                }}
+                placeholder={pairs.length === 0 ? 'Search coin (e.g. BTC, ETH)…' : ''}
+              />
+            </div>
+            {showPairDrop && filteredPairs.length > 0 && (
+              <div className="absolute z-20 mt-1 w-full max-h-64 overflow-y-auto bg-[#1a2236] border border-[#2a3a52] rounded-lg shadow-xl">
+                {filteredPairs.map(p => (
+                  <button type="button" key={p}
+                    onMouseDown={e => { e.preventDefault(); addPair(p); }}
+                    className="w-full text-left px-3 py-2 text-sm hover:bg-[#2a3a52]/60 border-b border-[#2a3a52]/40 last:border-0">
+                    {p}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
+
           <div>
             <label className="label">Timeframe</label>
             <select className="input" value={timeframe} onChange={e => setTimeframe(e.target.value)}>
-              {['1m','5m','15m','30m','1h','4h'].map(t => <option key={t} value={t}>{t}</option>)}
+              {['1m','5m','15m','30m','1h','4h'].map(tf => (
+                <option key={tf} value={tf}>{tf}</option>
+              ))}
             </select>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
-          <div>
-            <label className="label">Date Range</label>
-            <input className="input font-mono text-xs" value={timerange}
-              onChange={e => setTimerange(e.target.value)}
-              placeholder="YYYYMMDD-YYYYMMDD" />
-            <p className="text-xs text-slate-500 mt-0.5">e.g. 20240101-20241231</p>
-          </div>
+        {/* ── Futures-specific config ─────────────────────────────────── */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <div>
             <label className="label">Starting Balance (USDT)</label>
-            <input className="input" type="number" value={startBalance}
+            <input type="number" className="input" value={startBalance}
               onChange={e => setStartBalance(Number(e.target.value))} />
           </div>
           <div>
-            <label className="label">Leverage: {leverage}x</label>
+            <label className="label">Leverage: {leverage}x
+              <span className="text-orange-400 ml-2 text-[10px]">Liq ~{(100/leverage).toFixed(1)}%</span>
+            </label>
             <input type="range" min={1} max={50} value={leverage}
               onChange={e => setLeverage(Number(e.target.value))}
               className="w-full accent-blue-500 mt-2" />
-            <p className="text-xs text-orange-400 mt-0.5">
-              Liq. at ~{(100/leverage).toFixed(1)}% move
-            </p>
           </div>
           <div>
             <label className="label">Stop-Loss: {stoploss}%</label>
@@ -133,270 +310,255 @@ function FuturesBacktestInner() {
               onChange={e => setStoploss(Number(e.target.value))}
               className="w-full accent-red-500 mt-2" />
           </div>
-        </div>
-
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
           <div>
-            <label className="label">Take-Profit: {takeProfit}% → leveraged: {(takeProfit * leverage).toFixed(1)}%</label>
+            <label className="label">Take-Profit: {takeProfit}%
+              <span className="text-emerald-400 ml-1 text-[10px]">→ {(takeProfit*leverage).toFixed(1)}% leveraged</span>
+            </label>
             <input type="range" min={0.1} max={10} step={0.1} value={takeProfit}
               onChange={e => setTakeProfit(Number(e.target.value))}
               className="w-full accent-emerald-500 mt-2" />
           </div>
         </div>
 
-        {error && <p className="text-red-400 text-xs mb-3">{error}</p>}
-        <button onClick={runBacktest} disabled={loading || !strategyId} className="btn-primary">
-          {loading ? '⏳ Running backtest…' : '▶ Run Futures Backtest'}
-        </button>
-        {loading && (
-          <p className="text-slate-400 text-xs mt-2 animate-pulse">
-            Downloading historical candles from KuCoin and simulating {leverage}x leverage trades…
-          </p>
+        {/* Run button */}
+        <div className="flex items-center gap-4 flex-wrap">
+          <button onClick={runBacktest}
+            disabled={running || !strategyId || (selectedPreset === 'Custom' && !customRange)}
+            className="btn-primary px-8 py-3 text-base">
+            {running
+              ? `Running ${currentPreset && currentPreset.days > 365 ? '(downloading data…)' : ''}…`
+              : `▶ Run ${selectedPreset} Futures Backtest`}
+          </button>
+        </div>
+
+        {/* Summary row */}
+        {!running && strategyId && (
+          <div className="mt-4 pt-4 border-t border-[#2a3a52] text-xs text-slate-500 flex flex-wrap gap-x-4 gap-y-1">
+            <span>📅 Period: <span className="text-slate-300">{selectedPreset === 'Custom' ? customRange : selectedPreset}</span></span>
+            <span>📊 Pairs: <span className="text-slate-300">{pairs.join(', ')}</span></span>
+            <span>⏱ Timeframe: <span className="text-slate-300">{timeframe}</span></span>
+            <span>💰 Balance: <span className="text-slate-300">${startBalance}</span></span>
+            <span>⚡ Leverage: <span className="text-slate-300">{leverage}x</span></span>
+            <span>🛑 Stop-loss: <span className="text-slate-300">{stoploss}%</span></span>
+            <span>🎯 Take-profit: <span className="text-slate-300">{takeProfit}%</span></span>
+          </div>
         )}
       </div>
 
+      {/* Loading */}
+      {running && (
+        <LoadingSpinner text={
+          currentPreset && currentPreset.days > 365
+            ? `Downloading ${selectedPreset} of historical data from KuCoin, then simulating ${leverage}x leveraged futures trades…`
+            : `Simulating ${leverage}x leveraged futures trades on historical data…`
+        } />
+      )}
+
+      {/* Error */}
+      {error && (
+        <div className="card mb-8 border-red-500/30 bg-red-500/10">
+          <p className="text-red-400">{error}</p>
+        </div>
+      )}
+
       {/* Results */}
-      {result && m && (
+      {m && (
         <>
-          {/* Metric cards */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-            {[
-              {
-                label: 'Final Balance',
-                value: `${m.final_balance.toFixed(2)} USDT`,
-                color: m.final_balance >= startBalance ? 'text-emerald-400' : 'text-red-400',
-              },
-              {
-                label: 'Total P&L',
-                value: `${m.total_profit_pct >= 0 ? '+' : ''}${m.total_profit_pct.toFixed(2)}%`,
-                sub: `${m.total_profit_abs >= 0 ? '+' : ''}${m.total_profit_abs.toFixed(2)} USDT`,
-                color: m.total_profit_pct >= 0 ? 'text-emerald-400' : 'text-red-400',
-              },
-              {
-                label: 'Win Rate',
-                value: `${(m.win_rate * 100).toFixed(1)}%`,
-                sub: `${m.winning_trades}W / ${m.losing_trades}L`,
-                color: m.win_rate >= 0.5 ? 'text-emerald-400' : 'text-amber-400',
-              },
-              {
-                label: 'Max Drawdown',
-                value: `-${m.max_drawdown.toFixed(2)}%`,
-                color: m.max_drawdown > 30 ? 'text-red-400' : 'text-amber-400',
-              },
-            ].map(card => (
-              <div key={card.label} className="card card-hover">
-                <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">{card.label}</p>
-                <p className={`text-2xl font-bold font-mono ${card.color}`}>{card.value}</p>
-                {card.sub && <p className="text-xs text-slate-400 mt-0.5">{card.sub}</p>}
-              </div>
-            ))}
+          {/* Results header */}
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <h2 className="text-xl font-semibold">
+              Results — {selectedPreset} Futures Backtest
+              <span className="text-sm font-normal text-slate-400 ml-2">
+                {fromYMD(rangeStart)} → {fromYMD(rangeEnd)}
+              </span>
+            </h2>
+            <span className="text-xs text-slate-500 bg-[#1a2236] px-3 py-1 rounded-full border border-[#2a3a52]">
+              {pairs.join(', ')} · {timeframe} · {leverage}x · ${startBalance}
+            </span>
           </div>
 
-          {/* Extra stats row */}
-          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
-            {[
-              { label: 'Total Trades',    value: m.total_trades },
-              { label: '⚡ Liquidations', value: m.liquidations, color: m.liquidations > 0 ? 'text-red-400' : 'text-white' },
-              { label: '📈 Long Trades',  value: m.long_trades },
-              { label: '📉 Short Trades', value: m.short_trades },
-              { label: 'Avg P&L / Trade', value: `${m.avg_leverage_pnl >= 0 ? '+' : ''}${m.avg_leverage_pnl.toFixed(2)}%`,
-                color: m.avg_leverage_pnl >= 0 ? 'text-emerald-400' : 'text-red-400' },
-            ].map(s => (
-              <div key={s.label} className="card card-hover">
-                <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">{s.label}</p>
-                <p className={`stat-lg ${s.color ?? 'text-white'}`}>{s.value}</p>
-              </div>
-            ))}
+          {/* Metrics row 1 — same as spot */}
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-4">
+            <MetricCard
+              title="Total Profit"
+              value={`${m.total_profit_pct >= 0 ? '+' : ''}${m.total_profit_pct.toFixed(2)}%`}
+              color={m.total_profit_pct >= 0 ? 'profit' : 'loss'}
+            />
+            <MetricCard title="Win Rate"     value={`${(m.win_rate * 100).toFixed(1)}%`} />
+            <MetricCard title="Max Drawdown" value={`${m.max_drawdown.toFixed(2)}%`} color="loss" />
+            <MetricCard title="Final Balance" value={`$${m.final_balance.toFixed(2)}`}
+              color={m.final_balance >= startBalance ? 'profit' : 'loss'} />
+            <MetricCard title="Total Trades" value={m.total_trades} />
+            <MetricCard title="Avg P&L/Trade" value={`${m.avg_leverage_pnl >= 0 ? '+' : ''}${m.avg_leverage_pnl.toFixed(2)}%`}
+              color={m.avg_leverage_pnl >= 0 ? 'profit' : 'loss'} />
           </div>
 
-          {/* Tabs: Trades / Equity Curve / History */}
-          <div className="card">
-            <div className="flex gap-1 mb-4 border-b border-[#2a3a52] pb-3">
-              {(['trades', 'equity', 'history'] as const).map(tab => (
-                <button key={tab} onClick={() => setActiveTab(tab)}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition-colors ${
-                    activeTab === tab
-                      ? 'bg-blue-500/20 border border-blue-500/40 text-blue-300'
-                      : 'text-slate-400 hover:text-white'
-                  }`}>
-                  {tab === 'trades' ? `📋 Trade Log (${result.trades?.length ?? 0})`
-                    : tab === 'equity' ? '📈 Equity Curve'
-                    : '🕐 History'}
-                </button>
-              ))}
+          {/* Futures-specific metrics row */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+            <div className={`card ${m.liquidations > 0 ? 'border-red-500/30 bg-red-500/5' : ''}`}>
+              <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">⚡ Liquidations</p>
+              <p className={`text-2xl font-bold ${m.liquidations > 0 ? 'text-red-400' : 'text-white'}`}>{m.liquidations}</p>
+              {m.liquidations > 0 && <p className="text-xs text-red-400/70 mt-0.5">Full margin losses</p>}
             </div>
+            <div className="card">
+              <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">📈 Long Trades</p>
+              <p className="text-2xl font-bold text-emerald-400">{m.long_trades}</p>
+            </div>
+            <div className="card">
+              <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">📉 Short Trades</p>
+              <p className="text-2xl font-bold text-red-400">{m.short_trades}</p>
+            </div>
+            <div className="card">
+              <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">W / L</p>
+              <p className="text-2xl font-bold">
+                <span className="text-emerald-400">{m.winning_trades}</span>
+                <span className="text-slate-500 mx-1">/</span>
+                <span className="text-red-400">{m.losing_trades}</span>
+              </p>
+            </div>
+          </div>
 
-            {/* Trade Log */}
-            {activeTab === 'trades' && (
-              <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
-                {(!result.trades || result.trades.length === 0) ? (
-                  <p className="text-slate-500 text-sm">No trades generated. Try a wider date range or different strategy.</p>
-                ) : (
-                  <table className="w-full text-sm">
-                    <thead className="sticky top-0 bg-[#1a2236]">
-                      <tr className="text-slate-400 border-b border-[#2a3a52]">
-                        <th className="text-left py-2 px-2">Pair</th>
-                        <th className="text-right py-2 px-2">Dir</th>
-                        <th className="text-right py-2 px-2">Lev</th>
-                        <th className="text-right py-2 px-2">Entry</th>
-                        <th className="text-right py-2 px-2">Exit</th>
-                        <th className="text-right py-2 px-2">Liq.</th>
-                        <th className="text-right py-2 px-2">P&L%</th>
-                        <th className="text-right py-2 px-2">P&L USDT</th>
-                        <th className="text-right py-2 px-2">Balance</th>
-                        <th className="text-left py-2 px-2">Reason</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {result.trades.map((t: any, i: number) => (
-                        <tr key={i} className={`border-b border-[#2a3a52]/50 hover:bg-[#2a3a52]/20 ${
-                          t.exit_reason === 'liquidated' ? 'bg-red-500/5' : ''
-                        }`}>
-                          <td className="py-2 px-2 font-medium">{t.pair}</td>
-                          <td className={`py-2 px-2 text-right font-semibold text-xs ${
-                            t.direction === 'long' ? 'text-emerald-400' : 'text-red-400'
-                          }`}>{t.direction?.toUpperCase()}</td>
-                          <td className="py-2 px-2 text-right text-blue-400 text-xs">{t.leverage}x</td>
-                          <td className="py-2 px-2 text-right font-mono text-xs">{Number(t.open_rate).toFixed(2)}</td>
-                          <td className="py-2 px-2 text-right font-mono text-xs">{Number(t.close_rate).toFixed(2)}</td>
-                          <td className="py-2 px-2 text-right font-mono text-xs text-orange-400">{Number(t.liq_price).toFixed(2)}</td>
-                          <td className={`py-2 px-2 text-right font-semibold ${(t.profit_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {(t.profit_pct ?? 0) >= 0 ? '+' : ''}{(t.profit_pct ?? 0).toFixed(2)}%
-                          </td>
-                          <td className={`py-2 px-2 text-right font-semibold ${(t.profit_abs ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {(t.profit_abs ?? 0) >= 0 ? '+' : ''}{(t.profit_abs ?? 0).toFixed(4)}
-                          </td>
-                          <td className="py-2 px-2 text-right font-mono text-xs">{t.balance?.toFixed(2)}</td>
-                          <td className={`py-2 px-2 text-xs ${t.exit_reason === 'liquidated' ? 'text-red-400 font-bold' : 'text-slate-400'}`}>
-                            {t.exit_reason === 'liquidated' ? '⚡ LIQUIDATED' : t.exit_reason}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            )}
+          {/* Equity Curve — identical to spot backtest */}
+          <div className="card mb-8">
+            <h2 className="text-lg font-semibold mb-4">Equity Curve</h2>
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={equityCurve}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#2a3a52" />
+                <XAxis dataKey="trade" stroke="#64748b" fontSize={12}
+                  label={{ value: 'Trade #', position: 'insideBottom', offset: -2, fill: '#64748b', fontSize: 11 }} />
+                <YAxis stroke="#64748b" fontSize={12} tickFormatter={v => `$${v.toLocaleString()}`} />
+                <Tooltip
+                  contentStyle={{ background: '#1a2236', border: '1px solid #2a3a52', borderRadius: 8, color: '#f1f5f9' }}
+                  formatter={(v: number) => [`$${v.toFixed(2)}`, 'Portfolio']}
+                />
+                <Line type="monotone" dataKey="equity" stroke="#3391ff" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
 
-            {/* Equity Curve (simple text table) */}
-            {activeTab === 'equity' && (
-              <div>
-                {(!result.equity_curve || result.equity_curve.length === 0) ? (
-                  <p className="text-slate-500 text-sm">No equity data.</p>
-                ) : (
-                  <div className="overflow-x-auto max-h-[500px] overflow-y-auto">
-                    <table className="w-full text-sm">
-                      <thead className="sticky top-0 bg-[#1a2236]">
-                        <tr className="text-slate-400 border-b border-[#2a3a52]">
-                          <th className="text-left py-2 px-2">#</th>
-                          <th className="text-left py-2 px-2">Date</th>
-                          <th className="text-right py-2 px-2">Balance (USDT)</th>
-                          <th className="text-right py-2 px-2">Change</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {result.equity_curve.map((pt: any, i: number) => {
-                          const prev = i === 0 ? startBalance : result.equity_curve[i-1].balance;
-                          const change = pt.balance - prev;
-                          return (
-                            <tr key={i} className="border-b border-[#2a3a52]/50">
-                              <td className="py-1.5 px-2 text-slate-500 text-xs">{i + 1}</td>
-                              <td className="py-1.5 px-2 text-xs font-mono text-slate-300">{String(pt.date).slice(0, 19)}</td>
-                              <td className={`py-1.5 px-2 text-right font-mono font-bold ${pt.balance >= startBalance ? 'text-emerald-400' : 'text-red-400'}`}>
-                                {pt.balance.toFixed(2)}
-                              </td>
-                              <td className={`py-1.5 px-2 text-right text-xs font-mono ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                                {change >= 0 ? '+' : ''}{change.toFixed(4)}
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+          {/* Profit Distribution — same as spot */}
+          {trades.length > 0 && (
+            <div className="card mb-8">
+              <h2 className="text-lg font-semibold mb-4">Profit Distribution per Trade (Leveraged)</h2>
+              <ResponsiveContainer width="100%" height={200}>
+                <BarChart data={trades.map((t: any, i: number) => ({ trade: i + 1, profit: t.profit_pct ?? 0 }))}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#2a3a52" />
+                  <XAxis dataKey="trade" stroke="#64748b" fontSize={12} />
+                  <YAxis stroke="#64748b" fontSize={12} tickFormatter={v => `${v}%`} />
+                  <Tooltip
+                    contentStyle={{ background: '#1a2236', border: '1px solid #2a3a52', borderRadius: 8, color: '#f1f5f9' }}
+                    formatter={(v: number) => [`${v.toFixed(2)}%`, 'Profit']}
+                  />
+                  <Bar dataKey="profit">
+                    {trades.map((t: any, i: number) => (
+                      <Cell key={i} fill={
+                        t.exit_reason === 'liquidated' ? '#f97316'
+                          : (t.profit_pct ?? 0) >= 0 ? '#22c55e' : '#ef4444'
+                      } />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+              <div className="flex gap-4 mt-2 text-xs text-slate-400">
+                <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-emerald-500 inline-block"/>Profit</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-red-500 inline-block"/>Stop-Loss</span>
+                <span className="flex items-center gap-1"><span className="w-3 h-3 rounded-sm bg-orange-500 inline-block"/>Liquidated</span>
               </div>
-            )}
+            </div>
+          )}
 
-            {/* Past runs history */}
-            {activeTab === 'history' && (
-              <div className="overflow-x-auto">
-                {history.length === 0 ? (
-                  <p className="text-slate-500 text-sm">No past backtest runs yet.</p>
-                ) : (
-                  <table className="w-full text-sm">
-                    <thead>
-                      <tr className="text-slate-400 border-b border-[#2a3a52]">
-                        <th className="text-left py-2 px-2">Strategy</th>
-                        <th className="text-right py-2 px-2">Pairs</th>
-                        <th className="text-right py-2 px-2">TF</th>
-                        <th className="text-right py-2 px-2">Leverage</th>
-                        <th className="text-right py-2 px-2">P&L%</th>
-                        <th className="text-right py-2 px-2">Win Rate</th>
-                        <th className="text-right py-2 px-2">Trades</th>
-                        <th className="text-right py-2 px-2">Liq.</th>
-                        <th className="text-right py-2 px-2">DD%</th>
-                        <th className="text-left py-2 px-2">Date</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {history.map((h: any) => (
-                        <tr key={h.id} className="border-b border-[#2a3a52]/50 hover:bg-[#2a3a52]/20">
-                          <td className="py-2 px-2 font-medium text-xs">{h.strategy_name}</td>
-                          <td className="py-2 px-2 text-right text-xs text-slate-400">{h.pairs}</td>
-                          <td className="py-2 px-2 text-right text-xs">{h.timeframe}</td>
-                          <td className="py-2 px-2 text-right text-blue-400 font-bold text-xs">{h.leverage}x</td>
-                          <td className={`py-2 px-2 text-right font-semibold ${(h.total_profit_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                            {(h.total_profit_pct ?? 0) >= 0 ? '+' : ''}{(h.total_profit_pct ?? 0).toFixed(2)}%
-                          </td>
-                          <td className="py-2 px-2 text-right text-xs">{((h.win_rate ?? 0) * 100).toFixed(1)}%</td>
-                          <td className="py-2 px-2 text-right text-xs">{h.total_trades}</td>
-                          <td className={`py-2 px-2 text-right text-xs ${(h.liquidations ?? 0) > 0 ? 'text-red-400 font-bold' : 'text-slate-400'}`}>
-                            {h.liquidations ?? 0}
-                          </td>
-                          <td className="py-2 px-2 text-right text-xs text-amber-400">-{(h.max_drawdown ?? 0).toFixed(1)}%</td>
-                          <td className="py-2 px-2 text-xs text-slate-400">{String(h.created_at).slice(0, 10)}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            )}
+          {/* Trade Table — same structure as spot + futures columns */}
+          <div className="card mb-8">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">Trade Details</h2>
+              <span className="text-xs text-slate-500">{trades.length} trades</span>
+            </div>
+            <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-[#1a2236]">
+                  <tr className="text-slate-400 border-b border-[#2a3a52]">
+                    <th className="text-left py-3 px-2">#</th>
+                    <th className="text-left py-3 px-2">Pair</th>
+                    <th className="text-right py-3 px-2">Dir</th>
+                    <th className="text-right py-3 px-2">Lev</th>
+                    <th className="text-right py-3 px-2">Entry</th>
+                    <th className="text-right py-3 px-2">Exit</th>
+                    <th className="text-right py-3 px-2">Liq.</th>
+                    <th className="text-right py-3 px-2">Profit %</th>
+                    <th className="text-right py-3 px-2">Profit USDT</th>
+                    <th className="text-right py-3 px-2">Balance</th>
+                    <th className="text-left py-3 px-2">Open Date</th>
+                    <th className="text-left py-3 px-2">Exit Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trades.map((t: any, i: number) => (
+                    <tr key={i} className={`border-b border-[#2a3a52]/50 hover:bg-[#2a3a52]/20 ${
+                      t.exit_reason === 'liquidated' ? 'bg-orange-500/5' : ''
+                    }`}>
+                      <td className="py-2 px-2 text-slate-500">{i + 1}</td>
+                      <td className="py-2 px-2 font-medium">{t.pair}</td>
+                      <td className={`py-2 px-2 text-right font-semibold text-xs ${
+                        t.direction === 'long' ? 'text-emerald-400' : 'text-red-400'
+                      }`}>{t.direction?.toUpperCase()}</td>
+                      <td className="py-2 px-2 text-right text-blue-400 text-xs font-bold">{t.leverage}x</td>
+                      <td className="py-2 px-2 text-right font-mono text-xs">{Number(t.open_rate).toFixed(2)}</td>
+                      <td className="py-2 px-2 text-right font-mono text-xs">{Number(t.close_rate).toFixed(2)}</td>
+                      <td className="py-2 px-2 text-right font-mono text-xs text-orange-400">{Number(t.liq_price).toFixed(2)}</td>
+                      <td className={`py-2 px-2 text-right font-semibold ${(t.profit_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {(t.profit_pct ?? 0) >= 0 ? '+' : ''}{(t.profit_pct ?? 0).toFixed(2)}%
+                      </td>
+                      <td className={`py-2 px-2 text-right ${(t.profit_abs ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                        {(t.profit_abs ?? 0) >= 0 ? '+' : ''}{(t.profit_abs ?? 0).toFixed(2)}
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono text-xs">{t.balance?.toFixed(2)}</td>
+                      <td className="py-2 px-2 text-slate-400 text-xs">{String(t.open_date ?? '').slice(0, 10)}</td>
+                      <td className={`py-2 px-2 text-xs ${t.exit_reason === 'liquidated' ? 'text-orange-400 font-bold' : 'text-slate-500'}`}>
+                        {t.exit_reason === 'liquidated' ? '⚡ LIQUIDATED' : t.exit_reason}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
         </>
       )}
 
-      {/* History (shown even before running a test) */}
-      {!result && history.length > 0 && (
+      {/* Past runs history (shown even before first run) */}
+      {history.length > 0 && (
         <div className="card">
-          <h2 className="font-semibold mb-4">🕐 Previous Futures Backtests</h2>
+          <h2 className="text-lg font-semibold mb-4">🕐 Previous Futures Backtest Runs</h2>
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-slate-400 border-b border-[#2a3a52]">
                   <th className="text-left py-2 px-2">Strategy</th>
+                  <th className="text-right py-2 px-2">Period</th>
                   <th className="text-right py-2 px-2">Leverage</th>
                   <th className="text-right py-2 px-2">P&L%</th>
                   <th className="text-right py-2 px-2">Win Rate</th>
                   <th className="text-right py-2 px-2">Trades</th>
                   <th className="text-right py-2 px-2">⚡ Liq.</th>
+                  <th className="text-right py-2 px-2">Max DD</th>
                   <th className="text-left py-2 px-2">Date</th>
                 </tr>
               </thead>
               <tbody>
                 {history.map((h: any) => (
                   <tr key={h.id} className="border-b border-[#2a3a52]/50 hover:bg-[#2a3a52]/20">
-                    <td className="py-2 px-2 font-medium text-xs">{h.strategy_name} — {h.pairs} — {h.timeframe}</td>
+                    <td className="py-2 px-2 font-medium text-xs">{h.strategy_name} — {h.pairs}</td>
+                    <td className="py-2 px-2 text-right text-xs text-slate-400">{h.timerange}</td>
                     <td className="py-2 px-2 text-right text-blue-400 font-bold text-xs">{h.leverage}x</td>
                     <td className={`py-2 px-2 text-right font-semibold ${(h.total_profit_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                       {(h.total_profit_pct ?? 0) >= 0 ? '+' : ''}{(h.total_profit_pct ?? 0).toFixed(2)}%
                     </td>
                     <td className="py-2 px-2 text-right text-xs">{((h.win_rate ?? 0) * 100).toFixed(1)}%</td>
                     <td className="py-2 px-2 text-right text-xs">{h.total_trades}</td>
-                    <td className={`py-2 px-2 text-right text-xs font-bold ${(h.liquidations ?? 0) > 0 ? 'text-red-400' : 'text-slate-400'}`}>
+                    <td className={`py-2 px-2 text-right text-xs font-bold ${(h.liquidations ?? 0) > 0 ? 'text-orange-400' : 'text-slate-500'}`}>
                       {h.liquidations ?? 0}
                     </td>
+                    <td className="py-2 px-2 text-right text-xs text-amber-400">-{(h.max_drawdown ?? 0).toFixed(1)}%</td>
                     <td className="py-2 px-2 text-xs text-slate-400">{String(h.created_at).slice(0, 10)}</td>
                   </tr>
                 ))}
