@@ -522,6 +522,7 @@ function LiveTradingInner() {
         pair={pairs[0] || 'BTC/USDT'}
         timeframe={timeframe}
         mode="live"
+        marketType="spot"
         height={460}
       />
 

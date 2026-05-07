@@ -123,14 +123,15 @@ class FuturesEngine(NativeTradingEngine):
         self.closed_trades = []
         self.ticks = self.errors = 0
         self._stop_evt.clear()
+        self.started_at = datetime.now(timezone.utc)
 
         import threading
         self._thread = threading.Thread(
             target=self._run_loop, daemon=True,
             name=f"futures-{self.user_id}-{mode}"
         )
-        self.is_running = True
-        self.started_at = datetime.now(timezone.utc)
+        # NOTE: is_running is a @property in the base class — derived from
+        # self._thread.is_alive(), so we must start the thread first.
         self._thread.start()
         log.info("[%s] Futures engine started lev=%sx mode=%s strategy=%s",
                  self.user_id, self._leverage, mode, strategy_name)

@@ -155,7 +155,7 @@ function FuturesPaperInner() {
       )}
 
       {/* Analytics Chart */}
-      <StrategyChart pair={pairs[0] || 'BTC/USDT'} timeframe={timeframe} mode="paper" height={420} />
+      <StrategyChart pair={pairs[0] || 'BTC/USDT'} timeframe={timeframe} mode="paper" marketType="futures" height={420} />
 
       {/* Open Positions */}
       <div className="card mb-6">

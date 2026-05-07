@@ -562,6 +562,7 @@ function PaperTradeInner() {
         pair={pairs[0] || 'BTC/USDT'}
         timeframe={timeframe}
         mode="paper"
+        marketType="spot"
         height={460}
       />
 

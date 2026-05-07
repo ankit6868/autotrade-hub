@@ -49,10 +49,11 @@ interface Props {
   pair: string;
   timeframe?: string;
   mode?: 'paper' | 'live';
+  marketType?: 'spot' | 'futures'; // NEW — routes API calls correctly
   height?: number;
 }
 
-export default function StrategyChart({ pair, timeframe = '15m', mode = 'paper', height = 420 }: Props) {
+export default function StrategyChart({ pair, timeframe = '15m', mode = 'paper', marketType = 'spot', height = 420 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef     = useRef<IChartApi | null>(null);
   const candleRef    = useRef<ISeriesApi<'Candlestick'> | null>(null);
@@ -150,10 +151,16 @@ export default function StrategyChart({ pair, timeframe = '15m', mode = 'paper',
   const refresh = useCallback(async () => {
     if (!candleRef.current || !chartRef.current) return;
     try {
+      // Route API calls based on marketType — futures and spot are 100% isolated
+      const isFutures = marketType === 'futures';
       const [ohlcvRes, histRes, openRes] = await Promise.all([
         api.market.ohlcv(pair, timeframe, 150),
-        api.trade.history({ mode, limit: '200' }) as Promise<{ trades: Trade[] }>,
-        api.trade.open(mode as 'paper' | 'live')  as Promise<{ trades: OpenPosition[] }>,
+        isFutures
+          ? (api.futures.history({ mode, limit: '200' }) as Promise<{ trades: Trade[] }>)
+          : (api.trade.history({ mode, limit: '200' }) as Promise<{ trades: Trade[] }>),
+        isFutures
+          ? (api.futures.open(mode as 'paper' | 'live') as Promise<{ trades: OpenPosition[] }>)
+          : (api.trade.open(mode as 'paper' | 'live')   as Promise<{ trades: OpenPosition[] }>),
       ]);
 
       const candles = ohlcvRes.candles || [];
@@ -249,7 +256,7 @@ export default function StrategyChart({ pair, timeframe = '15m', mode = 'paper',
     } catch {
       setStatus('error');
     }
-  }, [pair, timeframe, mode]);
+  }, [pair, timeframe, mode, marketType]);
 
   useEffect(() => {
     refresh();

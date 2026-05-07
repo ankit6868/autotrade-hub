@@ -171,7 +171,7 @@ function FuturesLiveInner() {
         ))}
       </div>
 
-      <StrategyChart pair={pairs[0] || 'BTC/USDT'} timeframe={timeframe} mode="live" height={420} />
+      <StrategyChart pair={pairs[0] || 'BTC/USDT'} timeframe={timeframe} mode="live" marketType="futures" height={420} />
 
       {/* Open Positions */}
       <div className="card mb-6">
