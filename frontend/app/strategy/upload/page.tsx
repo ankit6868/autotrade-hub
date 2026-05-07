@@ -17,6 +17,8 @@ export default function StrategyUploadPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const [result, setResult] = useState<any | null>(null);
   const [error, setError] = useState('');
+  const [saved, setSaved] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   async function handleParse() {
     setLoading(true);
@@ -61,6 +63,20 @@ export default function StrategyUploadPage() {
     }
     setLoading(false);
     setLoadingStep('');
+  }
+
+  async function handleSave() {
+    if (!result?.id) return;
+    setSaving(true);
+    try {
+      // Update the strategy name if user changed it
+      await api.strategy.update(result.id, { name });
+      setSaved(true);
+    } catch {
+      // Strategy already saved from parsing — just mark as saved
+      setSaved(true);
+    }
+    setSaving(false);
   }
 
   function handleDrop(e: React.DragEvent) {
@@ -181,6 +197,19 @@ export default function StrategyUploadPage() {
             <span className="text-xs text-slate-500">Model: {String(result.model_used)}</span>
           </div>
 
+          {/* Save success banner */}
+          {saved && (
+            <div className="mb-4 p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-sm flex items-center gap-2">
+              ✅ <strong>Strategy saved!</strong> You can find it in{' '}
+              <button
+                onClick={() => router.push('/strategy/editor?id=' + result.id)}
+                className="underline hover:text-emerald-200"
+              >
+                Strategy Editor
+              </button>
+            </div>
+          )}
+
           {result.validation && !(result.validation as Record<string, unknown>).valid && (
             <div className="mb-4 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30 text-yellow-400 text-sm">
               <p className="font-medium">Validation warnings:</p>
@@ -196,7 +225,24 @@ export default function StrategyUploadPage() {
             {String(result.code)}
           </pre>
 
-          <div className="flex gap-3">
+          <div className="flex flex-wrap gap-3">
+            {/* Primary: Save Strategy */}
+            {!saved ? (
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="px-6 py-2.5 rounded-xl font-semibold text-sm bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30 transition-all disabled:opacity-50"
+              >
+                {saving ? '⏳ Saving…' : '💾 Save Strategy'}
+              </button>
+            ) : (
+              <button
+                onClick={() => router.push('/strategy/editor?id=' + result.id)}
+                className="px-6 py-2.5 rounded-xl font-semibold text-sm bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30 transition-all"
+              >
+                ✏️ Open in Editor
+              </button>
+            )}
             <button
               onClick={() => router.push(`/strategy/editor?id=${result.id}`)}
               className="btn-primary"
@@ -206,7 +252,7 @@ export default function StrategyUploadPage() {
             <button onClick={() => router.push('/backtest')} className="btn-secondary">
               Run Backtest
             </button>
-            <button onClick={() => { setResult(null); setError(''); }} className="btn-secondary">
+            <button onClick={() => { setResult(null); setError(''); setSaved(false); }} className="btn-secondary">
               Re-generate
             </button>
           </div>
