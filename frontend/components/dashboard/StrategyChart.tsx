@@ -153,7 +153,7 @@ export default function StrategyChart({ pair, timeframe = '15m', mode = 'paper',
       const [ohlcvRes, histRes, openRes] = await Promise.all([
         api.market.ohlcv(pair, timeframe, 150),
         api.trade.history({ mode, limit: '200' }) as Promise<{ trades: Trade[] }>,
-        api.trade.open()                          as Promise<{ trades: OpenPosition[] }>,
+        api.trade.open(mode as 'paper' | 'live')  as Promise<{ trades: OpenPosition[] }>,
       ]);
 
       const candles = ohlcvRes.candles || [];

@@ -90,7 +90,8 @@ export const api = {
       request<any>('/api/trade/start', { method: 'POST', body: JSON.stringify(data) }),
     stop: () => request<any>('/api/trade/stop', { method: 'POST' }),
     status: () => request<any>('/api/trade/status'),
-    open: () => request<{ trades: any[] }>('/api/trade/open'),
+    open: (mode?: 'paper' | 'live') =>
+      request<{ trades: any[] }>(`/api/trade/open${mode ? `?mode=${mode}` : ''}`),
     history: (params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : '';
       return request<{ trades: any[] }>(`/api/trade/history${qs}`);

@@ -86,7 +86,7 @@ function PaperTradeInner() {
     try {
       const [status, open, history] = await Promise.all([
         api.trade.status(),
-        api.trade.open(),
+        api.trade.open('paper'),
         api.trade.history({ mode: 'paper', limit: '20' }),
       ]);
       setBotStatus(status);

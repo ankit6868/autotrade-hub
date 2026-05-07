@@ -286,75 +286,86 @@ def sync_from_freqtrade(
 
 @router.get("/open")
 def get_open_trades(
+    mode: str = None,   # "paper" | "live" — REQUIRED separation, never mix
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
+    """Return open positions strictly filtered by mode.
+    Paper and Live are completely separate — never mix them."""
     from backend.services.native_trading_engine import native_engine_registry
 
-    # 1. Native engine open positions (paper/live bot running in this container)
-    native_positions = native_engine_registry.for_user(user_id).get_open_positions()
-    # Fetch live prices for unrealized P&L calculation
-    live_prices: dict[str, float] = {}
-    for p in native_positions:
-        try:
-            sym = p["pair"].replace("/", "-")
-            data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
-            if str(data.get("code")) == "200000":
-                live_prices[p["pair"]] = float(data["data"]["price"])
-        except Exception:
-            pass
+    eng = native_engine_registry.for_user(user_id)
+    engine_mode = eng._mode  # "paper" or "live"
 
+    # 1. Native engine positions — only return if mode matches request
     native_trades = []
-    for p in native_positions:
-        entry = p.get("entry", 0)
-        stake = p.get("stake", 0)
-        cur = live_prices.get(p["pair"], entry)
-        direction = p.get("direction", "long")
-        if direction == "long":
-            unreal = (cur - entry) / entry * stake if entry else 0
-        else:
-            unreal = (entry - cur) / entry * stake if entry else 0
-        native_trades.append({
-            "id": f"native-{p['pair']}",
-            "pair": p["pair"],
-            "side": direction,
-            "entry_price": entry,
-            "current_price": round(cur, 6),
-            "amount": stake,
-            "stoploss_price": p.get("sl"),
-            "tp_price": p.get("tp"),          # take-profit level for chart
-            "entry_time": p.get("opened_at"),
-            "mode": "paper",
-            "unrealized_pnl": round(unreal, 4),
-        })
+    if mode is None or engine_mode == mode:
+        native_positions = eng.get_open_positions()
+        # Fetch live prices for unrealized P&L
+        live_prices: dict[str, float] = {}
+        for p in native_positions:
+            try:
+                sym = p["pair"].replace("/", "-")
+                data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
+                if str(data.get("code")) == "200000":
+                    live_prices[p["pair"]] = float(data["data"]["price"])
+            except Exception:
+                pass
 
-    # 2. DB-persisted trades (from Freqtrade sync or previous sessions)
+        for p in native_positions:
+            entry = p.get("entry", 0)
+            stake = p.get("stake", 0)
+            cur = live_prices.get(p["pair"], entry)
+            direction = p.get("direction", "long")
+            unreal = (cur - entry) / entry * stake if (entry and direction == "long") else \
+                     (entry - cur) / entry * stake if entry else 0
+            native_trades.append({
+                "id":            f"native-{p['pair']}#{p.get('trade_id','')}"[:40],
+                "pair":          p["pair"],
+                "side":          direction,
+                "entry_price":   entry,
+                "current_price": round(cur, 6),
+                "amount":        stake,
+                "stoploss_price": p.get("sl"),
+                "tp_price":      p.get("tp"),
+                "entry_time":    p.get("opened_at"),
+                "mode":          engine_mode,          # actual engine mode, not hardcoded
+                "unrealized_pnl": round(unreal, 4),
+            })
+    else:
+        native_positions = []
+
+    # 2. DB-persisted open trades — filter strictly by mode
     try:
         sync_trades(db, user_id)
     except Exception:
         pass
-    result = db.execute(
+
+    db_query = (
         select(Trade)
         .where(Trade.status == "open", Trade.user_id == user_id)
         .order_by(desc(Trade.entry_time))
     )
+    if mode:
+        db_query = db_query.where(Trade.mode == mode)
+
     db_trades = [
         {
-            "id": t.id,
-            "pair": t.pair,
-            "side": t.side,
-            "entry_price": t.entry_price,
-            "amount": t.amount,
+            "id":            t.id,
+            "pair":          t.pair,
+            "side":          t.side,
+            "entry_price":   t.entry_price,
+            "amount":        t.amount,
             "stoploss_price": t.stoploss_price,
-            "entry_time": str(t.entry_time),
-            "mode": t.mode,
+            "entry_time":    str(t.entry_time),
+            "mode":          t.mode,
             "unrealized_pnl": 0,
         }
-        for t in result.scalars().all()
+        for t in db.execute(db_query).scalars().all()
     ]
 
-    # Merge: native positions take priority; avoid duplicates by pair
-    pairs_in_native = {p["pair"] for p in native_positions}
+    # Merge: native positions take priority; deduplicate by pair
+    pairs_in_native = {p["pair"] for p in (native_positions if mode is None or engine_mode == mode else [])}
     merged = native_trades + [t for t in db_trades if t["pair"] not in pairs_in_native]
     return {"trades": merged}
 

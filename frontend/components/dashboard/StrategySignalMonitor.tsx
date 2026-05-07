@@ -15,6 +15,7 @@ interface Props {
   pair: string;
   timeframe: string;
   isRunning: boolean;
+  isLive?: boolean;   // true = live trading, false/undefined = paper
   onManualBuy?: () => void;
   onManualSell?: () => void;
 }
@@ -135,7 +136,7 @@ function buildStatus(
   return { ready, conditions, recommendation: rec, fireCount: tradeCount, lastFired: lastTrade };
 }
 
-export default function StrategySignalMonitor({ strategyName, pair, timeframe, isRunning, onManualBuy, onManualSell }: Props) {
+export default function StrategySignalMonitor({ strategyName, pair, timeframe, isRunning, isLive = false, onManualBuy, onManualSell }: Props) {
   const [status, setStatus] = useState<SignalStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [buyLoading, setBuyLoading] = useState(false);
@@ -147,7 +148,7 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
     try {
       const [sigData, histData] = await Promise.all([
         api.market.signals(pair, timeframe) as Promise<{ summary?: { recommendation: string }; indicators?: Record<string, number | null> }>,
-        api.trade.history({ mode: 'paper', limit: '100' }) as Promise<{ trades: Array<{ profit_abs: number; close_date?: string; exit_time?: string; exit_reason?: string; open_reason?: string }> }>,
+        api.trade.history({ mode: isLive ? 'live' : 'paper', limit: '100' }) as Promise<{ trades: Array<{ profit_abs: number; close_date?: string; exit_time?: string; exit_reason?: string; open_reason?: string }> }>,
       ]);
       const rec = sigData?.summary?.recommendation || 'NEUTRAL';
       const allTrades = histData?.trades || [];

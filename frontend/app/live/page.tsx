@@ -94,7 +94,7 @@ function LiveTradingInner() {
     try {
       const [status, open, history] = await Promise.all([
         api.trade.status(),
-        api.trade.open(),
+        api.trade.open('live'),
         api.trade.history({ mode: 'live', limit: '20' }),
       ]);
       setBotStatus(status);
@@ -498,6 +498,7 @@ function LiveTradingInner() {
           pair={pairs[0] || 'BTC/USDT'}
           timeframe={timeframe}
           isRunning={isRunning}
+          isLive={true}
           onManualBuy={() => refreshData()}
           onManualSell={() => refreshData()}
         />
