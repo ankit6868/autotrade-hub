@@ -33,7 +33,7 @@ def list_instances(
         if r.is_running and r.engine_key:
             eng = multi_strategy_manager.get_engine(r.engine_key)
             if eng:
-                status = eng.status()
+                status = eng.status  # @property, not a method
         instances.append({
             "id":            r.id,
             "strategy_name": r.strategy_name,

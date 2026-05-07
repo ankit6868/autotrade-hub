@@ -103,7 +103,7 @@ class MultiStrategyManager:
             engines = list(self._engines.items())
         result = []
         for key, eng in engines:
-            s = eng.status()
+            s = dict(eng.status)  # status is a @property, not a method
             s["engine_key"] = key
             result.append(s)
         return result

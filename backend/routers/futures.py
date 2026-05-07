@@ -124,7 +124,7 @@ def futures_status(
     user_id: str = Depends(get_user_id),
 ):
     eng = futures_engine_registry.for_user(user_id)
-    return eng.status()
+    return eng.status   # status is a @property, NOT a method — no () needed
 
 
 # ── Open Positions ────────────────────────────────────────────────────────────
