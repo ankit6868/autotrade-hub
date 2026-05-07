@@ -202,6 +202,35 @@ def _kucoin_post_signed(path: str, body: dict, api_key: str,
         return json.loads(resp.read().decode())
 
 
+def _kucoin_get_signed(path: str, api_key: str, api_secret: str,
+                       passphrase: str, params: dict | None = None,
+                       base_url: str = KUCOIN_BASE) -> dict:
+    """Authenticated GET from KuCoin private REST API."""
+    import base64, hashlib, hmac as _hmac
+    qs = ("?" + urllib.parse.urlencode(params)) if params else ""
+    ts = str(int(time.time() * 1000))
+    str_to_sign = f"{ts}GET{path}{qs}"
+    sig = base64.b64encode(_hmac.new(
+        api_secret.encode(), str_to_sign.encode(), hashlib.sha256
+    ).digest()).decode()
+    pp_sig = base64.b64encode(_hmac.new(
+        api_secret.encode(), passphrase.encode(), hashlib.sha256
+    ).digest()).decode()
+    headers = {
+        "KC-API-KEY":         api_key,
+        "KC-API-SIGN":        sig,
+        "KC-API-TIMESTAMP":   ts,
+        "KC-API-PASSPHRASE":  pp_sig,
+        "KC-API-KEY-VERSION": "2",
+        "Content-Type":       "application/json",
+        "User-Agent":         "AutoTradeHub/2.0",
+    }
+    url = f"{base_url}{path}{qs}"
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode())
+
+
 def _fetch_candles(symbol: str, ktype: str, limit: int = CANDLE_HISTORY) -> list[dict]:
     """Fetch the last `limit` closed candles from KuCoin."""
     now = int(time.time())

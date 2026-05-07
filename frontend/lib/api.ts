@@ -97,6 +97,7 @@ export const api = {
       return request<{ trades: any[] }>(`/api/trade/history${qs}`);
     },
     forceClose: (id: string | number) => request<any>(`/api/trade/force-close/${id}`, { method: 'POST' }),
+    balance: () => request<any>('/api/trade/balance'),
     emergencyStop: () => request<any>('/api/trade/emergency-stop', { method: 'POST' }),
     manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stake = 0) =>
       request<any>('/api/trade/manual-entry', {
@@ -177,6 +178,7 @@ export const api = {
       const qs = params ? '?' + new URLSearchParams(params).toString() : '';
       return request<{ trades: any[] }>(`/api/futures/history${qs}`);
     },
+    balance: () => request<any>('/api/futures/balance'),
     forceClose: (pair: string) =>
       request<any>(`/api/futures/force-close/${pair}`, { method: 'POST' }),
     manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5) =>

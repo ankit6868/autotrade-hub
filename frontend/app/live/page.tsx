@@ -90,6 +90,16 @@ function LiveTradingInner() {
   const [acknowledged, setAcknowledged] = useState<Record<string, boolean>>({});
   const allAcknowledged = SAFETY_ITEMS.every((item) => acknowledged[item.id]);
 
+  // ── KuCoin SPOT trading account balance ───────────────────────────────────
+  const [liveBalance, setLiveBalance]   = useState<any>(null);
+  const MIN_SPOT_BALANCE = 10; // minimum USDT to trade spot live
+  const hasBalance = liveBalance?.balance != null && liveBalance.balance >= MIN_SPOT_BALANCE;
+  const canStart   = allAcknowledged && !!strategyId && hasBalance;
+
+  const refreshBalance = useCallback(async () => {
+    try { setLiveBalance(await api.trade.balance()); } catch { /* no keys yet */ }
+  }, []);
+
   const refreshData = useCallback(async () => {
     try {
       const [status, open, history] = await Promise.all([
@@ -137,10 +147,12 @@ function LiveTradingInner() {
     }).catch(() => {});
 
     refreshData();
+    refreshBalance();
     tradeWS.connect();
     const unsub = tradeWS.onMessage(() => refreshData());
-    const interval = setInterval(refreshData, 10000);
-    return () => { unsub(); tradeWS.disconnect(); clearInterval(interval); };
+    const interval  = setInterval(refreshData, 10000);
+    const intervalB = setInterval(refreshBalance, 30000);
+    return () => { unsub(); tradeWS.disconnect(); clearInterval(interval); clearInterval(intervalB); };
   }, [refreshData]);
 
   // Refresh prices whenever open trades change
@@ -149,7 +161,7 @@ function LiveTradingInner() {
   }, [openTrades, refreshPrices]);
 
   async function handleStartClick() {
-    if (!allAcknowledged) return;
+    if (!canStart) return;
     setShowConfirmModal(true);
     setConfirmation('');
     setError('');
@@ -298,6 +310,39 @@ function LiveTradingInner() {
         </div>
       )}
 
+      {/* ── KuCoin Spot Account Balance ────────────────────────────── */}
+      <div className={`card mb-6 border ${
+        liveBalance?.error ? 'border-red-500/30 bg-red-500/5'
+          : hasBalance ? 'border-emerald-500/30 bg-emerald-500/5'
+          : 'border-amber-500/30 bg-amber-500/5'
+      }`}>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">
+              💰 KuCoin Spot Trading Account Balance
+            </p>
+            {liveBalance?.error ? (
+              <p className="text-red-400 text-sm">{liveBalance.error}</p>
+            ) : liveBalance?.balance == null ? (
+              <p className="text-amber-400 text-sm">Loading… (requires KuCoin API key in Setup)</p>
+            ) : (
+              <div className="flex items-center gap-4">
+                <span className={`text-2xl font-bold font-mono ${hasBalance ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {liveBalance.balance.toFixed(4)} USDT
+                </span>
+                <span className="text-slate-400 text-xs">available for trading</span>
+              </div>
+            )}
+            {!liveBalance?.error && liveBalance?.balance != null && !hasBalance && (
+              <p className="text-amber-400 text-xs mt-1">
+                ⚠ Minimum {MIN_SPOT_BALANCE} USDT required. Add funds to your KuCoin Trading account.
+              </p>
+            )}
+          </div>
+          <button onClick={refreshBalance} className="text-xs text-slate-400 hover:text-white border border-[#2a3a52] px-2 py-1 rounded-lg transition-colors">↻</button>
+        </div>
+      </div>
+
       {/* Safety Checklist */}
       <div className={`card mb-8 border-2 transition-colors ${allAcknowledged ? 'border-emerald-500/40 bg-emerald-500/5' : 'border-yellow-500/30 bg-yellow-500/5'}`}>
         <div className="flex items-center justify-between mb-3">
@@ -412,13 +457,13 @@ function LiveTradingInner() {
           <div className="flex items-center gap-3 flex-wrap">
             <button
               onClick={handleStartClick}
-              disabled={!strategyId || !allAcknowledged}
-              className={`btn-danger ${!allAcknowledged ? 'opacity-40 cursor-not-allowed' : ''}`}
-              title={!allAcknowledged ? 'Tick all safety checkboxes above first' : 'Start live trading'}
+              disabled={!canStart}
+              className={`btn-danger ${!canStart ? 'opacity-40 cursor-not-allowed' : ''}`}
+              title={!allAcknowledged ? 'Tick all safety checkboxes first' : !hasBalance ? `Need at least ${MIN_SPOT_BALANCE} USDT in KuCoin trading account` : 'Start live trading'}
             >
               🔴 Start Live Trading
             </button>
-            {!allAcknowledged && (
+            {!canStart && (
               <span className="text-yellow-400 text-xs">
                 ← Tick all safety checkboxes above to enable
               </span>

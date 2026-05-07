@@ -21,6 +21,33 @@ from backend.services.trade_sync import sync as sync_trades
 router = APIRouter(prefix="/api/trade", tags=["trading"])
 
 
+@router.get("/balance")
+def get_spot_balance(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Fetch the user's KuCoin SPOT trading account USDT balance (live accounts only)."""
+    from backend.services.native_trading_engine import _kucoin_get_signed
+    cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+    if not cfg:
+        return {"error": "No config found. Complete Setup first.", "balance": None}
+    try:
+        kk = decrypt(cfg.kucoin_key_enc or "", user_id)
+        ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
+        kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+    except DecryptError:
+        return {"error": "Could not decrypt KuCoin credentials.", "balance": None}
+    try:
+        data = _kucoin_get_signed("/api/v1/accounts", kk, ks, kp, params={"type": "trade", "currency": "USDT"})
+        if str(data.get("code")) != "200000":
+            return {"error": f"KuCoin API error: {data.get('msg', 'unknown')}", "balance": None}
+        accounts = data.get("data", [])
+        usdt_balance = sum(float(a.get("available", 0)) for a in accounts if a.get("currency") == "USDT")
+        return {"balance": round(usdt_balance, 4), "currency": "USDT", "type": "spot"}
+    except Exception as e:
+        return {"error": f"Failed to fetch balance: {e}", "balance": None}
+
+
 class StartRequest(BaseModel):
     strategy_id: int
     mode: str = "paper"  # "paper" or "live"

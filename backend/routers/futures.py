@@ -39,6 +39,50 @@ def cleanup_test_trades(
     return {"deleted": result.rowcount, "user_id": user_id}
 
 
+# ── Balance ──────────────────────────────────────────────────────────────────
+
+@router.get("/balance")
+def futures_balance(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Fetch KuCoin Futures account USDT balance (real money, live accounts only)."""
+    from backend.services.native_trading_engine import _kucoin_get_signed
+    from backend.utils.encryption import decrypt, DecryptError
+
+    cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+    if not cfg:
+        return {"error": "No config found. Complete Setup first.", "balance": None}
+    try:
+        kk = decrypt(cfg.kucoin_key_enc or "", user_id)
+        ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
+        kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+    except DecryptError:
+        return {"error": "Could not decrypt KuCoin credentials.", "balance": None}
+    try:
+        from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+        data = _kucoin_get_signed(
+            "/api/v1/accountOverview", kk, ks, kp,
+            params={"currency": "USDT"},
+            base_url=KUCOIN_FUTURES_BASE,
+        )
+        if str(data.get("code")) != "200000":
+            return {"error": f"KuCoin Futures API error: {data.get('msg', 'unknown')}", "balance": None}
+        account = data.get("data", {})
+        available = float(account.get("availableBalance", 0))
+        total      = float(account.get("accountEquity", available))
+        unrealized = float(account.get("unrealisedPNL", 0))
+        return {
+            "balance":     round(available, 4),
+            "equity":      round(total, 4),
+            "unrealized":  round(unrealized, 4),
+            "currency":    "USDT",
+            "type":        "futures",
+        }
+    except Exception as e:
+        return {"error": f"Failed to fetch futures balance: {e}", "balance": None}
+
+
 # ── Start / Stop ─────────────────────────────────────────────────────────────
 
 @router.post("/start")

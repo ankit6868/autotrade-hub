@@ -33,6 +33,17 @@ function FuturesLiveInner() {
   const [closingId, setClosingId]       = useState<string | null>(null);
   const [error, setError]               = useState('');
 
+  // ── KuCoin Futures account balance (real money) ───────────────────────────
+  const [liveBalance, setLiveBalance]   = useState<any>(null);
+  const MIN_BALANCE = 10; // minimum USDT to start live futures trading
+
+  const refreshBalance = useCallback(async () => {
+    try {
+      const b = await api.futures.balance();
+      setLiveBalance(b);
+    } catch { /* no credentials yet */ }
+  }, []);
+
   // ── Data refresh (polls every 10 s) ──────────────────────────────────────
   const refreshData = useCallback(async () => {
     try {
@@ -55,13 +66,20 @@ function FuturesLiveInner() {
       })
       .catch(() => {});
     refreshData();
-    const t = setInterval(refreshData, 10_000);
-    return () => clearInterval(t);
-  }, [refreshData]);
+    refreshBalance();
+    const t  = setInterval(refreshData, 10_000);
+    const tb = setInterval(refreshBalance, 30_000); // balance refreshes every 30 s
+    return () => { clearInterval(t); clearInterval(tb); };
+  }, [refreshData, refreshBalance]);
+
+  // ── Derived: sufficient balance to trade ──────────────────────────────────
+  const hasBalance     = liveBalance?.balance != null && liveBalance.balance >= MIN_BALANCE;
+  const balanceError   = liveBalance?.error ?? null;
+  const canStart       = allAcknowledged && !!strategyId && hasBalance;
 
   // ── Start / Stop ──────────────────────────────────────────────────────────
   async function startBot() {
-    if (!strategyId || !allAcknowledged) return;
+    if (!canStart) return;
     setStarting(true);
     setError('');
     try {
@@ -126,6 +144,60 @@ function FuturesLiveInner() {
             ? `🔴 LIVE Futures (${botStatus.leverage ?? leverage}x)`
             : '⚫ Stopped'}
         </span>
+      </div>
+
+      {/* ── KuCoin Futures Account Balance ─────────────────────────── */}
+      <div className={`card mb-6 border ${
+        balanceError ? 'border-red-500/30 bg-red-500/5'
+          : hasBalance ? 'border-emerald-500/30 bg-emerald-500/5'
+          : 'border-amber-500/30 bg-amber-500/5'
+      }`}>
+        <div className="flex items-center justify-between">
+          <div>
+            <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">
+              💰 KuCoin Futures Account Balance
+            </p>
+            {balanceError ? (
+              <p className="text-red-400 text-sm font-medium">{balanceError}</p>
+            ) : liveBalance?.balance == null ? (
+              <p className="text-amber-400 text-sm">Loading balance… (requires KuCoin API key in Setup)</p>
+            ) : (
+              <div className="flex items-center gap-4">
+                <div>
+                  <span className={`text-2xl font-bold font-mono ${hasBalance ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {liveBalance.balance.toFixed(4)} USDT
+                  </span>
+                  <span className="text-slate-400 text-xs ml-2">available</span>
+                </div>
+                {liveBalance.equity != null && liveBalance.equity !== liveBalance.balance && (
+                  <div className="text-xs text-slate-400">
+                    Equity: <span className="text-white font-mono">{liveBalance.equity.toFixed(4)} USDT</span>
+                  </div>
+                )}
+                {liveBalance.unrealized != null && liveBalance.unrealized !== 0 && (
+                  <div className="text-xs">
+                    Unrealized:{' '}
+                    <span className={`font-mono font-semibold ${liveBalance.unrealized >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {liveBalance.unrealized >= 0 ? '+' : ''}{liveBalance.unrealized.toFixed(4)} USDT
+                    </span>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          <button
+            onClick={refreshBalance}
+            className="text-xs text-slate-400 hover:text-white border border-[#2a3a52] px-2 py-1 rounded-lg transition-colors"
+          >
+            ↻
+          </button>
+        </div>
+        {!balanceError && liveBalance?.balance != null && !hasBalance && (
+          <p className="text-amber-400 text-xs mt-2">
+            ⚠ Minimum {MIN_BALANCE} USDT required to start live futures trading.
+            Add funds to your KuCoin Futures account.
+          </p>
+        )}
       </div>
 
       {/* ── Safety checklist (hidden while running) ────────────────── */}
@@ -227,17 +299,24 @@ function FuturesLiveInner() {
           {isRunning ? (
             <button onClick={stopBot} className="btn-danger">■ Stop Bot</button>
           ) : (
-            <button
-              onClick={startBot}
-              disabled={starting || !strategyId || !allAcknowledged}
-              className={`px-6 py-2.5 rounded-xl font-semibold text-sm border transition-all ${
-                allAcknowledged
-                  ? 'bg-red-500/20 border-red-500/50 text-red-300 hover:bg-red-500/30'
-                  : 'bg-slate-700/30 border-slate-600/30 text-slate-500 cursor-not-allowed'
-              }`}
-            >
-              {starting ? 'Starting…' : '🔴 Start Live Futures'}
-            </button>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={startBot}
+                disabled={starting || !canStart}
+                className={`px-6 py-2.5 rounded-xl font-semibold text-sm border transition-all ${
+                  canStart
+                    ? 'bg-red-500/20 border-red-500/50 text-red-300 hover:bg-red-500/30'
+                    : 'bg-slate-700/30 border-slate-600/30 text-slate-500 cursor-not-allowed'
+                }`}
+              >
+                {starting ? 'Starting…' : '🔴 Start Live Futures'}
+              </button>
+              {!hasBalance && allAcknowledged && (
+                <p className="text-amber-400 text-xs">
+                  ⚠ Insufficient balance — add at least {MIN_BALANCE} USDT to KuCoin Futures
+                </p>
+              )}
+            </div>
           )}
         </div>
       </div>
