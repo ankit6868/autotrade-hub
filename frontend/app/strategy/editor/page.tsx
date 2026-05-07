@@ -16,6 +16,9 @@ function EditorContent() {
   const [name, setName] = useState('');
   const [timeframe, setTimeframe] = useState('15m');
   const [stoploss, setStoploss] = useState(3);
+  const [takeProfit, setTakeProfit] = useState(1.5);
+  const [leverage, setLeverage] = useState(10);
+  const [futuresEnabled, setFuturesEnabled] = useState(false);
   const [pairs, setPairs] = useState('BTC/USDT');
   const [saving, setSaving] = useState(false);
   const [validating, setValidating] = useState(false);
@@ -51,6 +54,10 @@ function EditorContent() {
       setName(String(data.name || ''));
       setTimeframe(String(data.timeframe || '15m'));
       setStoploss(Math.abs(Number(data.stoploss || 0.03)) * 100);
+      setTakeProfit(Number(data.take_profit || 0.015) * 100);
+      const lev = Number(data.default_leverage || 1);
+      setLeverage(lev > 1 ? lev : 10);
+      setFuturesEnabled(lev > 1);   // auto-tick if strategy already has leverage
       setPairs(Array.isArray(data.pairs) ? data.pairs.join(', ') : 'BTC/USDT');
     } catch {}
   }
@@ -63,7 +70,9 @@ function EditorContent() {
         name,
         generated_code: code,
         timeframe,
-        stoploss: -(stoploss / 100),
+        stoploss:          -(stoploss / 100),
+        take_profit:       takeProfit / 100,
+        default_leverage:  futuresEnabled ? leverage : 1,
         pairs: pairs.split(',').map((p) => p.trim()),
       });
       alert('Strategy saved!');
@@ -174,7 +183,47 @@ function EditorContent() {
             </div>
             <div>
               <label className="label">Stop-Loss: {stoploss}%</label>
-              <input type="range" min={1} max={10} step={0.5} value={stoploss} onChange={(e) => setStoploss(Number(e.target.value))} className="w-full accent-brand-500" />
+              <input type="range" min={0.5} max={10} step={0.5} value={stoploss}
+                onChange={(e) => setStoploss(Number(e.target.value))}
+                className="w-full accent-red-500" />
+            </div>
+            <div>
+              <label className="label">Take-Profit: {takeProfit}%</label>
+              <input type="range" min={0.1} max={10} step={0.1} value={takeProfit}
+                onChange={(e) => setTakeProfit(Number(e.target.value))}
+                className="w-full accent-emerald-500" />
+            </div>
+
+            {/* Futures toggle */}
+            <div className={`p-3 rounded-xl border transition-all ${
+              futuresEnabled
+                ? 'border-blue-500/40 bg-blue-500/10'
+                : 'border-[#2a3a52] bg-[#0a0f1c]'
+            }`}>
+              <label className="flex items-center gap-3 cursor-pointer mb-2">
+                <input
+                  type="checkbox"
+                  checked={futuresEnabled}
+                  onChange={e => setFuturesEnabled(e.target.checked)}
+                  className="w-4 h-4 accent-blue-500"
+                />
+                <span className={`text-sm font-semibold ${futuresEnabled ? 'text-blue-300' : 'text-slate-400'}`}>
+                  ⚡ Enable Futures Trading
+                </span>
+              </label>
+              <p className="text-xs text-slate-500 mb-2">
+                Tick to set leverage — auto-fills Futures Paper / Live / Backtest pages
+              </p>
+              {futuresEnabled && (
+                <div>
+                  <label className="label text-blue-300">Leverage: {leverage}x
+                    <span className="text-orange-400 ml-2 text-[10px]">Liq ~{(100/leverage).toFixed(1)}%</span>
+                  </label>
+                  <input type="range" min={2} max={50} step={1} value={leverage}
+                    onChange={(e) => setLeverage(Number(e.target.value))}
+                    className="w-full accent-blue-500 mt-1" />
+                </div>
+              )}
             </div>
           </div>
         </div>

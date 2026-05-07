@@ -40,6 +40,8 @@ class UpdateStrategyRequest(BaseModel):
     timeframe: str | None = None
     pairs: list[str] | None = None
     stoploss: float | None = None
+    take_profit: float | None = None       # e.g. 0.015 = 1.5%
+    default_leverage: int | None = None    # e.g. 10 = 10x for futures
 
 
 def _get_openrouter_key(db: Session, user_id: str) -> str:
@@ -164,6 +166,21 @@ async def _upload_strategy_impl(
     auto_flag = str(auto_trade).lower() in ("true", "1", "yes", "on")
     mode_flag = "live" if str(auto_trade_mode).lower() == "live" else "paper"
 
+    # ── Extract trading params from generated code ──────────────────────────
+    # Parse stoploss, minimal_roi (→ take_profit), and timeframe if present
+    import re as _re
+    def _extract_float(pattern: str, src: str, default: float) -> float:
+        m = _re.search(pattern, src)
+        return float(m.group(1)) if m else default
+
+    sl_match   = _re.search(r'stoploss\s*=\s*(-?\d+\.?\d*)', code)
+    roi_match  = _re.search(r'minimal_roi\s*=\s*\{[^}]*["\']0["\']\s*:\s*(\d+\.?\d*)', code)
+    tf_match   = _re.search(r'timeframe\s*=\s*["\'](\w+)["\']', code)
+
+    code_stoploss    = float(sl_match.group(1))  if sl_match  else -0.03
+    code_take_profit = float(roi_match.group(1)) if roi_match else 0.015
+    code_timeframe   = tf_match.group(1)          if tf_match  else "15m"
+
     strategy = Strategy(
         user_id=user_id,
         name=name,
@@ -173,6 +190,10 @@ async def _upload_strategy_impl(
         model_used=model_used,
         auto_trade_enabled=auto_flag,
         auto_trade_mode=mode_flag,
+        stoploss=code_stoploss,
+        take_profit=code_take_profit,
+        default_leverage=10,        # sensible futures default; user can change in editor
+        timeframe=code_timeframe,
     )
     db.add(strategy)
     db.commit()
@@ -343,18 +364,20 @@ def get_strategy(
     if not strategy:
         return {"error": "Strategy not found"}
     return {
-        "id": strategy.id,
-        "name": strategy.name,
-        "description": strategy.description,
-        "original_text": strategy.original_text,
-        "generated_code": strategy.generated_code,
-        "model_used": strategy.model_used,
-        "indicators": strategy.indicators,
-        "timeframe": strategy.timeframe,
-        "pairs": strategy.pairs,
-        "stoploss": strategy.stoploss,
-        "is_template": strategy.is_template,
-        "created_at": str(strategy.created_at),
+        "id":               strategy.id,
+        "name":             strategy.name,
+        "description":      strategy.description,
+        "original_text":    strategy.original_text,
+        "generated_code":   strategy.generated_code,
+        "model_used":       strategy.model_used,
+        "indicators":       strategy.indicators,
+        "timeframe":        strategy.timeframe,
+        "pairs":            strategy.pairs,
+        "stoploss":         strategy.stoploss,
+        "take_profit":      getattr(strategy, "take_profit", 0.015) or 0.015,
+        "default_leverage": getattr(strategy, "default_leverage", 10) or 10,
+        "is_template":      strategy.is_template,
+        "created_at":       str(strategy.created_at),
     }
 
 
