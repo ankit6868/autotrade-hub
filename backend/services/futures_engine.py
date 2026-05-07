@@ -101,12 +101,14 @@ class FuturesEngine(NativeTradingEngine):
         strategy_id: int | None = None,
         **_kwargs,
     ) -> dict:
-        # Reset stale thread reference — happens after container restart if the
-        # background startup accidentally started a thread on this engine.
-        if self._thread is not None and not self._thread.is_alive():
+        # Always do a clean stop before (re)starting.
+        # This prevents the "already running" deadlock when the UI shows Stopped
+        # but an old thread is still alive from a previous session.
+        self._stop_evt.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
             self._thread = None
-        if self.is_running:
-            return {"error": "Engine already running. Stop it first."}
+        self._stop_evt.clear()
         self._strategy     = strategy_name
         self._strategy_id  = strategy_id
         self._pairs        = pairs

@@ -550,8 +550,12 @@ class NativeTradingEngine:
         take_profit_pct: float = 0.0,
         **_kwargs,
     ) -> dict:
-        if self.is_running:
-            return {"error": "Engine already running. Stop it first."}
+        # Clean stop before (re)starting — prevents "already running" deadlock
+        self._stop_evt.set()
+        if self._thread is not None:
+            self._thread.join(timeout=3)
+            self._thread = None
+        self._stop_evt.clear()
         self._strategy     = strategy_name
         self._strategy_id  = _kwargs.get("strategy_id", None)
         self._pairs        = pairs
