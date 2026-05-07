@@ -146,8 +146,13 @@ class FuturesEngine(NativeTradingEngine):
 
     # ── Tick override — adds liquidation check ──────────────────────────
 
-    def _tick_continuous(self, signal_fn, seen_signal: dict):
-        """Same as parent but checks liquidation before TP/SL."""
+    def _tick_continuous(self, signal_fn, seen_signal: dict,
+                         last_signal_ts: dict | None = None,
+                         signal_interval: float = 60.0):
+        """Futures tick: liquidation + TP/SL every 5s, signals every 60s."""
+        import time as _time
+        now_epoch = _time.time()
+
         for pair in self._pairs:
             if self._stop_evt.is_set():
                 return
@@ -161,31 +166,31 @@ class FuturesEngine(NativeTradingEngine):
             with self._lock:
                 self.ticks += 1
 
-                # Manage ALL open futures positions for this pair
+                # ── Manage ALL open futures positions ───────────────────
                 pair_keys = [k for k, p in self.positions.items() if p.pair == pair]
                 for trade_key in pair_keys:
                     pos = self.positions.get(trade_key)
                     if pos is None:
                         continue
 
-                    # Liquidation check (futures only)
+                    # Liquidation check (futures only) — instant, every tick
                     if isinstance(pos, FuturesPosition):
                         if pos.check_liquidation(live_price):
                             pos.close(live_price, "liquidated", now)
-                            self.balance += pos.pnl_abs   # pnl_abs is negative (full loss)
+                            self.balance += pos.pnl_abs
                             self.closed_trades.append(pos)
                             del self.positions[trade_key]
                             seen_signal[pair] = False
                             self.last_action = (
                                 f"LIQUIDATED {pair} @ {live_price:.4f} "
-                                f"liq_price={pos.liquidation_price:.4f} P&L={pos.pnl_abs:+.2f}"
+                                f"liq={pos.liquidation_price:.4f} P&L={pos.pnl_abs:+.2f}"
                             )
                             log.warning("[%s] %s", self.user_id, self.last_action)
                             _persist_closed_trade(self.user_id, pos, self._mode,
                                                   self._strategy_id, pos.db_id)
                             continue
 
-                    # Standard TP/SL exit
+                    # TP/SL exit — checked every tick (5 s when positions open)
                     pos.update_trail(live_price)
                     exit_info = pos.check_exit(live_price, live_price)
                     if exit_info:
@@ -197,7 +202,7 @@ class FuturesEngine(NativeTradingEngine):
                         seen_signal[pair] = False
                         self.last_action = (
                             f"CLOSED {pair} @ {exit_price:.4f} ({reason}) "
-                            f"P&L={pos.pnl_abs:+.2f} lev={getattr(pos, 'leverage', 1)}x"
+                            f"P&L={pos.pnl_abs:+.2f} lev={getattr(pos,'leverage',1)}x"
                         )
                         log.info("[%s] %s", self.user_id, self.last_action)
                         _persist_closed_trade(self.user_id, pos, self._mode,
@@ -205,14 +210,21 @@ class FuturesEngine(NativeTradingEngine):
                         if self._mode == "live":
                             self._place_live_exit(pair, pos, exit_price)
 
-                # Entry signal check
+                # Position limit guards
                 if len(self.positions) >= self._max_open:
                     continue
-                existing_for_pair = sum(1 for p in self.positions.values() if p.pair == pair)
+                existing_for_pair = sum(
+                    1 for p in self.positions.values() if p.pair == pair
+                )
                 if existing_for_pair >= getattr(self, '_max_per_pair', 2):
                     continue
 
-            # Candle fetch for signals
+            # ── Signal scan — only when interval has elapsed ────────────
+            if last_signal_ts is not None:
+                elapsed = now_epoch - last_signal_ts.get(pair, 0.0)
+                if elapsed < signal_interval:
+                    continue   # wait for next 60 s window
+
             try:
                 candles = _fetch_candles(pair.replace("/", "-"), self._timeframe)
             except Exception as e:

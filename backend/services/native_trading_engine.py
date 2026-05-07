@@ -722,32 +722,54 @@ class NativeTradingEngine:
     # ── internal loop ───────────────────────────────────────────────────
 
     def _run_loop(self):
-        """Continuous trading loop — checks every 60s regardless of timeframe.
+        """Adaptive trading loop.
 
-        Signal scanning: uses closed candles (strategy logic runs on candle data).
-        TP/SL management: runs on LIVE ticker price every tick for instant exits.
-        Entry: executes at current live price the moment signal conditions are met.
+        Two speeds:
+          • FAST (5 s)  — when positions are open: catches TP/SL the moment
+                          price crosses the level, no waiting for next candle.
+          • SLOW (60 s) — when flat: scans for entry signals.  Candle signals
+                          are deduplicated so the same candle never fires twice.
+
+        Rate-limit note: KuCoin free tier allows ~30 req/s per IP.
+        At 5 s per pair-tick we use ~1 req/pair/tick — well within limits.
         """
         signal_fn = _get_signal_fn(self._strategy)
-        log.info("[%s] engine started (continuous) — strategy=%s pairs=%s mode=%s",
+        log.info("[%s] engine started — strategy=%s pairs=%s mode=%s",
                  self.user_id, self._strategy, self._pairs, self._mode)
 
-        seen_signal: dict[str, bool] = {}   # pair → signal already acted on
+        seen_signal:      dict[str, bool]  = {}   # pair → acted on current signal
+        last_signal_ts:   dict[str, float] = {}   # pair → epoch of last signal check
+        SIGNAL_INTERVAL = 60.0                    # seconds between signal scans
 
         while not self._stop_evt.is_set():
             try:
-                self._tick_continuous(signal_fn, seen_signal)
+                now_ts = time.time()
+                # Run a full tick (TP/SL + optional signal scan)
+                self._tick_continuous(
+                    signal_fn, seen_signal,
+                    last_signal_ts=last_signal_ts,
+                    signal_interval=SIGNAL_INTERVAL,
+                )
+                # Update last signal check time for each pair
+                for pair in self._pairs:
+                    last_signal_ts.setdefault(pair, 0.0)
+                    if (now_ts - last_signal_ts[pair]) >= SIGNAL_INTERVAL:
+                        last_signal_ts[pair] = now_ts
+
             except Exception as exc:
                 with self._lock:
                     self.errors += 1
                     self.last_action = f"error: {exc}"
                 log.warning("[%s] engine error: %s", self.user_id, exc)
-                backoff = min(60, 5 * self.errors)
-                self._stop_evt.wait(backoff)
+                self._stop_evt.wait(min(60, 5 * self.errors))
+                continue
 
-            # Check every 60 seconds — fast enough to catch signals
-            # without hammering KuCoin (rate limit: ~30 req/s per IP)
-            self._stop_evt.wait(60)
+            # Adaptive sleep:
+            #  • 5 s  when positions are open → instant TP/SL response
+            #  • 60 s when flat              → just scanning for signals
+            with self._lock:
+                has_open = bool(self.positions)
+            self._stop_evt.wait(5 if has_open else 60)
 
         log.info("[%s] engine stopped", self.user_id)
 
@@ -762,17 +784,25 @@ class NativeTradingEngine:
             pass
         return None
 
-    def _tick_continuous(self, signal_fn, seen_signal: dict):
-        """One continuous tick — signal scan + live TP/SL check.
+    def _tick_continuous(self, signal_fn, seen_signal: dict,
+                         last_signal_ts: dict | None = None,
+                         signal_interval: float = 60.0):
+        """One adaptive tick — always checks TP/SL, scans entry signals when due.
 
-        Positions keyed by trade_id (not pair) so multiple positions per
-        pair are possible up to self._max_open total.
+        Args:
+            signal_fn:       Strategy signal function.
+            seen_signal:     Per-pair flag — True while current signal is active.
+            last_signal_ts:  Per-pair epoch of last signal scan (None = always scan).
+            signal_interval: Minimum seconds between signal scans (default 60 s).
         """
+        import time as _time
+        now_epoch = _time.time()
+
         for pair in self._pairs:
             if self._stop_evt.is_set():
                 return
 
-            # ── 1. Live price for TP/SL management ─────────────────────
+            # ── 1. Fetch live price (always — needed for TP/SL) ────────
             live_price = self._get_live_price(pair)
             if live_price is None:
                 continue
@@ -795,27 +825,34 @@ class NativeTradingEngine:
                         self.balance += pos.pnl_abs
                         self.closed_trades.append(pos)
                         del self.positions[trade_key]
-                        seen_signal[pair] = False  # allow re-entry
+                        seen_signal[pair] = False   # allow re-entry
                         self.last_action = (
                             f"CLOSED {pair} {pos.direction} @ {exit_price:.4f} "
                             f"({reason}) P&L={pos.pnl_abs:+.2f} USDT"
                         )
                         log.info("[%s] %s", self.user_id, self.last_action)
-                        _persist_closed_trade(self.user_id, pos, self._mode, self._strategy_id, pos.db_id)
+                        _persist_closed_trade(
+                            self.user_id, pos, self._mode,
+                            self._strategy_id, pos.db_id,
+                        )
                         if self._mode == "live":
                             self._place_live_exit(pair, pos, exit_price)
 
-                # ── 3. Check entry signal (even if pair has positions) ───
-                # Limit: max_open total positions across all pairs
+                # ── 3. Guard: skip signal scan if at position limits ────
                 if len(self.positions) >= self._max_open:
                     continue
-                # Don't stack same pair if already at max_per_pair (default 1 per pair)
-                existing_for_pair = sum(1 for p in self.positions.values() if p.pair == pair)
+                existing_for_pair = sum(
+                    1 for p in self.positions.values() if p.pair == pair
+                )
                 if existing_for_pair >= getattr(self, '_max_per_pair', 2):
                     continue
 
-            # Fetch candle history for indicator calculation
-            # (done outside lock to avoid blocking other pairs)
+            # ── 4. Signal scan — only when interval has elapsed ─────────
+            if last_signal_ts is not None:
+                elapsed = now_epoch - last_signal_ts.get(pair, 0.0)
+                if elapsed < signal_interval:
+                    continue   # too soon — skip candle fetch this tick
+
             try:
                 candles = _fetch_candles(pair.replace("/", "-"), self._timeframe)
             except Exception as e:
