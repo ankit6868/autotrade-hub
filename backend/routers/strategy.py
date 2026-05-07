@@ -251,10 +251,11 @@ def list_strategies(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
+    from sqlalchemy import or_
     result = db.execute(
         select(Strategy)
-        .where(Strategy.user_id == user_id)
-        .order_by(Strategy.created_at.desc())
+        .where(or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa: E712
+        .order_by(Strategy.is_template.desc(), Strategy.created_at.desc())
     )
     strategies = result.scalars().all()
     return {

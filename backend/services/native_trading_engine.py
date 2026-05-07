@@ -331,12 +331,43 @@ def _sig_ema_scalping(df: pd.DataFrame) -> Optional[tuple]:
     return None
 
 
+def _sig_simple_target(df: pd.DataFrame) -> Optional[tuple]:
+    """
+    SimpleTargetStrategy — fires frequently in any market condition.
+
+    Logic  : Buy when RSI is below 55 (not overbought) AND price is
+             near or below EMA-20 (fair-value / pullback zone).
+             Also fires on strong oversold (RSI < 38) regardless of EMA.
+    Exit   : Take-profit +1.5%, stop-loss -1.5% (1:1 R:R, quick cycles).
+    Rationale: Works in sideways & uptrending markets; stops out quickly
+               in strong downtrends so losses stay small.
+    """
+    if len(df) < 21:
+        return None
+    row  = df.iloc[-1]
+    rsi  = row.get("rsi",   50.0)
+    close = row["close"]
+    ema20 = row.get("ema20", row.get("ema_20", close))
+
+    near_ema    = close <= ema20 * 1.005          # at or slightly above EMA20
+    oversold    = rsi < 38                         # strongly oversold
+    mild_dip    = rsi < 55 and near_ema            # neutral RSI + near EMA
+
+    if oversold or mild_dip:
+        entry = close
+        sl    = round(entry * 0.985, 8)    # -1.5% stop-loss
+        tp    = round(entry * 1.015, 8)    # +1.5% take-profit
+        return entry, sl, tp, "long"
+    return None
+
+
 _STRATEGY_SIGNALS = {
     "MissCandleShortStrategy": _sig_miss_candle_short,
     "MissCandleLongStrategy":  _sig_miss_candle_long,
     "MacdCrossoverStrategy":   _sig_macd_crossover,
     "RsiBollingerStrategy":    _sig_rsi_bollinger,
     "EmaScalpingStrategy":     _sig_ema_scalping,
+    "SimpleTargetStrategy":    _sig_simple_target,
 }
 
 
@@ -351,7 +382,8 @@ def _get_signal_fn(name: str):
     if "miss" in n:                  return _sig_miss_candle_long
     if "macd" in n:                  return _sig_macd_crossover
     if "rsi" in n or "boll" in n:    return _sig_rsi_bollinger
-    return _sig_ema_scalping
+    if "simple" in n or "target" in n: return _sig_simple_target
+    return _sig_simple_target   # default fallback = most likely to fire
 
 
 # ─────────────────────────── position ─────────────────────────────────────
@@ -434,14 +466,16 @@ class NativeTradingEngine:
         self._stop_evt  = threading.Event()
 
         # config (set by start())
-        self._strategy  = ""
+        self._strategy     = ""
+        self._strategy_id: int | None = None   # DB id of the strategy record
         self._pairs: list[str] = []
-        self._timeframe = "15m"
-        self._mode      = "paper"       # "paper" | "live"
-        self._stoploss  = -0.03
-        self._wallet    = 1000.0
-        self._risk_pct  = 0.02          # 2% of wallet per trade
-        self._max_open  = 3
+        self._timeframe    = "15m"
+        self._mode         = "paper"    # "paper" | "live"
+        self._stoploss     = -0.03
+        self._take_profit  = 0.015      # default 1.5% TP (overridden per strategy)
+        self._wallet       = 1000.0
+        self._risk_pct     = 0.05       # 5% of wallet per trade
+        self._max_open     = 3
 
         # KuCoin credentials (live only)
         self._api_key   = ""
@@ -510,16 +544,18 @@ class NativeTradingEngine:
     ) -> dict:
         if self.is_running:
             return {"error": "Engine already running. Stop it first."}
-        self._strategy  = strategy_name
-        self._pairs     = pairs
-        self._timeframe = timeframe
-        self._stoploss  = stoploss
-        self._wallet    = wallet
-        self._mode      = "paper"
-        self._max_open  = max_open_trades
-        self._risk_pct  = max_position_pct / 100.0
-        self.balance    = wallet
-        self.positions  = {}
+        self._strategy     = strategy_name
+        self._strategy_id  = _kwargs.get("strategy_id", None)
+        self._pairs        = pairs
+        self._timeframe    = timeframe
+        self._stoploss     = stoploss
+        self._take_profit  = take_profit_pct / 100.0 if take_profit_pct else 0.015
+        self._wallet       = wallet
+        self._mode         = "paper"
+        self._max_open     = max_open_trades
+        self._risk_pct     = max_position_pct / 100.0
+        self.balance       = wallet
+        self.positions     = {}
         self.closed_trades = []
         self.ticks = self.errors = 0
         self._stop_evt.clear()

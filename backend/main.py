@@ -37,9 +37,48 @@ from backend.utils.rate_limit import limiter  # noqa: E402
 import jwt  # noqa: E402
 
 
+_SIMPLE_STRATEGY_CODE = '''
+class SimpleTargetStrategy:
+    """
+    Buys when RSI < 55 and price is near EMA-20 (pullback zone),
+    or when RSI < 38 (oversold). Exits at +1.5% take-profit or -1.5% stop-loss.
+    Works in any market condition — fires every few candles.
+    """
+    minimal_roi = {"0": 0.015}
+    stoploss = -0.015
+    timeframe = "15m"
+'''
+
+def _seed_builtin_strategies(db):
+    """Ensure SimpleTargetStrategy exists as a global template in the DB."""
+    from backend.models.strategy import Strategy
+    existing = db.execute(
+        select(Strategy).where(Strategy.name == "SimpleTargetStrategy", Strategy.is_template == True)  # noqa: E712
+    ).scalar_one_or_none()
+    if not existing:
+        db.add(Strategy(
+            user_id="system",
+            name="SimpleTargetStrategy",
+            description="Buys on RSI dips near EMA-20. Takes profit at +1.5%, stops at -1.5%. "
+                        "Fires frequently in any market — good for testing the bot works.",
+            original_text="Buy on pullbacks, sell at target",
+            generated_code=_SIMPLE_STRATEGY_CODE,
+            timeframe="15m",
+            stoploss=-0.015,
+            is_template=True,
+        ))
+        db.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    # Seed built-in strategies
+    try:
+        with SessionLocal() as db:
+            _seed_builtin_strategies(db)
+    except Exception:
+        pass
     # ── Auto-resume all engines that were running before a container restart ──
     try:
         from backend.services.native_trading_engine import native_engine_registry
