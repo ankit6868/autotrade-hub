@@ -100,17 +100,20 @@ async def get_candles(
 @router.get("/ohlcv/{pair:path}")
 async def get_ohlcv_public(pair: str, timeframe: str = "15m", limit: int = 120):
     """Public candlestick endpoint — no KuCoin credentials needed.
-    Returns [{time, open, high, low, close, volume}] for lightweight-charts."""
+    Returns [{time, open, high, low, close, volume}] for lightweight-charts.
+    Uses _fetch_klines which returns a DataFrame with unix-second 'time' column."""
     try:
-        from backend.services.kucoin_indicators import _fetch_candles, _build_df
-        symbol = pair.replace("/", "-")
-        raw = _fetch_candles(symbol, timeframe, limit)
-        if not raw:
+        from backend.services.kucoin_indicators import _fetch_klines
+        # _fetch_klines accepts the display pair format e.g. "BTC/USDT"
+        df = _fetch_klines(pair, timeframe)
+        if df is None or df.empty:
             return {"pair": pair, "candles": [], "error": "no_data"}
-        df = _build_df(raw)
+        # Trim to requested limit (already sorted oldest→newest)
+        if limit and len(df) > limit:
+            df = df.tail(limit).reset_index(drop=True)
         candles = [
             {
-                "time":   int(row["date"].timestamp()),
+                "time":   int(row["time"]),             # unix seconds — already correct
                 "open":   round(float(row["open"]),  2),
                 "high":   round(float(row["high"]),  2),
                 "low":    round(float(row["low"]),   2),
@@ -118,7 +121,6 @@ async def get_ohlcv_public(pair: str, timeframe: str = "15m", limit: int = 120):
                 "volume": round(float(row.get("volume", 0)), 4),
             }
             for _, row in df.iterrows()
-            if row["date"] is not None
         ]
         return {"pair": pair, "candles": candles}
     except Exception as e:
