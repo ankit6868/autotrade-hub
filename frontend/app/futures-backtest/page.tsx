@@ -89,15 +89,18 @@ function FuturesBacktestInner() {
       .catch(() => {});
   }, []);
 
-  // Auto-fill when strategy changes
+  // Auto-fill from strategy — use strategy config, fall back to sensible futures defaults
   useEffect(() => {
     if (!strategyId || strategies.length === 0) return;
     const s = strategies.find((x: any) => x.id === strategyId);
     if (!s) return;
-    if (s.stoploss)         setStoploss(Math.abs(Number(s.stoploss) * 100));
-    if (s.take_profit)      setTakeProfit(Number(s.take_profit) * 100);
-    if (s.default_leverage) setLeverage(Number(s.default_leverage));
-    if (s.timeframe)        setTimeframe(s.timeframe);
+    const sl  = Math.abs(Number(s.stoploss ?? -0.03) * 100);
+    const tp  = Number(s.take_profit ?? 0.015) * 100;
+    const lev = Number(s.default_leverage ?? 10);
+    setStoploss(sl   > 0 ? sl  : 3);
+    setTakeProfit(tp > 0 ? tp  : 1.5);
+    setLeverage(lev  > 1 ? lev : 10);   // never show 1x by default for futures
+    if (s.timeframe) setTimeframe(s.timeframe);
   }, [strategyId, strategies]);
 
   function selectPreset(label: string, days: number) {

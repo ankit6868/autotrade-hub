@@ -58,15 +58,18 @@ function FuturesLiveInner() {
     } catch { /* silent — backend may be starting */ }
   }, []);
 
-  // Auto-fill SL / TP / leverage when strategy changes
+  // Auto-fill from strategy — never show 1x leverage on a live futures page
   useEffect(() => {
     if (!strategyId || strategies.length === 0) return;
     const s = strategies.find((x: any) => x.id === strategyId);
     if (!s) return;
-    if (s.stoploss)         setStoploss(Math.abs(Number(s.stoploss) * 100));
-    if (s.take_profit)      setTakeProfit(Number(s.take_profit) * 100);
-    if (s.default_leverage) setLeverage(Number(s.default_leverage));
-    if (s.timeframe)        setTimeframe(s.timeframe);
+    const sl  = Math.abs(Number(s.stoploss ?? -0.03) * 100);
+    const tp  = Number(s.take_profit ?? 0.015) * 100;
+    const lev = Number(s.default_leverage ?? 10);
+    setStoploss(sl   > 0 ? sl  : 2);
+    setTakeProfit(tp > 0 ? tp  : 1.5);
+    setLeverage(lev  > 1 ? lev : 5);   // live: default to 5x if not set
+    if (s.timeframe) setTimeframe(s.timeframe);
   }, [strategyId, strategies]);
 
   useEffect(() => {
@@ -156,6 +159,17 @@ function FuturesLiveInner() {
             : '⚫ Stopped'}
         </span>
       </div>
+
+      {/* ── Locked banner ─────────────────────────────────────────── */}
+      {isRunning && (
+        <div className="mb-4 p-3 rounded-xl border border-amber-500/40 bg-amber-500/10 flex items-center gap-3 text-sm">
+          <span className="text-xl">🔒</span>
+          <span className="text-amber-300">
+            Bot is running — <strong>all settings are locked</strong>.
+            Stop the bot to change strategy, leverage, SL, or TP.
+          </span>
+        </div>
+      )}
 
       {/* ── KuCoin Futures Account Balance ─────────────────────────── */}
       <div className={`card mb-6 border ${

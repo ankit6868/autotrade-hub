@@ -73,7 +73,7 @@ def _cleanup_stale_test_trades(db):
 
 
 def _seed_builtin_strategies(db):
-    """Ensure SimpleTargetStrategy exists as a global template in the DB."""
+    """Ensure SimpleTargetStrategy exists as a global template with correct trading config."""
     from backend.models.strategy import Strategy
     existing = db.execute(
         select(Strategy).where(Strategy.name == "SimpleTargetStrategy", Strategy.is_template == True)  # noqa: E712
@@ -82,15 +82,28 @@ def _seed_builtin_strategies(db):
         db.add(Strategy(
             user_id="system",
             name="SimpleTargetStrategy",
-            description="Buys on RSI dips near EMA-20. Takes profit at +1.5%, stops at -1.5%. "
-                        "Fires frequently in any market — good for testing the bot works.",
+            description="Buys on RSI dips near EMA-20. Takes profit at +1.5%, stops at -3%. "
+                        "Works in any market — good for both spot and futures testing.",
             original_text="Buy on pullbacks, sell at target",
             generated_code=_SIMPLE_STRATEGY_CODE,
             timeframe="15m",
-            stoploss=-0.015,
-            is_template=True,
+            stoploss=-0.03,         # 3% stop-loss
+            take_profit=0.015,      # 1.5% take-profit
+            default_leverage=10,    # 10x for futures (ignored in spot mode)
+        is_template=True,
         ))
         db.commit()
+    else:
+        # Always patch up any missing/wrong trading-config fields on the template
+        changed = False
+        if not getattr(existing, "take_profit", None):
+            existing.take_profit = 0.015; changed = True
+        if not getattr(existing, "default_leverage", None) or existing.default_leverage < 2:
+            existing.default_leverage = 10; changed = True
+        if existing.stoploss != -0.03:
+            existing.stoploss = -0.03; changed = True
+        if changed:
+            db.commit()
 
 
 async def _background_startup():
