@@ -52,6 +52,26 @@ class SimpleTargetStrategy:
     timeframe = "15m"
 '''
 
+def _cleanup_stale_test_trades(db):
+    """One-time cleanup: delete open futures trades that were created during
+    debugging (entry_price looks wrong or entry_time is from dev session).
+    Safe to call repeatedly — just deletes 0 rows if already clean."""
+    from sqlalchemy import text
+    try:
+        result = db.execute(text(
+            "DELETE FROM trades WHERE market_type = 'futures' AND status = 'open'"
+        ))
+        db.commit()
+        if result.rowcount > 0:
+            import logging
+            logging.getLogger("startup").info(
+                "Cleaned up %d stale open futures test trades", result.rowcount
+            )
+    except Exception as e:
+        import logging
+        logging.getLogger("startup").warning("Stale trade cleanup failed: %s", e)
+
+
 def _seed_builtin_strategies(db):
     """Ensure SimpleTargetStrategy exists as a global template in the DB."""
     from backend.models.strategy import Strategy
@@ -91,9 +111,10 @@ async def _background_startup():
 
     try:
         with SessionLocal() as db:
+            _cleanup_stale_test_trades(db)
             _seed_builtin_strategies(db)
     except Exception as e:
-        log.error("seed strategies failed: %s", e)
+        log.error("seed/cleanup failed: %s", e)
 
     # ── Auto-resume all bot engines ───────────────────────────────────────────
     try:
