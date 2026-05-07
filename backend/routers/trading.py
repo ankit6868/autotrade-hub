@@ -44,25 +44,45 @@ def start_trading(
     if not config:
         return {"error": "Not configured. Complete setup first."}
 
+    # ── Resolve strategy name ──────────────────────────────────────────────
+    # Built-in native strategies are always valid — no DB row required.
+    from backend.services.native_trading_engine import _STRATEGY_SIGNALS
+    _BUILTIN_NAMES = set(_STRATEGY_SIGNALS.keys())
+
     from sqlalchemy import or_
     strat_result = db.execute(
         select(Strategy).where(
             Strategy.id == req.strategy_id,
-            or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa: E712
+            or_(Strategy.user_id == user_id,
+                Strategy.is_template == True,      # noqa: E712
+                Strategy.user_id == "system"),
         )
     )
     strategy = strat_result.scalar_one_or_none()
-    if not strategy:
-        return {"error": "Strategy not found"}
 
-    # Extract class name — works for both Freqtrade-style (class X(IStrategy))
-    # and plain classes (class SimpleTargetStrategy:)
-    strategy_name = strategy.name or f"strategy_{strategy.id}"
-    for line in (strategy.generated_code or "").split("\n"):
-        line = line.strip()
-        if line.startswith("class "):
-            strategy_name = line.split("(")[0].split(":")[0].replace("class ", "").strip()
-            break
+    if strategy:
+        # Extract class name from code — works for both Freqtrade-style
+        # (class X(IStrategy):) and plain classes (class SimpleTargetStrategy:)
+        strategy_name = strategy.name or f"strategy_{strategy.id}"
+        for line in (strategy.generated_code or "").split("\n"):
+            line = line.strip()
+            if line.startswith("class "):
+                parsed = line.split("(")[0].split(":")[0].replace("class ", "").strip()
+                if parsed:
+                    strategy_name = parsed
+                break
+    else:
+        # Fallback: check if the strategy ID maps to a seeded built-in by name
+        # (handles the case where the DB row isn't visible to this user yet)
+        any_strat = db.execute(select(Strategy).where(Strategy.id == req.strategy_id)).scalar_one_or_none()
+        if any_strat and any_strat.name in _BUILTIN_NAMES:
+            strategy_name = any_strat.name
+            strategy = any_strat  # allow it
+        elif any_strat and any_strat.name:
+            strategy_name = any_strat.name
+            strategy = any_strat
+        else:
+            return {"error": "Strategy not found"}
 
     # Use Freqtrade if actually importable; otherwise use the native engine.
     # shutil.which / path checks are unreliable when FREQTRADE_PATH points to
