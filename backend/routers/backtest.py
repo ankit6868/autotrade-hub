@@ -1,7 +1,7 @@
 import json
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 
 from backend.models import get_db, Strategy
@@ -28,7 +28,7 @@ def run_backtest(
     user_id: str = Depends(get_user_id),
 ):
     result = db.execute(
-        select(Strategy).where(Strategy.id == req.strategy_id, Strategy.user_id == user_id)
+        select(Strategy).where(Strategy.id == req.strategy_id, or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa: E712
     )
     strategy = result.scalar_one_or_none()
     if not strategy:
@@ -179,7 +179,7 @@ def run_bulk_backtest(
     Faster than looping per-pair from the frontend (one candle download, one
     Freqtrade launch). Returns per-pair metrics alongside aggregate totals."""
     result = db.execute(
-        select(Strategy).where(Strategy.id == req.strategy_id, Strategy.user_id == user_id)
+        select(Strategy).where(Strategy.id == req.strategy_id, or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa: E712
     )
     strategy = result.scalar_one_or_none()
     if not strategy:

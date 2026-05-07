@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 from fastapi import APIRouter, Depends, UploadFile, File, Form, Request
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from sqlalchemy.orm import Session
 
 from backend.models import get_db, Config, Strategy
@@ -301,7 +301,7 @@ def set_strategy_auto_trade(
     only considers strategies that have this flag set when picking which
     template to deploy from a scanner recommendation."""
     s = db.execute(
-        select(Strategy).where(Strategy.id == strategy_id, Strategy.user_id == user_id)
+        select(Strategy).where(Strategy.id == strategy_id, or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa: E712
     ).scalar_one_or_none()
     if not s:
         return {"error": "Strategy not found"}
@@ -333,7 +333,7 @@ def get_strategy(
     user_id: str = Depends(get_user_id),
 ):
     result = db.execute(
-        select(Strategy).where(Strategy.id == strategy_id, Strategy.user_id == user_id)
+        select(Strategy).where(Strategy.id == strategy_id, or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa: E712
     )
     strategy = result.scalar_one_or_none()
     if not strategy:
@@ -362,7 +362,7 @@ def update_strategy(
     user_id: str = Depends(get_user_id),
 ):
     result = db.execute(
-        select(Strategy).where(Strategy.id == strategy_id, Strategy.user_id == user_id)
+        select(Strategy).where(Strategy.id == strategy_id, or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa: E712
     )
     strategy = result.scalar_one_or_none()
     if not strategy:
@@ -389,7 +389,7 @@ def delete_strategy(
     user_id: str = Depends(get_user_id),
 ):
     result = db.execute(
-        select(Strategy).where(Strategy.id == strategy_id, Strategy.user_id == user_id)
+        select(Strategy).where(Strategy.id == strategy_id, or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa: E712
     )
     strategy = result.scalar_one_or_none()
     if not strategy:
