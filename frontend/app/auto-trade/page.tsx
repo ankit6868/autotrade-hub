@@ -108,8 +108,8 @@ export default function AutoTradePage() {
     const [sRes, stRes, openRes, histRes] = await Promise.allSettled([
       api.autotrade.status(),
       api.autotrade.settings.get(),
-      api.trade.open('paper'),  // auto-trade always uses paper mode
-      api.trade.history({ mode: 'paper', limit: '30' }),
+      api.trade.open(settings.auto_trade_mode as 'paper' | 'live'),
+      api.trade.history({ mode: settings.auto_trade_mode, limit: '30' }),
     ]);
 
     // Apply whatever succeeded

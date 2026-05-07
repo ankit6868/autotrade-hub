@@ -228,6 +228,19 @@ function LiveTradingInner() {
 
   return (
     <div className="max-w-6xl mx-auto">
+      {/* REAL MONEY WARNING BANNER */}
+      <div className="mb-6 p-4 rounded-xl border border-red-500/40 bg-red-500/10 flex items-start gap-3">
+        <span className="text-2xl">🔴</span>
+        <div>
+          <p className="font-bold text-red-400 text-sm">REAL MONEY — Live Trading Mode</p>
+          <p className="text-red-300/70 text-xs mt-0.5">
+            All trades execute on KuCoin with your real funds. Positions, P&amp;L, and trade history
+            shown here are <strong>completely separate</strong> from Paper Trading.
+            Ensure your KuCoin API keys are set up in <strong>Setup</strong> before starting.
+          </p>
+        </div>
+      </div>
+
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-6 sm:mb-8">
         <div>
           <h1 className="heading-xl">Live Trading</h1>
