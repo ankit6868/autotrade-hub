@@ -12,7 +12,7 @@ from backend.models import get_db
 from backend.models.trade import CopySignal, CopySubscription
 from backend.models.strategy import Strategy
 from backend.utils.clerk_auth import get_user_id
-from backend.services.event_logger import log_event
+from backend.utils.audit import log_event
 
 router = APIRouter(prefix="/api/copy", tags=["copy_trading"])
 

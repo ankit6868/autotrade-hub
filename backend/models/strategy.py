@@ -21,5 +21,7 @@ class Strategy(Base):
     # --- Auto-trade enablement per strategy ---
     auto_trade_enabled = Column(Boolean, default=False)
     auto_trade_mode = Column(Text, default="paper")  # 'paper' | 'live'
+    allow_copy_trading = Column(Boolean, default=False)  # master opt-in
+    default_leverage = Column(Integer, default=1)        # default leverage for futures
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

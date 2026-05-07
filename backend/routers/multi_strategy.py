@@ -13,7 +13,7 @@ from backend.models import get_db
 from backend.models.trade import StrategyInstance
 from backend.utils.clerk_auth import get_user_id
 from backend.services.multi_strategy import multi_strategy_manager
-from backend.services.event_logger import log_event
+from backend.utils.audit import log_event
 
 router = APIRouter(prefix="/api/strategies/instances", tags=["multi_strategy"])
 

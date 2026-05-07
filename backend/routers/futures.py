@@ -14,7 +14,7 @@ from backend.models.trade import Trade, StrategyInstance
 from backend.models.config import Config
 from backend.utils.clerk_auth import get_user_id
 from backend.services.futures_engine import futures_engine_registry
-from backend.services.event_logger import log_event
+from backend.utils.audit import log_event
 
 router = APIRouter(prefix="/api/futures", tags=["futures"])
 
