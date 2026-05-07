@@ -58,6 +58,17 @@ function FuturesLiveInner() {
     } catch { /* silent — backend may be starting */ }
   }, []);
 
+  // Auto-fill SL / TP / leverage when strategy changes
+  useEffect(() => {
+    if (!strategyId || strategies.length === 0) return;
+    const s = strategies.find((x: any) => x.id === strategyId);
+    if (!s) return;
+    if (s.stoploss)         setStoploss(Math.abs(Number(s.stoploss) * 100));
+    if (s.take_profit)      setTakeProfit(Number(s.take_profit) * 100);
+    if (s.default_leverage) setLeverage(Number(s.default_leverage));
+    if (s.timeframe)        setTimeframe(s.timeframe);
+  }, [strategyId, strategies]);
+
   useEffect(() => {
     api.strategy.list()
       .then(d => {

@@ -20,7 +20,6 @@ const nav = [
   { href: '/futures-paper',     label: 'Futures Paper',      icon: '📊' },
   { href: '/futures-live',      label: 'Futures Live',       icon: '⚡' },
   // ── Advanced ──────────────────────────────────────────────────────
-  { href: '/multi-strategy',    label: 'Multi-Strategy',     icon: '⚙️' },
   { href: '/copy-trading',      label: 'Copy Trading',       icon: '📡' },
   { href: '/auto-trade',        label: 'Auto-Trade',         icon: '🤖' },
   { href: '/history',           label: 'History',            icon: '📈' },

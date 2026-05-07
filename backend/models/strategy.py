@@ -23,5 +23,6 @@ class Strategy(Base):
     auto_trade_mode = Column(Text, default="paper")  # 'paper' | 'live'
     allow_copy_trading = Column(Boolean, default=False, server_default='false', nullable=True)
     default_leverage   = Column(Integer, default=1,     server_default='1',     nullable=True)
+    take_profit        = Column(Float,   default=0.015, server_default='0.015', nullable=True)  # e.g. 0.015 = 1.5%
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

@@ -275,14 +275,18 @@ def list_strategies(
     return {
         "strategies": [
             {
-                "id": s.id,
-                "name": s.name,
-                "description": s.description,
-                "timeframe": s.timeframe,
-                "is_template": getattr(s, "is_template", False),
+                "id":                 s.id,
+                "name":               s.name,
+                "description":        s.description,
+                "timeframe":          s.timeframe or "15m",
+                "is_template":        getattr(s, "is_template", False),
                 "auto_trade_enabled": bool(getattr(s, "auto_trade_enabled", False)),
-                "auto_trade_mode": getattr(s, "auto_trade_mode", "paper"),
-                "created_at": str(s.created_at),
+                "auto_trade_mode":    getattr(s, "auto_trade_mode", "paper"),
+                # Trading config — auto-fill stop-loss, take-profit, leverage on frontend
+                "stoploss":           getattr(s, "stoploss", -0.03) or -0.03,
+                "take_profit":        getattr(s, "take_profit", 0.015) or 0.015,
+                "default_leverage":   getattr(s, "default_leverage", 1) or 1,
+                "created_at":         str(s.created_at),
             }
             for s in strategies
         ]
