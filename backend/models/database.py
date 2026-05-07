@@ -39,6 +39,39 @@ def get_db():
         db.close()
 
 
+def _explicit_v2_migration():
+    """Directly add every new column from the v2 schema (futures + copy trading).
+    Uses explicit PostgreSQL-safe SQL. Safe to run multiple times (IF NOT EXISTS).
+    This runs BEFORE the ORM-based _lightweight_migrate() as a safety net."""
+    _NEW_COLS = [
+        # strategies table
+        ("strategies", "allow_copy_trading", "BOOLEAN",  "DEFAULT false"),
+        ("strategies", "default_leverage",   "INTEGER",  "DEFAULT 1"),
+        # trades table
+        ("trades", "market_type",       "TEXT",    "DEFAULT 'spot'"),
+        ("trades", "leverage",          "INTEGER", "DEFAULT 1"),
+        ("trades", "liquidation_price", "FLOAT",   ""),
+        ("trades", "copy_source_id",    "INTEGER", ""),
+    ]
+    is_pg  = "postgresql" in engine.url.drivername or "postgres" in engine.url.drivername
+    is_sq  = engine.url.drivername.startswith("sqlite")
+    if not (is_pg or is_sq):
+        return
+    with engine.begin() as conn:
+        for (table, col, dtype, dflt) in _NEW_COLS:
+            try:
+                if is_pg:
+                    conn.execute(text(
+                        f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {dtype} {dflt}"
+                    ))
+                else:  # sqlite — no IF NOT EXISTS for ADD COLUMN
+                    conn.execute(text(
+                        f"ALTER TABLE {table} ADD COLUMN {col} {dtype} {dflt}"
+                    ))
+            except Exception:
+                pass  # column already exists — safe to ignore
+
+
 def _lightweight_migrate():
     """Idempotent schema migration that ADDs missing columns for both SQLite
     (dev) and PostgreSQL (production).  We do NOT drop or alter existing
@@ -70,11 +103,16 @@ def _lightweight_migrate():
                 if col.default is not None and getattr(col.default, "arg", None) is not None:
                     d = col.default.arg
                     if isinstance(d, bool):
-                        default_sql = f" DEFAULT {1 if d else 0}"
+                        # PostgreSQL needs TRUE/FALSE keywords, not 0/1 for boolean columns
+                        default_sql = f" DEFAULT {'TRUE' if d else 'FALSE'}"
                     elif isinstance(d, (int, float)):
                         default_sql = f" DEFAULT {d}"
                     elif isinstance(d, str):
                         default_sql = f" DEFAULT '{d}'"
+                elif col.server_default is not None:
+                    sd = getattr(col.server_default, 'arg', None)
+                    if sd is not None:
+                        default_sql = f" DEFAULT {sd}"
 
                 try:
                     if is_pg:
@@ -98,7 +136,9 @@ def init_db():
         os.makedirs("data", exist_ok=True)
     # 1. Create any missing tables (new tables from new models)
     Base.metadata.create_all(bind=engine)
-    # 2. Add any missing columns to existing tables (ALTER TABLE ADD COLUMN)
+    # 2. Explicit v2 column migration (runs first — most reliable)
+    _explicit_v2_migration()
+    # 3. ORM-based generic migration for any other missing columns
     _lightweight_migrate()
     # 3. Ensure indexes exist
     with engine.begin() as conn:
