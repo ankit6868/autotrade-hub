@@ -25,30 +25,51 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _col_exists(table: str, col: str) -> bool:
+    """Check if a column already exists — safe for repeated migrations."""
+    from sqlalchemy import inspect as sa_inspect
+    bind = op.get_bind()
+    return col in {c["name"] for c in sa_inspect(bind).get_columns(table)}
+
+
+def _table_exists(table: str) -> bool:
+    from sqlalchemy import inspect as sa_inspect
+    bind = op.get_bind()
+    return sa_inspect(bind).has_table(table)
+
+
 def upgrade() -> None:
-    # ── trades: add futures columns ───────────────────────────────────────
-    op.add_column("trades", sa.Column(
-        "market_type", sa.Text(), nullable=True, server_default="spot"
-    ))
-    op.add_column("trades", sa.Column(
-        "leverage", sa.Integer(), nullable=True, server_default="1"
-    ))
-    op.add_column("trades", sa.Column(
-        "liquidation_price", sa.Float(), nullable=True
-    ))
-    op.add_column("trades", sa.Column(
-        "copy_source_id", sa.Integer(), nullable=True
-    ))
+    # ── trades: add futures columns (idempotent — skip if already added) ─
+    if not _col_exists("trades", "market_type"):
+        op.add_column("trades", sa.Column(
+            "market_type", sa.Text(), nullable=True, server_default="spot"
+        ))
+    if not _col_exists("trades", "leverage"):
+        op.add_column("trades", sa.Column(
+            "leverage", sa.Integer(), nullable=True, server_default="1"
+        ))
+    if not _col_exists("trades", "liquidation_price"):
+        op.add_column("trades", sa.Column(
+            "liquidation_price", sa.Float(), nullable=True
+        ))
+    if not _col_exists("trades", "copy_source_id"):
+        op.add_column("trades", sa.Column(
+            "copy_source_id", sa.Integer(), nullable=True
+        ))
 
     # ── strategies: add copy trading columns ─────────────────────────────
-    op.add_column("strategies", sa.Column(
-        "allow_copy_trading", sa.Boolean(), nullable=True, server_default="false"
-    ))
-    op.add_column("strategies", sa.Column(
-        "default_leverage", sa.Integer(), nullable=True, server_default="1"
-    ))
+    if not _col_exists("strategies", "allow_copy_trading"):
+        op.add_column("strategies", sa.Column(
+            "allow_copy_trading", sa.Boolean(), nullable=True, server_default="false"
+        ))
+    if not _col_exists("strategies", "default_leverage"):
+        op.add_column("strategies", sa.Column(
+            "default_leverage", sa.Integer(), nullable=True, server_default="1"
+        ))
 
     # ── strategy_instances: multi-strategy per user ───────────────────────
+    if _table_exists("strategy_instances"):
+        return  # all tables already created — nothing left to do
     op.create_table(
         "strategy_instances",
         sa.Column("id",            sa.Integer(), primary_key=True),

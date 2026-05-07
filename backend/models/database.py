@@ -136,9 +136,8 @@ def init_db():
         os.makedirs("data", exist_ok=True)
     # 1. Create any missing tables (new tables from new models)
     Base.metadata.create_all(bind=engine)
-    # 2. Explicit v2 column migration (runs first — most reliable)
-    _explicit_v2_migration()
-    # 3. ORM-based generic migration for any other missing columns
+    # 2. ORM-based generic migration for any missing columns
+    # Note: _explicit_v2_migration() removed — Alembic migration handles this now
     _lightweight_migrate()
     # 3. Ensure indexes exist
     with engine.begin() as conn:
