@@ -52,6 +52,35 @@ class Trade(Base):
     )
 
 
+class FuturesBacktest(Base):
+    """Stores results of a futures backtest run (with leverage, liquidations, shorts)."""
+    __tablename__ = "futures_backtests"
+
+    id               = Column(Integer, primary_key=True)
+    user_id          = Column(Text, nullable=False, server_default="local-dev", index=True)
+    strategy_id      = Column(Integer, ForeignKey("strategies.id"), nullable=True)
+    strategy_name    = Column(Text)
+    pairs            = Column(Text)          # comma-separated
+    timeframe        = Column(Text)
+    timerange        = Column(Text)
+    leverage         = Column(Integer, default=10)
+    starting_balance = Column(Float, default=1000)
+    final_balance    = Column(Float)
+    total_profit_pct = Column(Float)
+    total_profit_abs = Column(Float)
+    win_rate         = Column(Float)
+    max_drawdown     = Column(Float)
+    total_trades     = Column(Integer)
+    winning_trades   = Column(Integer)
+    losing_trades    = Column(Integer)
+    liquidations     = Column(Integer, default=0)
+    long_trades      = Column(Integer, default=0)
+    short_trades     = Column(Integer, default=0)
+    avg_leverage_pnl = Column(Float)         # avg P&L per trade (leveraged)
+    results_json     = Column(Text)
+    created_at       = Column(DateTime, server_default=func.now())
+
+
 class StrategyInstance(Base):
     """One running engine instance — enables multi-strategy per user."""
     __tablename__ = "strategy_instances"

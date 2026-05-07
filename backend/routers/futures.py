@@ -19,6 +19,137 @@ from backend.utils.audit import log_event
 router = APIRouter(prefix="/api/futures", tags=["futures"])
 
 
+# ── Futures Backtest ─────────────────────────────────────────────────────────
+
+@router.post("/backtest/run")
+def run_futures_backtest(
+    req: dict,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Run a leveraged futures backtest using historical KuCoin candle data."""
+    from sqlalchemy import or_
+    from backend.models.strategy import Strategy
+    from backend.models.trade import FuturesBacktest
+    from backend.services.futures_backtester import run_futures_backtest as _run
+
+    strategy_id      = req.get("strategy_id")
+    pairs            = req.get("pairs", ["BTC/USDT"])
+    timeframe        = req.get("timeframe", "15m")
+    timerange        = req.get("timerange", "20240101-20240401")
+    leverage         = int(req.get("leverage", 10))
+    starting_balance = float(req.get("starting_balance", 1000))
+    stoploss_pct     = float(req.get("stoploss_pct", 3.0))
+    take_profit_pct  = float(req.get("take_profit_pct", 1.5))
+
+    # Resolve strategy
+    strategy_name = req.get("strategy_name", "SimpleTargetStrategy")
+    strategy = None
+    if strategy_id:
+        strategy = db.execute(
+            select(Strategy).where(
+                Strategy.id == strategy_id,
+                or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa
+            )
+        ).scalar_one_or_none()
+        if strategy:
+            strategy_name = strategy.name
+
+    result = _run(
+        strategy_name    = strategy_name,
+        pairs            = pairs,
+        timeframe        = timeframe,
+        timerange        = timerange,
+        leverage         = leverage,
+        starting_balance = starting_balance,
+        stoploss_pct     = stoploss_pct,
+        take_profit_pct  = take_profit_pct,
+    )
+
+    if "error" in result:
+        return result
+
+    m = result["metrics"]
+
+    # Persist to DB
+    bt = FuturesBacktest(
+        user_id          = user_id,
+        strategy_id      = strategy_id,
+        strategy_name    = strategy_name,
+        pairs            = ",".join(pairs),
+        timeframe        = timeframe,
+        timerange        = timerange,
+        leverage         = leverage,
+        starting_balance = starting_balance,
+        final_balance    = m["final_balance"],
+        total_profit_pct = m["total_profit_pct"],
+        total_profit_abs = m["total_profit_abs"],
+        win_rate         = m["win_rate"],
+        max_drawdown     = m["max_drawdown"],
+        total_trades     = m["total_trades"],
+        winning_trades   = m["winning_trades"],
+        losing_trades    = m["losing_trades"],
+        liquidations     = m["liquidations"],
+        long_trades      = m["long_trades"],
+        short_trades     = m["short_trades"],
+        avg_leverage_pnl = m["avg_leverage_pnl"],
+        results_json     = select_desc_json(result),
+    )
+    db.add(bt)
+    db.commit()
+    db.refresh(bt)
+
+    return {**result, "id": bt.id}
+
+
+def select_desc_json(result: dict) -> str:
+    """Store only metrics + trade count (not full trade list) to keep DB rows small."""
+    import json
+    return json.dumps({
+        "metrics":      result.get("metrics", {}),
+        "trade_count":  len(result.get("trades", [])),
+        "equity_curve": result.get("equity_curve", [])[-50:],  # last 50 points
+    })
+
+
+@router.get("/backtest/history")
+def futures_backtest_history(
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Return past futures backtest runs for this user."""
+    from backend.models.trade import FuturesBacktest
+    from sqlalchemy import desc as sql_desc
+    rows = db.execute(
+        select(FuturesBacktest)
+        .where(FuturesBacktest.user_id == user_id)
+        .order_by(sql_desc(FuturesBacktest.created_at))
+        .limit(limit)
+    ).scalars().all()
+    return {
+        "backtests": [
+            {
+                "id":               r.id,
+                "strategy_name":    r.strategy_name,
+                "pairs":            r.pairs,
+                "timeframe":        r.timeframe,
+                "timerange":        r.timerange,
+                "leverage":         r.leverage,
+                "starting_balance": r.starting_balance,
+                "final_balance":    r.final_balance,
+                "total_profit_pct": r.total_profit_pct,
+                "win_rate":         r.win_rate,
+                "max_drawdown":     r.max_drawdown,
+                "total_trades":     r.total_trades,
+                "liquidations":     r.liquidations,
+                "created_at":       str(r.created_at),
+            }
+            for r in rows
+        ]
+    }
+
+
 # ── One-time cleanup ──────────────────────────────────────────────────────────
 
 @router.delete("/cleanup-test-trades")

@@ -19,6 +19,7 @@ const nav = [
   // ── Futures Trading ───────────────────────────────────────────────
   { href: '/futures-paper',     label: 'Futures Paper',      icon: '📊' },
   { href: '/futures-live',      label: 'Futures Live',       icon: '⚡' },
+  { href: '/futures-backtest',  label: 'Futures Backtest',   icon: '🔬' },
   // ── Advanced ──────────────────────────────────────────────────────
   { href: '/copy-trading',      label: 'Copy Trading',       icon: '📡' },
   { href: '/auto-trade',        label: 'Auto-Trade',         icon: '🤖' },

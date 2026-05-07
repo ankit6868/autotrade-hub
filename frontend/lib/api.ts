@@ -179,6 +179,12 @@ export const api = {
       return request<{ trades: any[] }>(`/api/futures/history${qs}`);
     },
     balance: () => request<any>('/api/futures/balance'),
+    backtest: {
+      run: (data: Record<string, unknown>) =>
+        request<any>('/api/futures/backtest/run', { method: 'POST', body: JSON.stringify(data) }),
+      history: (limit = 20) =>
+        request<any>(`/api/futures/backtest/history?limit=${limit}`),
+    },
     forceClose: (pair: string) =>
       request<any>(`/api/futures/force-close/${pair}`, { method: 'POST' }),
     manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5) =>
