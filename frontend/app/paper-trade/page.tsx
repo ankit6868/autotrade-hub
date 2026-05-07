@@ -9,6 +9,7 @@ import StatusBadge from '@/components/ui/StatusBadge';
 import TradingViewWidget from '@/components/charts/TradingViewWidget';
 import SignalsPanel from '@/components/dashboard/SignalsPanel';
 import StrategySignalMonitor from '@/components/dashboard/StrategySignalMonitor';
+import StrategyChart from '@/components/dashboard/StrategyChart';
 import PairPicker from '@/components/ui/PairPicker';
 import SignalContextPanel from '@/components/dashboard/SignalContextPanel';
 import {
@@ -555,6 +556,14 @@ function PaperTradeInner() {
           onManualSell={() => { refreshData(); }}
         />
       )}
+
+      {/* Strategy Analytics Chart — candlestick with entry/exit markers */}
+      <StrategyChart
+        pair={pairs[0] || 'BTC/USDT'}
+        timeframe={timeframe}
+        mode="paper"
+        height={460}
+      />
 
       {/* Live Chart + Signals */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">

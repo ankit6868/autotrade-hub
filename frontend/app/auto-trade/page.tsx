@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import MetricCard from '@/components/ui/MetricCard';
 import StatusBadge from '@/components/ui/StatusBadge';
 import WebhookManager from '@/components/dashboard/WebhookManager';
+import StrategyChart from '@/components/dashboard/StrategyChart';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -734,6 +735,14 @@ export default function AutoTradePage() {
             )}
             {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
           </div>
+
+          {/* ── Strategy Analytics Chart ── */}
+          <StrategyChart
+            pair={openTrades.length > 0 ? String(openTrades[0].pair) : 'BTC/USDT'}
+            timeframe="15m"
+            mode="paper"
+            height={460}
+          />
 
           {/* ── Open positions ── */}
           <div className="card">

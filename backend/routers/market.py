@@ -97,6 +97,34 @@ async def get_candles(
         return {"pair": pair, "candles": [], "error": str(e)}
 
 
+@router.get("/ohlcv/{pair:path}")
+async def get_ohlcv_public(pair: str, timeframe: str = "15m", limit: int = 120):
+    """Public candlestick endpoint — no KuCoin credentials needed.
+    Returns [{time, open, high, low, close, volume}] for lightweight-charts."""
+    try:
+        from backend.services.kucoin_indicators import _fetch_candles, _build_df
+        symbol = pair.replace("/", "-")
+        raw = _fetch_candles(symbol, timeframe, limit)
+        if not raw:
+            return {"pair": pair, "candles": [], "error": "no_data"}
+        df = _build_df(raw)
+        candles = [
+            {
+                "time":   int(row["date"].timestamp()),
+                "open":   round(float(row["open"]),  2),
+                "high":   round(float(row["high"]),  2),
+                "low":    round(float(row["low"]),   2),
+                "close":  round(float(row["close"]), 2),
+                "volume": round(float(row.get("volume", 0)), 4),
+            }
+            for _, row in df.iterrows()
+            if row["date"] is not None
+        ]
+        return {"pair": pair, "candles": candles}
+    except Exception as e:
+        return {"pair": pair, "candles": [], "error": str(e)}
+
+
 @router.get("/signals/{pair:path}")
 async def get_pair_signals(pair: str, interval: str = "15m"):
     """KuCoin klines + local TA. No external TA service."""

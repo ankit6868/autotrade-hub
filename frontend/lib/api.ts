@@ -109,6 +109,10 @@ export const api = {
     price: (pair: string) => request<any>(`/api/market/price/${pair}`),
     candles: (pair: string, type?: string) =>
       request<{ candles: any[] }>(`/api/market/candles/${pair}?kline_type=${type || '15min'}`),
+    ohlcv: (pair: string, timeframe?: string, limit?: number) =>
+      request<{ pair: string; candles: Array<{time:number;open:number;high:number;low:number;close:number;volume:number}> }>(
+        `/api/market/ohlcv/${pair}?timeframe=${timeframe || '15m'}&limit=${limit || 120}`
+      ),
     signals: (pair: string, interval?: string) =>
       request<any>(`/api/market/signals/${pair}?interval=${interval || '15m'}`),
   },

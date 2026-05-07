@@ -294,6 +294,7 @@ def get_open_trades(
             "current_price": round(cur, 6),
             "amount": stake,
             "stoploss_price": p.get("sl"),
+            "tp_price": p.get("tp"),          # take-profit level for chart
             "entry_time": p.get("opened_at"),
             "mode": "paper",
             "unrealized_pnl": round(unreal, 4),
