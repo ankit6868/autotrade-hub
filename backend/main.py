@@ -111,10 +111,9 @@ async def _background_startup():
 
     try:
         with SessionLocal() as db:
-            _cleanup_stale_test_trades(db)
             _seed_builtin_strategies(db)
     except Exception as e:
-        log.error("seed/cleanup failed: %s", e)
+        log.error("seed strategies failed: %s", e)
 
     # ── Auto-resume all bot engines ───────────────────────────────────────────
     try:

@@ -158,7 +158,9 @@ def futures_open_positions(
     from backend.services.native_trading_engine import _kucoin_get
 
     eng = futures_engine_registry.for_user(user_id)
-    native_positions = eng.get_open_positions()
+    # Only show in-memory positions when engine is running in the REQUESTED mode.
+    # Prevents paper bot positions leaking into the live page and vice-versa.
+    native_positions = eng.get_open_positions() if (mode is None or eng._mode == mode) else []
 
     # Fetch live prices
     live_prices: dict[str, float] = {}
