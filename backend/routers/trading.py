@@ -457,8 +457,15 @@ def force_close(
         pair = trade_id[len("native-"):]   # e.g. "BTC/USDT"
         eng = native_engine_registry.for_user(user_id)
         with eng._lock:
-            pos = eng.positions.get(pair)
-            if pos is None:
+            # Positions keyed by "pair#timestamp" — find the first match for this pair
+            trade_key = None
+            pos = None
+            for k, p in eng.positions.items():
+                if p.pair == pair:
+                    trade_key = k
+                    pos = p
+                    break
+            if pos is None or trade_key is None:
                 return {"error": f"No open native position for {pair}"}
             # Fetch current price for a realistic exit
             try:
@@ -471,7 +478,7 @@ def force_close(
             pos.close(exit_price, "force_closed", datetime.now(_tz.utc))
             eng.balance += pos.pnl_abs
             eng.closed_trades.append(pos)
-            del eng.positions[pair]
+            del eng.positions[trade_key]
         # Persist the closed trade to DB (updates open row if db_id set, else inserts)
         from backend.services.native_trading_engine import _persist_closed_trade
         _persist_closed_trade(user_id, pos, eng._mode, eng._strategy_id, pos.db_id)

@@ -147,18 +147,16 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
     try {
       const [sigData, histData] = await Promise.all([
         api.market.signals(pair, timeframe) as Promise<{ summary?: { recommendation: string }; indicators?: Record<string, number | null> }>,
-        api.trade.history({ mode: 'paper', limit: '100' }) as Promise<{ trades: Array<{ profit_abs: number; close_date: string; exit_reason?: string; open_reason?: string }> }>,
+        api.trade.history({ mode: 'paper', limit: '100' }) as Promise<{ trades: Array<{ profit_abs: number; close_date?: string; exit_time?: string; exit_reason?: string; open_reason?: string }> }>,
       ]);
       const rec = sigData?.summary?.recommendation || 'NEUTRAL';
       const allTrades = histData?.trades || [];
-      // "Fired" = strategy auto-entered, NOT manually force-closed by user
-      const strategyTrades = allTrades.filter(
-        (t) => t.exit_reason !== 'force_closed' && t.open_reason !== 'manual'
-      );
-      const lastTrade = strategyTrades.length > 0
-        ? (strategyTrades[0]?.close_date || null)
+      // Auto-fired = any closed trade (strategy opens all of them automatically)
+      // Use exit_time or close_date whichever is present
+      const lastTrade = allTrades.length > 0
+        ? (allTrades[0]?.exit_time || allTrades[0]?.close_date || null)
         : null;
-      setStatus(buildStatus(strategyName, sigData?.indicators, rec, strategyTrades.length, lastTrade));
+      setStatus(buildStatus(strategyName, sigData?.indicators, rec, allTrades.length, lastTrade));
     } catch {
       setStatus(null);
     }

@@ -398,6 +398,8 @@ class Position:
     size:         float      # USDT stake
     opened_at:    datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     trail_lock:   Optional[float] = None
+    # Unique key used in engine.positions dict (allows multiple per pair)
+    trade_id:     str = field(default_factory=lambda: "")
     # DB row id — set after _persist_open_trade so close can UPDATE the same row
     db_id:        Optional[int] = None
     # result fields (filled on close)
@@ -751,7 +753,11 @@ class NativeTradingEngine:
         return None
 
     def _tick_continuous(self, signal_fn, seen_signal: dict):
-        """One continuous tick — signal scan + live TP/SL check."""
+        """One continuous tick — signal scan + live TP/SL check.
+
+        Positions keyed by trade_id (not pair) so multiple positions per
+        pair are possible up to self._max_open total.
+        """
         for pair in self._pairs:
             if self._stop_evt.is_set():
                 return
@@ -766,32 +772,36 @@ class NativeTradingEngine:
             with self._lock:
                 self.ticks += 1
 
-                # ── 2. Manage open position with LIVE price ─────────────
-                if pair in self.positions:
-                    pos = self.positions[pair]
+                # ── 2. Manage ALL open positions for this pair ──────────
+                pair_positions = [
+                    (k, p) for k, p in self.positions.items() if p.pair == pair
+                ]
+                for trade_key, pos in pair_positions:
                     pos.update_trail(live_price)
-                    # Use live price as both high and low for instant exit detection
                     exit_info = pos.check_exit(live_price, live_price)
                     if exit_info:
                         exit_price, reason = exit_info
                         pos.close(exit_price, reason, now)
                         self.balance += pos.pnl_abs
                         self.closed_trades.append(pos)
-                        del self.positions[pair]
+                        del self.positions[trade_key]
                         seen_signal[pair] = False  # allow re-entry
                         self.last_action = (
                             f"CLOSED {pair} {pos.direction} @ {exit_price:.4f} "
                             f"({reason}) P&L={pos.pnl_abs:+.2f} USDT"
                         )
                         log.info("[%s] %s", self.user_id, self.last_action)
-                        # Persist to DB so Trade Log survives restarts
                         _persist_closed_trade(self.user_id, pos, self._mode, self._strategy_id, pos.db_id)
                         if self._mode == "live":
                             self._place_live_exit(pair, pos, exit_price)
-                    continue   # don't look for entry while in position
 
-                # ── 3. No open position — check entry signal ────────────
+                # ── 3. Check entry signal (even if pair has positions) ───
+                # Limit: max_open total positions across all pairs
                 if len(self.positions) >= self._max_open:
+                    continue
+                # Don't stack same pair if already at max_per_pair (default 1 per pair)
+                existing_for_pair = sum(1 for p in self.positions.values() if p.pair == pair)
+                if existing_for_pair >= getattr(self, '_max_per_pair', 2):
                     continue
 
             # Fetch candle history for indicator calculation
@@ -834,19 +844,19 @@ class NativeTradingEngine:
                 continue
 
             with self._lock:
-                if pair in self.positions:
-                    continue   # race condition guard
                 stake = self.balance * self._risk_pct
                 if stake < 1.0 or stake > self.balance:
                     continue
-
+                # Unique trade key: pair + timestamp (allows multiple per pair)
+                trade_key = f"{pair}#{int(now.timestamp())}"
                 pos = Position(
                     pair=pair, direction=direction,
                     entry=entry, sl=sl, tp=tp, size=stake,
                     opened_at=now,
+                    trade_id=trade_key,
                 )
                 pos.db_id = _persist_open_trade(self.user_id, pos, self._mode, self._strategy_id)
-                self.positions[pair] = pos
+                self.positions[trade_key] = pos
                 self.balance -= stake
                 seen_signal[pair] = True
                 self.last_action = (

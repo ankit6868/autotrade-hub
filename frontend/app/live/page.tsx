@@ -577,34 +577,18 @@ function LiveTradingInner() {
                       </td>
                       <td className="py-3 px-2 text-right">
                         {closingId === t.id ? (
-                          <div className="flex items-center gap-1 justify-end">
-                            <span className="text-xs text-amber-400 mr-1">Sure? REAL money</span>
-                            <button
-                              onClick={async () => {
-                                setCloseError('');
-                                try {
-                                  await api.trade.forceClose(String(t.id));
-                                  setClosingId(null);
-                                  refreshData();
-                                } catch (e) {
-                                  setCloseError(String(e));
-                                  setClosingId(null);
-                                }
-                              }}
-                              className="text-xs px-2 py-1 rounded bg-red-500/30 border border-red-500/50 text-red-300 hover:bg-red-500/50 transition-colors font-semibold"
-                            >
-                              ✓ Yes, Close
-                            </button>
-                            <button
-                              onClick={() => setClosingId(null)}
-                              className="text-xs px-2 py-1 rounded bg-slate-700/40 border border-slate-600/40 text-slate-400 hover:text-white transition-colors"
-                            >
-                              ✕
-                            </button>
-                          </div>
+                          <button disabled className="text-xs px-2 py-1 rounded bg-slate-700/40 border border-slate-600/40 text-slate-400 opacity-70">
+                            ⏳ Closing…
+                          </button>
                         ) : (
                           <button
-                            onClick={() => { setClosingId(String(t.id)); setCloseError(''); }}
+                            onClick={async () => {
+                              setCloseError('');
+                              setClosingId(String(t.id));
+                              try { await api.trade.forceClose(String(t.id)); refreshData(); }
+                              catch (e) { setCloseError(String(e)); }
+                              finally { setClosingId(null); }
+                            }}
                             className="text-xs px-2 py-1 rounded bg-red-500/15 border border-red-500/30 text-red-400 hover:bg-red-500/25 transition-colors"
                           >
                             📉 Force Close

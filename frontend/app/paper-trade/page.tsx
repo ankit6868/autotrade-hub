@@ -168,20 +168,15 @@ function PaperTradeInner() {
   }
 
   async function forceClose(tradeId: string | number) {
-    // First click: ask for confirmation inline (no blocking dialog)
-    if (closingId !== String(tradeId)) {
-      setClosingId(String(tradeId));
-      setCloseError('');
-      return;
-    }
-    // Second click (confirmed): execute close
+    // Single-click close — no confirmation needed for paper trading (virtual money)
     setCloseError('');
+    setClosingId(String(tradeId));
     try {
       await api.trade.forceClose(tradeId);
-      setClosingId(null);
       await refreshData();
     } catch (e) {
       setCloseError(String(e));
+    } finally {
       setClosingId(null);
     }
   }
@@ -231,9 +226,14 @@ function PaperTradeInner() {
     if (t.unrealized_pnl !== undefined && t.unrealized_pnl !== null) {
       return Number(t.unrealized_pnl);
     }
-    const current = currentPrices[String(t.pair)] || 0;
+    // Prefer backend unrealized_pnl (already live-priced by server)
+    if (t.unrealized_pnl !== undefined && t.unrealized_pnl !== null && Number(t.unrealized_pnl) !== 0) {
+      return Number(t.unrealized_pnl);
+    }
+    // Fallback: use current_price from open-positions response (server fetches from KuCoin)
+    const current = Number(t.current_price) || currentPrices[String(t.pair)] || 0;
     const entry = Number(t.entry_price);
-    const stake = Number(t.amount);   // amount = USDT stake
+    const stake = Number(t.amount);
     if (!current || !entry || !stake) return 0;
     return stake * (current - entry) / entry;
   }
@@ -630,21 +630,9 @@ function PaperTradeInner() {
                       <td className="py-3 px-2 text-slate-400 text-xs">{formatDuration(String(t.entry_time))}</td>
                       <td className="py-3 px-2 text-right">
                         {closingId === String(t.id) ? (
-                          <div className="flex items-center gap-1 justify-end">
-                            <span className="text-xs text-amber-400 mr-1">Sure?</span>
-                            <button
-                              onClick={() => forceClose(String(t.id))}
-                              className="px-2 py-1 rounded-lg text-xs font-semibold bg-red-500/30 border border-red-500/50 text-red-300 hover:bg-red-500/50 transition-colors"
-                            >
-                              ✓ Yes
-                            </button>
-                            <button
-                              onClick={() => setClosingId(null)}
-                              className="px-2 py-1 rounded-lg text-xs font-semibold bg-slate-700/40 border border-slate-600/40 text-slate-400 hover:text-white transition-colors"
-                            >
-                              ✕
-                            </button>
-                          </div>
+                          <button disabled className="px-3 py-1 rounded-lg text-xs font-semibold bg-slate-700/40 border border-slate-600/40 text-slate-400 opacity-70">
+                            ⏳ Closing…
+                          </button>
                         ) : (
                           <button
                             onClick={() => forceClose(String(t.id))}
