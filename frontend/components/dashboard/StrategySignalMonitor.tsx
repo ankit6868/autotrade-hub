@@ -98,6 +98,32 @@ function buildStatus(
       { label: 'RSI not overbought', met: rsi < 70, value: rsi?.toFixed(1) || '?', required: '< 70' },
     ];
     ready = rec === 'BUY' || rec === 'STRONG_BUY';
+  } else if (n.includes('simple') || n.includes('target')) {
+    // SimpleTargetStrategy: RSI < 55 near EMA-20  OR  RSI < 38 (oversold)
+    const oversold   = rsi < 38;
+    const mildDip    = rsi < 55 && (price && ema20 ? price <= ema20 * 1.005 : false);
+    const entryReady = oversold || mildDip;
+    conditions = [
+      {
+        label: 'RSI < 38 (oversold) — strong buy',
+        met:   oversold,
+        value: rsi?.toFixed(1) || '?',
+        required: '< 38',
+      },
+      {
+        label: 'RSI < 55 AND price near EMA-20',
+        met:   mildDip,
+        value: `RSI ${rsi?.toFixed(1) || '?'} · Price ${price?.toFixed(0) || '?'}`,
+        required: `RSI<55 & Price ≤ ${ema20?.toFixed(0) || '?'} × 1.005`,
+      },
+      {
+        label: 'Take-profit target: +1.5%',
+        met:   true,  // always shown as configured
+        value: price ? `TP @ ${(price * 1.015).toFixed(1)}` : '?',
+        required: '+1.5% above entry',
+      },
+    ];
+    ready = entryReady;
   } else {
     // Generic fallback
     conditions = [

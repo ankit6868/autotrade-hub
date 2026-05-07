@@ -44,17 +44,24 @@ def start_trading(
     if not config:
         return {"error": "Not configured. Complete setup first."}
 
+    from sqlalchemy import or_
     strat_result = db.execute(
-        select(Strategy).where(Strategy.id == req.strategy_id, Strategy.user_id == user_id)
+        select(Strategy).where(
+            Strategy.id == req.strategy_id,
+            or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa: E712
+        )
     )
     strategy = strat_result.scalar_one_or_none()
     if not strategy:
         return {"error": "Strategy not found"}
 
-    strategy_name = f"strategy_{strategy.id}"
+    # Extract class name — works for both Freqtrade-style (class X(IStrategy))
+    # and plain classes (class SimpleTargetStrategy:)
+    strategy_name = strategy.name or f"strategy_{strategy.id}"
     for line in (strategy.generated_code or "").split("\n"):
-        if line.startswith("class ") and "IStrategy" in line:
-            strategy_name = line.split("(")[0].replace("class ", "").strip()
+        line = line.strip()
+        if line.startswith("class "):
+            strategy_name = line.split("(")[0].split(":")[0].replace("class ", "").strip()
             break
 
     # Use Freqtrade if actually importable; otherwise use the native engine.
@@ -129,6 +136,7 @@ def start_trading(
             trailing_stop_pct=getattr(config, "trailing_stop_pct", 0.0) or 0.0,
             take_profit_pct=getattr(config, "take_profit_pct", 0.0) or 0.0,
             position_adjustment=bool(getattr(config, "position_adjustment", False)),
+            strategy_id=req.strategy_id,
         )
 
     # Persist bot state to DB so it auto-resumes after container restart
