@@ -328,13 +328,14 @@ class FuturesEngine(NativeTradingEngine):
 
     # ── Status override — adds leverage + liquidation info ───────────────
 
+    @property
     def status(self) -> dict:
-        base = super().status()
+        # super().status is a @property on NativeTradingEngine — access without ()
+        base = dict(super().status)
         base["market_type"] = "futures"
         base["leverage"]    = self._leverage
         # Enrich positions with liquidation price
         for pos_info in base.get("positions", []):
-            key = f"{pos_info['pair']}#{''}"
             for k, p in self.positions.items():
                 if p.pair == pos_info["pair"]:
                     pos_info["liquidation_price"] = getattr(p, "liquidation_price", None)
