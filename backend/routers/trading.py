@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 log = logging.getLogger("trading")
 from sqlalchemy import select, desc
+import sqlalchemy as sa
 from sqlalchemy.orm import Session
 
 from backend.models import get_db, Config, Strategy
@@ -343,7 +344,12 @@ def get_open_trades(
 
     db_query = (
         select(Trade)
-        .where(Trade.status == "open", Trade.user_id == user_id)
+        .where(
+            Trade.status == "open",
+            Trade.user_id == user_id,
+            # STRICT ISOLATION: never show futures trades on the spot page
+            sa.or_(Trade.market_type == "spot", Trade.market_type.is_(None)),
+        )
         .order_by(desc(Trade.entry_time))
     )
     if mode:
@@ -410,7 +416,12 @@ def get_trade_history(
         pass
     query = (
         select(Trade)
-        .where(Trade.status == "closed", Trade.user_id == user_id)
+        .where(
+            Trade.status == "closed",
+            Trade.user_id == user_id,
+            # STRICT ISOLATION: never show futures trades in spot history
+            sa.or_(Trade.market_type == "spot", Trade.market_type.is_(None)),
+        )
         .order_by(desc(Trade.exit_time))
     )
     if mode:

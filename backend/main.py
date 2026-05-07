@@ -109,8 +109,9 @@ async def _background_startup():
                     autotrade_engine.for_user(cfg.user_id).start()
                 except Exception:
                     pass
-            # Paper / live spot bot
-            if cfg.bot_running and cfg.bot_strategy_name:
+            # Paper / live SPOT bot only — skip futures modes entirely
+            # (futures auto-resume would need futures_engine_registry, handled separately)
+            if cfg.bot_running and cfg.bot_strategy_name and not (cfg.bot_mode or "").startswith("futures"):
                 try:
                     pairs = [p.strip() for p in (cfg.bot_pairs or "BTC/USDT").split(",") if p.strip()]
                     eng = native_engine_registry.for_user(cfg.user_id)
