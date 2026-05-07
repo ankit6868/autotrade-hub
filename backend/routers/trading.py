@@ -30,22 +30,37 @@ def get_spot_balance(
     from backend.services.native_trading_engine import _kucoin_get_signed
     cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
     if not cfg:
-        return {"error": "No config found. Complete Setup first.", "balance": None}
+        return {"error": "Add your KuCoin API key in Setup first.", "balance": None}
     try:
         kk = decrypt(cfg.kucoin_key_enc or "", user_id)
         ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
         kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
     except DecryptError:
-        return {"error": "Could not decrypt KuCoin credentials.", "balance": None}
+        return {"error": "Could not decrypt KuCoin credentials. Re-enter in Setup.", "balance": None}
+
+    # Guard: if keys are blank
+    if not kk or not ks:
+        return {"error": "KuCoin API key not configured. Go to Setup → add your API key.", "balance": None}
+
     try:
-        data = _kucoin_get_signed("/api/v1/accounts", kk, ks, kp, params={"type": "trade", "currency": "USDT"})
+        data = _kucoin_get_signed("/api/v1/accounts", kk, ks, kp,
+                                   params={"type": "trade", "currency": "USDT"})
         if str(data.get("code")) != "200000":
-            return {"error": f"KuCoin API error: {data.get('msg', 'unknown')}", "balance": None}
-        accounts = data.get("data", [])
+            code = str(data.get("code", ""))
+            msg  = data.get("msg", "unknown")
+            if code in ("400100", "400006", "400200"):
+                return {"error": "Invalid API key or missing Trade permission. Check Setup.", "balance": None}
+            return {"error": f"KuCoin API error {code}: {msg}", "balance": None}
+        accounts     = data.get("data", [])
         usdt_balance = sum(float(a.get("available", 0)) for a in accounts if a.get("currency") == "USDT")
         return {"balance": round(usdt_balance, 4), "currency": "USDT", "type": "spot"}
     except Exception as e:
-        return {"error": f"Failed to fetch balance: {e}", "balance": None}
+        err = str(e)
+        if "403" in err or "401" in err:
+            return {"error": "KuCoin API permission denied. Ensure your key has 'General' + 'Trade' permissions (NOT Withdrawal).", "balance": None}
+        if "404" in err:
+            return {"error": "KuCoin API endpoint not found. Check your API key region.", "balance": None}
+        return {"error": f"Could not reach KuCoin: {err}", "balance": None}
 
 
 class StartRequest(BaseModel):

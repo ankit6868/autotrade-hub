@@ -183,35 +183,51 @@ def futures_balance(
 
     cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
     if not cfg:
-        return {"error": "No config found. Complete Setup first.", "balance": None}
+        return {"error": "Add your KuCoin Futures API key in Setup first.", "balance": None}
     try:
         kk = decrypt(cfg.kucoin_key_enc or "", user_id)
         ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
         kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
     except DecryptError:
-        return {"error": "Could not decrypt KuCoin credentials.", "balance": None}
+        return {"error": "Could not decrypt KuCoin credentials. Re-enter in Setup.", "balance": None}
+
+    # Guard: if keys are blank, no point calling the API
+    if not kk or not ks:
+        return {"error": "KuCoin Futures API key not configured. Go to Setup → add your Futures key.", "balance": None}
+
     try:
         from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+        # Correct KuCoin Futures endpoint: /api/v1/account-overview (hyphen, not camelCase)
         data = _kucoin_get_signed(
-            "/api/v1/accountOverview", kk, ks, kp,
+            "/api/v1/account-overview", kk, ks, kp,
             params={"currency": "USDT"},
             base_url=KUCOIN_FUTURES_BASE,
         )
         if str(data.get("code")) != "200000":
-            return {"error": f"KuCoin Futures API error: {data.get('msg', 'unknown')}", "balance": None}
-        account = data.get("data", {})
-        available = float(account.get("availableBalance", 0))
+            msg = data.get("msg", "unknown")
+            # KuCoin error codes: 400100 = invalid credentials, 400006 = no permission
+            code = str(data.get("code", ""))
+            if code in ("400100", "400006", "400200"):
+                return {"error": "Invalid API key or missing Futures permissions. Check Setup.", "balance": None}
+            return {"error": f"KuCoin Futures API error {code}: {msg}", "balance": None}
+        account    = data.get("data", {})
+        available  = float(account.get("availableBalance", 0))
         total      = float(account.get("accountEquity", available))
         unrealized = float(account.get("unrealisedPNL", 0))
         return {
-            "balance":     round(available, 4),
-            "equity":      round(total, 4),
-            "unrealized":  round(unrealized, 4),
-            "currency":    "USDT",
-            "type":        "futures",
+            "balance":    round(available, 4),
+            "equity":     round(total, 4),
+            "unrealized": round(unrealized, 4),
+            "currency":   "USDT",
+            "type":       "futures",
         }
     except Exception as e:
-        return {"error": f"Failed to fetch futures balance: {e}", "balance": None}
+        err = str(e)
+        if "404" in err:
+            return {"error": "KuCoin Futures API endpoint not found. Check your Futures API key.", "balance": None}
+        if "403" in err or "401" in err:
+            return {"error": "KuCoin API permission denied. Ensure your Futures key has 'General' permission.", "balance": None}
+        return {"error": f"Could not reach KuCoin Futures: {err}", "balance": None}
 
 
 # ── Start / Stop ─────────────────────────────────────────────────────────────
