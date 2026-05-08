@@ -6,24 +6,21 @@ import { useEffect, useState } from 'react';
 import { SidebarSignOut } from '@/components/AuthShell';
 
 const nav = [
-  { href: '/',                  label: 'Dashboard',          icon: '⚡' },
-  { href: '/setup',             label: 'Setup',              icon: '⚙️' },
-  { href: '/strategy/upload',   label: 'Upload Strategy',    icon: '📄' },
-  { href: '/strategy/editor',   label: 'Strategy Editor',    icon: '✏️' },
-  { href: '/strategy/templates', label: 'Templates',         icon: '📋' },
-  { href: '/opportunities',     label: 'Opportunities',      icon: '🎯' },
-  { href: '/backtest',          label: 'Backtest',           icon: '📊' },
-  // ── Spot Trading ──────────────────────────────────────────────────
-  { href: '/paper-trade',       label: 'Paper Trade',        icon: '📝' },
-  { href: '/live',              label: 'Live Trading',       icon: '🔴' },
+  { href: '/',                   label: 'Dashboard',          icon: '⚡',  section: null },
+  { href: '/setup',              label: 'Setup',              icon: '⚙️',  section: null },
+  // ── Strategy ──────────────────────────────────────────────────────
+  { href: '/strategy/upload',    label: 'Upload Strategy',    icon: '📄',  section: 'STRATEGY' },
+  { href: '/strategy/editor',    label: 'Strategy Editor',    icon: '✏️',  section: null },
+  { href: '/strategy/templates', label: 'Templates',          icon: '📋',  section: null },
+  { href: '/opportunities',      label: 'Opportunities',      icon: '🎯',  section: null },
   // ── Futures Trading ───────────────────────────────────────────────
-  { href: '/futures-paper',     label: 'Futures Paper',      icon: '📊' },
-  { href: '/futures-live',      label: 'Futures Live',       icon: '⚡' },
-  { href: '/futures-backtest',  label: 'Futures Backtest',   icon: '🔬' },
+  { href: '/futures-paper',      label: 'Futures Paper',      icon: '📊',  section: 'FUTURES' },
+  { href: '/futures-live',       label: 'Futures Live',       icon: '⚡',  section: null },
+  { href: '/futures-backtest',   label: 'Futures Backtest',   icon: '🔬',  section: null },
   // ── Advanced ──────────────────────────────────────────────────────
-  { href: '/copy-trading',      label: 'Copy Trading',       icon: '📡' },
-  { href: '/auto-trade',        label: 'Auto-Trade',         icon: '🤖' },
-  { href: '/history',           label: 'History',            icon: '📈' },
+  { href: '/copy-trading',       label: 'Copy Trading',       icon: '📡',  section: 'ADVANCED' },
+  { href: '/auto-trade',         label: 'Auto-Trade',         icon: '🤖',  section: null },
+  { href: '/history',            label: 'History',            icon: '📈',  section: null },
 ];
 
 export default function Sidebar() {
@@ -152,38 +149,45 @@ export default function Sidebar() {
           {nav.map((item) => {
             const active = pathname === item.href || (item.href !== '/' && pathname?.startsWith(item.href));
             return (
-              <Link
-                key={item.href}
-                href={item.href}
-                className={[
-                  'group relative flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all',
-                  active
-                    ? 'text-white font-medium'
-                    : 'text-slate-400 hover:text-white hover:bg-white/[0.04]',
-                ].join(' ')}
-                style={
-                  active
-                    ? {
-                        background:
-                          'linear-gradient(90deg, rgba(27,111,245,0.22) 0%, rgba(27,111,245,0.04) 100%)',
-                        boxShadow: 'inset 0 0 0 1px rgba(27,111,245,0.25)',
-                      }
-                    : undefined
-                }
-              >
-                {active && (
-                  <span className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-full bg-brand-400 shadow-[0_0_12px_rgba(27,111,245,0.8)]" />
+              <div key={item.href}>
+                {/* Section label */}
+                {item.section && (
+                  <p className="px-3 pt-3 pb-1 text-[10px] font-semibold tracking-widest text-slate-600 uppercase">
+                    {item.section}
+                  </p>
                 )}
-                <span
+                <Link
+                  href={item.href}
                   className={[
-                    'inline-flex h-7 w-7 items-center justify-center rounded-lg text-base transition-colors',
-                    active ? 'bg-white/[0.08]' : 'bg-white/[0.03] group-hover:bg-white/[0.06]',
+                    'group relative flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm transition-all',
+                    active
+                      ? 'text-white font-medium'
+                      : 'text-slate-400 hover:text-white hover:bg-white/[0.04]',
                   ].join(' ')}
+                  style={
+                    active
+                      ? {
+                          background:
+                            'linear-gradient(90deg, rgba(27,111,245,0.22) 0%, rgba(27,111,245,0.04) 100%)',
+                          boxShadow: 'inset 0 0 0 1px rgba(27,111,245,0.25)',
+                        }
+                      : undefined
+                  }
                 >
-                  {item.icon}
-                </span>
-                <span className="truncate">{item.label}</span>
-              </Link>
+                  {active && (
+                    <span className="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-full bg-brand-400 shadow-[0_0_12px_rgba(27,111,245,0.8)]" />
+                  )}
+                  <span
+                    className={[
+                      'inline-flex h-7 w-7 items-center justify-center rounded-lg text-base transition-colors',
+                      active ? 'bg-white/[0.08]' : 'bg-white/[0.03] group-hover:bg-white/[0.06]',
+                    ].join(' ')}
+                  >
+                    {item.icon}
+                  </span>
+                  <span className="truncate">{item.label}</span>
+                </Link>
+              </div>
             );
           })}
         </nav>
