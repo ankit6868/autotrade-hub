@@ -11,6 +11,7 @@ import {
 
 // ─── Time-range helpers (same as spot backtest) ───────────────────────────────
 const PRESETS = [
+  { label: '1W',     days: 7,    note: '' },
   { label: '1M',     days: 30,   note: '' },
   { label: '3M',     days: 90,   note: '' },
   { label: '6M',     days: 180,  note: '' },
@@ -196,13 +197,38 @@ function FuturesBacktestInner() {
 
           {/* Date display / custom input */}
           {selectedPreset === 'Custom' ? (
-            <div>
-              <input className="input max-w-xs" value={customRange}
-                onChange={e => setCustomRange(e.target.value)}
-                placeholder="YYYYMMDD-YYYYMMDD" />
-              <p className="text-xs text-slate-500 mt-1">
-                Format: <code className="text-slate-400">YYYYMMDD-YYYYMMDD</code>
+            <div className="space-y-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                <input
+                  className="input max-w-xs font-mono"
+                  value={customRange}
+                  onChange={e => setCustomRange(e.target.value)}
+                  placeholder="e.g. 20240101-20241231"
+                />
+                {customRange && customRange.includes('-') && customRange.length === 17 && (
+                  <span className="text-xs text-emerald-400">
+                    ✅ {fromYMD(customRange.split('-')[0])} → {fromYMD(customRange.split('-')[1])}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-slate-500">
+                Format: <code className="text-slate-300">YYYYMMDD-YYYYMMDD</code>
+                &nbsp;·&nbsp; Example quick picks:
               </p>
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { label: 'Jan–Mar 2024', range: '20240101-20240331' },
+                  { label: 'Q2 2024',      range: '20240401-20240630' },
+                  { label: 'Bull run 2024',range: '20241001-20241231' },
+                  { label: 'Last 2 weeks', range: `${toYMD(new Date(Date.now()-14*86400000))}-${toYMD(new Date())}` },
+                ].map(q => (
+                  <button key={q.label} type="button"
+                    onClick={() => setCustomRange(q.range)}
+                    className="text-xs px-2 py-1 rounded-lg bg-[#1a2236] border border-[#2a3a52] text-slate-300 hover:border-brand-500 hover:text-white transition-colors">
+                    {q.label}
+                  </button>
+                ))}
+              </div>
             </div>
           ) : (
             <div className="flex items-center gap-2 text-sm">
@@ -326,7 +352,7 @@ function FuturesBacktestInner() {
         {/* Run button */}
         <div className="flex items-center gap-4 flex-wrap">
           <button onClick={runBacktest}
-            disabled={running || !strategyId || (selectedPreset === 'Custom' && !customRange)}
+            disabled={running || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
             className="btn-primary px-8 py-3 text-base">
             {running
               ? `Running ${currentPreset && currentPreset.days > 365 ? '(downloading data…)' : ''}…`
