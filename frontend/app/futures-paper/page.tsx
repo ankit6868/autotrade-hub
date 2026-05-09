@@ -12,8 +12,8 @@ function FuturesPaperInner() {
   const [timeframe, setTimeframe] = useState('15m');
   const [leverage, setLeverage] = useState(10);
   const [wallet, setWallet] = useState(1000);
-  const [stoploss, setStoploss] = useState(3);
-  const [takeProfit, setTakeProfit] = useState(1.5);
+  const [stoploss, setStoploss] = useState(1.5);   // SL ≤ TP for positive R:R
+  const [takeProfit, setTakeProfit] = useState(3);  // 2:1 TP:SL is minimum for leveraged futures
   const [botStatus, setBotStatus] = useState<any>({ running: false });
   const [openTrades, setOpenTrades] = useState<any[]>([]);
   const [tradeHistory, setTradeHistory] = useState<any[]>([]);

@@ -20,8 +20,8 @@ function FuturesLiveInner() {
   const [pairs, setPairs]               = useState(['BTC/USDT']);
   const [timeframe, setTimeframe]       = useState('15m');
   const [leverage, setLeverage]         = useState(5);
-  const [stoploss, setStoploss]         = useState(2);
-  const [takeProfit, setTakeProfit]     = useState(1.5);
+  const [stoploss, setStoploss]         = useState(1.5);  // SL < TP for favorable R:R
+  const [takeProfit, setTakeProfit]     = useState(3.0);  // 2:1 TP:SL minimum for live futures
   const [acknowledged, setAcknowledged] = useState<Record<string, boolean>>({});
   const allAcknowledged = SAFETY_ITEMS.every(i => acknowledged[i.id]);
 

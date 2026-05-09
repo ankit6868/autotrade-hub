@@ -57,8 +57,8 @@ function FuturesBacktestInner() {
   const [timeframe,       setTimeframe]       = useState('15m');
   const [startBalance,    setStartBalance]    = useState(1000);
   const [leverage,        setLeverage]        = useState(10);
-  const [stoploss,        setStoploss]        = useState(3.0);
-  const [takeProfit,      setTakeProfit]      = useState(1.5);
+  const [stoploss,        setStoploss]        = useState(1.5);   // SL ≤ TP for positive R:R
+  const [takeProfit,      setTakeProfit]      = useState(3.0);   // TP should be ≥ SL (2:1 R:R)
 
   // ── State ───────────────────────────────────────────────────────────────────
   const [running,  setRunning]  = useState(false);
