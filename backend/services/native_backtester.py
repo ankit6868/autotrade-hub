@@ -244,6 +244,133 @@ def _signal_bidirectional(df: pd.DataFrame, i: int):
     return None
 
 
+def _signal_smc(df: pd.DataFrame, i: int):
+    """
+    SMC (Smart Money Concepts) — Full multi-layer backtest signal.
+
+    Layers (all must align):
+      1. HTF Bias  : EMA200 direction (simulates 4H on current TF)
+      2. Swing     : N=5 bar swing highs/lows
+      3. BOS       : price breaks last swing high/low
+      4. FVG       : 3-candle fair value gap
+      5. OB        : last opposing candle before BOS move
+      6. Discount  : price below 50% Fibonacci retracement → buy zone
+      7. Liq Sweep : wick below/above swing low/high then closes opposite
+      8. NY Session: 13:00–21:00 UTC
+    """
+    swing_n = 5
+    if i < max(swing_n * 4 + 10, 205):   # need 200 bars for EMA200 warmup
+        return None
+
+    row   = df.iloc[i]
+    close = row["close"]
+    ts    = row.get("date", None)
+
+    # NY Session filter
+    if ts is not None:
+        try:
+            import pandas as _pd
+            dt = _pd.Timestamp(ts)
+            if dt.tzinfo is None:
+                dt = dt.tz_localize("UTC")
+            h = dt.hour
+            if not (13 <= h < 21):
+                return None
+        except Exception:
+            pass
+
+    highs  = df["high"].values
+    lows   = df["low"].values
+    closes = df["close"].values
+
+    # 1. HTF bias via EMA200
+    ema200 = df["close"].iloc[max(0, i - 199):i + 1].ewm(span=200, adjust=False).mean().iloc[-1]
+    htf_bull = close > ema200
+    htf_bear = close < ema200
+
+    # 2. Swing detection (look back in window around i)
+    start = max(swing_n, i - 60)
+    end   = i - swing_n
+
+    def sh(j):
+        return (j >= swing_n and j <= i - swing_n and
+                all(highs[j] > highs[j - k] for k in range(1, swing_n + 1)) and
+                all(highs[j] > highs[j + k] for k in range(1, swing_n + 1)))
+
+    def sl(j):
+        return (j >= swing_n and j <= i - swing_n and
+                all(lows[j] < lows[j - k] for k in range(1, swing_n + 1)) and
+                all(lows[j] < lows[j + k] for k in range(1, swing_n + 1)))
+
+    sw_highs = [(j, highs[j]) for j in range(start, end + 1) if sh(j)]
+    sw_lows  = [(j, lows[j])  for j in range(start, end + 1) if sl(j)]
+
+    if not sw_highs or not sw_lows:
+        return None
+
+    last_sh_idx, last_sh = sw_highs[-1]
+    last_sl_idx, last_sl = sw_lows[-1]
+
+    # 3. BOS
+    bos_bull = close > last_sh and last_sl_idx > last_sh_idx
+    bos_bear = close < last_sl and last_sh_idx > last_sl_idx
+
+    # 4. FVG
+    bull_fvg = i >= 2 and highs[i - 2] < lows[i]
+    bear_fvg = i >= 2 and lows[i - 2]  > highs[i]
+    bull_fvg_mid = (highs[i - 2] + lows[i]) / 2 if bull_fvg else None
+    bear_fvg_mid = (lows[i - 2] + highs[i]) / 2 if bear_fvg else None
+
+    # 5. OB (last opposite-direction candle in last 20 bars)
+    bull_ob = bear_ob = None
+    for k in range(i - 1, max(i - 20, 0), -1):
+        c, o = closes[k], df.iloc[k]["open"]
+        if bull_ob is None and c < o:
+            bull_ob = (lows[k] + highs[k]) / 2
+        if bear_ob is None and c > o:
+            bear_ob = (lows[k] + highs[k]) / 2
+        if bull_ob and bear_ob:
+            break
+
+    # 6. Fibonacci 50% discount/premium
+    swing_range = last_sh - last_sl
+    fib50       = last_sl + swing_range * 0.5 if swing_range > 0 else close
+    in_discount = close < fib50
+    in_premium  = close > fib50
+
+    # 7. Liquidity sweep
+    sell_swept = lows[i] < last_sl and close > last_sl
+    buy_swept  = highs[i] > last_sh and close < last_sh
+
+    # 8. Full entry
+    long_ok = (htf_bull and in_discount and
+               (bull_fvg or (bull_ob and close <= bull_ob * 1.002)) and
+               sell_swept and bos_bull)
+    short_ok = (htf_bear and in_premium and
+                (bear_fvg or (bear_ob and close >= bear_ob * 0.998)) and
+                buy_swept and bos_bear)
+
+    if long_ok:
+        entry = bull_fvg_mid or close
+        sl    = round(last_sl * 0.999, 6)
+        risk  = entry - sl
+        if risk <= 0:
+            return None
+        tp = round(entry + risk * 2, 6)
+        return entry, sl, tp, "long"
+
+    if short_ok:
+        entry = bear_fvg_mid or close
+        sl    = round(last_sh * 1.001, 6)
+        risk  = sl - entry
+        if risk <= 0:
+            return None
+        tp = round(entry - risk * 2, 6)
+        return entry, sl, tp, "short"
+
+    return None
+
+
 _STRATEGY_FN = {
     "MissCandleShortStrategy":  _signal_miss_candle_short,
     "MissCandleLongStrategy":   _signal_miss_candle_long,
@@ -252,6 +379,7 @@ _STRATEGY_FN = {
     "EmaScalpingStrategy":      _signal_ema_scalping,
     "SimpleTargetStrategy":     _signal_simple_target,
     "BidirectionalStrategy":    _signal_bidirectional,
+    "SMCStrategy":              _signal_smc,
 }
 
 
@@ -266,8 +394,9 @@ def _guess_strategy(name: str):
     if "macd" in n:                     return _signal_macd_crossover
     if "rsi" in n or "bollinger" in n:  return _signal_rsi_bollinger
     if "ema" in n or "scalp" in n:      return _signal_ema_scalping
-    if "bidir" in n or "two" in n:      return _signal_bidirectional
-    if "simple" in n or "target" in n:  return _signal_simple_target
+    if "bidir" in n or "two" in n:           return _signal_bidirectional
+    if "smc" in n or "smart" in n:           return _signal_smc
+    if "simple" in n or "target" in n:       return _signal_simple_target
     return _signal_simple_target   # default
 
 

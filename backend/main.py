@@ -53,6 +53,31 @@ class SimpleTargetStrategy:
     timeframe = "15m"
 '''
 
+_SMC_STRATEGY_CODE = '''
+class SMCStrategy:
+    """
+    Smart Money Concepts (SMC) — Full multi-timeframe implementation.
+
+    Layers (ALL must align for entry):
+      1. HTF Bias  : EMA200 direction (simulates 4H trend)
+      2. Swing     : N=5 bar swing highs/lows detection
+      3. BOS       : Break of Structure (price breaks last swing)
+      4. FVG       : Fair Value Gap (3-candle imbalance)
+      5. OB        : Order Block (last opposing candle before BOS)
+      6. Discount  : Price below 50% Fibonacci = buy zone
+      7. Liq Sweep : Wick takes out stops then reverses
+      8. NY Session: 13:00–21:00 UTC only
+
+    LONG:  HTF bullish + discount zone + FVG/OB + sell-side sweep + BOS up
+    SHORT: HTF bearish + premium zone + FVG/OB + buy-side sweep + BOS down
+    SL: Below swept liquidity. TP: 2R from entry.
+    """
+    minimal_roi = {"0": 0.03}   # 2R target
+    stoploss = -0.015
+    timeframe = "15m"
+    startup_candle_count = 210
+'''
+
 _BIDIR_STRATEGY_CODE = '''
 class BidirectionalStrategy:
     """
@@ -95,6 +120,16 @@ def _seed_builtin_strategies(db):
     from backend.models.strategy import Strategy
 
     templates = [
+        {
+            "name": "SMCStrategy",
+            "description": "Smart Money Concepts: HTF bias + Swing BOS + FVG/OB + Liquidity sweep + NY session. "
+                           "Full multi-layer entry: LONG in discount zone after sell-side sweep + BOS up; "
+                           "SHORT in premium zone after buy-side sweep + BOS down. 2R TP, SL below/above sweep.",
+            "code": _SMC_STRATEGY_CODE,
+            "stoploss": -0.015,
+            "take_profit": 0.030,
+            "leverage": 10,
+        },
         {
             "name": "SimpleTargetStrategy",
             "description": "Bidirectional mean-reversion: LONG when RSI<55 near EMA-20 or RSI<38 (oversold); "

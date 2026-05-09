@@ -454,6 +454,160 @@ def _sig_bidirectional(df: pd.DataFrame) -> Optional[tuple]:
     return None
 
 
+def _sig_smc(df: pd.DataFrame) -> Optional[tuple]:
+    """
+    SMC (Smart Money Concepts) Strategy — Full multi-layer implementation.
+
+    Logic:
+      1. HTF Bias  : EMA200 direction on current TF simulates 4H bias
+      2. Swing Det : swing_n=5 — detect swing highs/lows
+      3. BOS       : price breaks last swing high (bullish) or low (bearish)
+      4. FVG       : 3-candle gap (candle[i-2].high < candle[i].low = bullish FVG)
+      5. OB        : last bearish candle before BOS up = bullish OB
+      6. Discount  : price below 50% Fib of last swing range → buy zone
+      7. Liq Sweep : current low < recent equal-low cluster (stops swept)
+      8. NY session: 13:00–21:00 UTC
+      Entry : FVG midpoint or OB mitigation after sweep + BOS
+      SL    : below liquidity sweep low (-buffer)
+      TP    : SL distance × 2 (2R)
+    """
+    swing_n = 5
+    min_bars = swing_n * 4 + 10
+    if len(df) < min_bars:
+        return None
+
+    row   = df.iloc[-1]
+    close = row["close"]
+    ts    = row.get("date", None)
+
+    # ── NY Session filter: 13:00–21:00 UTC ───────────────────────────────────
+    if ts is not None:
+        try:
+            import pandas as _pd
+            dt = _pd.Timestamp(ts)
+            if dt.tzinfo is None:
+                dt = dt.tz_localize("UTC")
+            h = dt.hour
+            if not (13 <= h < 21):
+                return None
+        except Exception:
+            pass
+
+    highs = df["high"].values
+    lows  = df["low"].values
+    closes = df["close"].values
+    n = len(df)
+
+    # ── 1. HTF Bias via EMA200 (simulate 4H trend on 15m data) ───────────────
+    ema200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
+    htf_bullish = close > ema200
+    htf_bearish = close < ema200
+
+    # ── 2. Swing High / Low Detection ─────────────────────────────────────────
+    def is_swing_high(i: int) -> bool:
+        if i < swing_n or i > n - swing_n - 1:
+            return False
+        return all(highs[i] > highs[i - j] for j in range(1, swing_n + 1)) and \
+               all(highs[i] > highs[i + j] for j in range(1, swing_n + 1))
+
+    def is_swing_low(i: int) -> bool:
+        if i < swing_n or i > n - swing_n - 1:
+            return False
+        return all(lows[i] < lows[i - j] for j in range(1, swing_n + 1)) and \
+               all(lows[i] < lows[i + j] for j in range(1, swing_n + 1))
+
+    # Collect recent swings (last 60 bars to stay fast)
+    window = min(60, n - swing_n - 1)
+    sw_highs = [(i, highs[i]) for i in range(n - window, n - swing_n) if is_swing_high(i)]
+    sw_lows  = [(i, lows[i])  for i in range(n - window, n - swing_n) if is_swing_low(i)]
+
+    if not sw_highs or not sw_lows:
+        return None
+
+    last_sh_idx, last_sh = sw_highs[-1]
+    last_sl_idx, last_sl = sw_lows[-1]
+
+    # ── 3. BOS (Break of Structure) ───────────────────────────────────────────
+    # Bullish BOS: current close breaks above last swing high
+    bos_bull = close > last_sh and last_sl_idx > last_sh_idx   # HL after SH = bullish trend
+    # Bearish BOS: current close breaks below last swing low
+    bos_bear = close < last_sl and last_sh_idx > last_sl_idx   # LH after SL = bearish trend
+
+    # ── 4. Fair Value Gap (FVG) ───────────────────────────────────────────────
+    # Bullish FVG: candle[i-2].high < candle[i].low (gap up)
+    bull_fvg = highs[-3] < lows[-1] if n >= 3 else False
+    # Bearish FVG: candle[i-2].low > candle[i].high (gap down)
+    bear_fvg = lows[-3] > highs[-1] if n >= 3 else False
+
+    # FVG midpoint (entry price)
+    bull_fvg_mid = (highs[-3] + lows[-1]) / 2 if bull_fvg else None
+    bear_fvg_mid = (lows[-3] + highs[-1]) / 2 if bear_fvg else None
+
+    # ── 5. Order Block (OB) ───────────────────────────────────────────────────
+    # Bullish OB = last bearish candle before recent bullish push
+    bull_ob = None
+    for i in range(n - 2, max(n - 20, 0), -1):
+        if df.iloc[i]["close"] < df.iloc[i]["open"]:   # bearish candle
+            bull_ob = (df.iloc[i]["low"] + df.iloc[i]["high"]) / 2
+            break
+    # Bearish OB = last bullish candle before bearish push
+    bear_ob = None
+    for i in range(n - 2, max(n - 20, 0), -1):
+        if df.iloc[i]["close"] > df.iloc[i]["open"]:   # bullish candle
+            bear_ob = (df.iloc[i]["low"] + df.iloc[i]["high"]) / 2
+            break
+
+    # ── 6. Premium / Discount Zone (Fibonacci 50%) ───────────────────────────
+    swing_range  = last_sh - last_sl
+    fib_50       = last_sl + swing_range * 0.5 if swing_range > 0 else close
+    in_discount  = close < fib_50    # below 50% = buy zone
+    in_premium   = close > fib_50    # above 50% = sell zone
+
+    # ── 7. Liquidity Sweep ────────────────────────────────────────────────────
+    # Sell-side sweep: current low dips below last swing low then closes above it
+    sell_side_swept = lows[-1] < last_sl and close > last_sl
+    # Buy-side sweep: current high above last swing high then closes below it
+    buy_side_swept  = highs[-1] > last_sh and close < last_sh
+
+    # ── 8. Full Entry Logic ───────────────────────────────────────────────────
+    # BUY: HTF bullish + discount zone + (FVG or OB) + sell-side sweep + bullish BOS
+    long_ok = (
+        htf_bullish and
+        in_discount and
+        (bull_fvg or (bull_ob and close <= bull_ob * 1.002)) and
+        sell_side_swept and
+        bos_bull
+    )
+    # SELL: HTF bearish + premium zone + (FVG or OB) + buy-side sweep + bearish BOS
+    short_ok = (
+        htf_bearish and
+        in_premium and
+        (bear_fvg or (bear_ob and close >= bear_ob * 0.998)) and
+        buy_side_swept and
+        bos_bear
+    )
+
+    if long_ok:
+        entry = bull_fvg_mid if bull_fvg_mid else close
+        sl    = round(last_sl * 0.999, 6)          # below swept low with small buffer
+        risk  = entry - sl
+        if risk <= 0:
+            return None
+        tp    = round(entry + risk * 2, 6)          # 2R target
+        return entry, sl, tp, "long"
+
+    if short_ok:
+        entry = bear_fvg_mid if bear_fvg_mid else close
+        sl    = round(last_sh * 1.001, 6)          # above swept high with buffer
+        risk  = sl - entry
+        if risk <= 0:
+            return None
+        tp    = round(entry - risk * 2, 6)          # 2R target
+        return entry, sl, tp, "short"
+
+    return None
+
+
 _STRATEGY_SIGNALS = {
     "MissCandleShortStrategy": _sig_miss_candle_short,
     "MissCandleLongStrategy":  _sig_miss_candle_long,
@@ -462,6 +616,7 @@ _STRATEGY_SIGNALS = {
     "EmaScalpingStrategy":     _sig_ema_scalping,
     "SimpleTargetStrategy":    _sig_simple_target,
     "BidirectionalStrategy":   _sig_bidirectional,
+    "SMCStrategy":             _sig_smc,
 }
 
 
@@ -477,6 +632,7 @@ def _get_signal_fn(name: str):
     if "macd" in n:                     return _sig_macd_crossover
     if "rsi" in n or "boll" in n:       return _sig_rsi_bollinger
     if "bidir" in n or "two" in n:      return _sig_bidirectional
+    if "smc" in n or "smart" in n or "order block" in n or "ob" == n: return _sig_smc
     if "simple" in n or "target" in n:  return _sig_simple_target
     return _sig_simple_target   # default fallback
 
