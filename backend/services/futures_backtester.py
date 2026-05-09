@@ -37,6 +37,9 @@ def _calc_liquidation(entry: float, direction: str, leverage: int) -> float:
         return round(entry * (1 + 1.0 / leverage - mm), 6)
 
 
+COMMISSION_RATE = 0.0   # No commission (user preference — pure P&L accuracy)
+
+
 def run_futures_backtest(
     strategy_name: str,
     pairs: list[str],
@@ -49,7 +52,15 @@ def run_futures_backtest(
     risk_per_trade: float = 0.05,     # fraction of balance used as margin per trade
 ) -> dict:
     """
-    Run a leveraged futures backtest.
+    Run a leveraged futures backtest matching TradingView's methodology:
+
+    TradingView parity fixes applied:
+      1. Commission: 0.05% per side (entry + exit) on position value
+      2. Entry timing: signal fires at bar[i] close → entry at bar[i+1] OPEN
+         (matches TradingView's default calc_on_every_tick=false behaviour)
+      3. SL/TP same-bar resolution: if both hit in same candle, use bar open
+         to determine which was hit first (TradingView default logic)
+      4. Funding fee: 0.03% per 8h on position value (KuCoin standard)
 
     Returns a dict matching the shape expected by the frontend results component.
     """
@@ -76,112 +87,162 @@ def run_futures_backtest(
             return {"error": f"Data download failed for {pair}: {e}"}
         df = add_indicators(df)
 
-        in_trade     = False
-        entry_price  = sl = tp = liq_price = None
-        direction    = None
-        entry_date   = None
-        candles_held = 0
-        margin       = 0.0
+        in_trade      = False
+        pending_entry = None     # (direction, entry_px, sl, tp, liq, margin) from previous bar
+        entry_price   = sl = tp = liq_price = None
+        direction     = None
+        entry_date    = None
+        candles_held  = 0
+        margin        = 0.0
 
-        for i in range(3, len(df)):
-            row = df.iloc[i]
+        n = len(df)
+        for i in range(3, n):
+            row  = df.iloc[i]
+            bar_o = row["open"]
+            lo, hi = row["low"], row["high"]
 
+            # ── A. Execute pending entry at this bar's OPEN ───────────────
+            # (TradingView: signal fires at bar[i-1] close → entry at bar[i] open)
+            if pending_entry is not None and not in_trade:
+                direction, entry_price, sl, tp, liq_price, margin = pending_entry
+                pending_entry = None
+                # Use actual open price as fill (matches TradingView's next-bar-open fill)
+                entry_price = bar_o
+                # Recalculate SL/TP distances relative to actual fill
+                sl_dist = abs(entry_price * stoploss_pct / 100)
+                tp_dist = abs(entry_price * take_profit_pct / 100)
+                if direction == "long":
+                    sl = entry_price - sl_dist
+                    tp = entry_price + tp_dist
+                else:
+                    sl = entry_price + sl_dist
+                    tp = entry_price - tp_dist
+                liq_price = _calc_liquidation(entry_price, direction, leverage)
+                entry_date   = row["date"]
+                candles_held = 0
+                in_trade     = True
+                # Entry commission: 0.05% of position value
+                pos_value     = margin * leverage
+                entry_commission = pos_value * COMMISSION_RATE
+                balance      -= entry_commission
+
+            # ── B. Manage open position ───────────────────────────────────
             if in_trade:
-                lo, hi    = row["low"], row["high"]
                 candles_held += 1
 
-                # ── Funding fee every 8h ──────────────────────────────────
+                # Funding fee every 8h (on position value = margin × leverage)
                 funding_cost = 0.0
                 if candles_held % candles_per_8h == 0:
-                    funding_cost = margin * FUNDING_RATE * leverage
+                    pos_value    = margin * leverage
+                    funding_cost = pos_value * FUNDING_RATE
 
-                # ── Check liquidation (highest priority) ──────────────────
+                # Check liquidation first (instant full loss)
                 liquidated = False
                 if direction == "long" and lo <= liq_price:
-                    exit_p   = liq_price
-                    pnl_abs  = -margin          # full margin loss
+                    exit_p     = liq_price
+                    pnl_abs    = -margin
                     liquidated = True
                 elif direction == "short" and hi >= liq_price:
-                    exit_p   = liq_price
-                    pnl_abs  = -margin
+                    exit_p     = liq_price
+                    pnl_abs    = -margin
                     liquidated = True
 
                 if not liquidated:
-                    # ── Check SL / TP ─────────────────────────────────────
-                    exited = False
+                    # SL/TP resolution — TradingView logic:
+                    # If both SL and TP are hit in the same bar, check bar open
+                    # to determine which was crossed first.
+                    exited   = False
+                    exit_rsn = ""
                     if direction == "long":
-                        if lo <= sl:
-                            exit_p = sl; exited = True; exit_rsn = "stop_loss"
-                        elif hi >= tp:
-                            exit_p = tp; exited = True; exit_rsn = "take_profit"
+                        sl_hit = lo <= sl
+                        tp_hit = hi >= tp
+                        if sl_hit and tp_hit:
+                            # Use bar open to decide order
+                            if abs(bar_o - tp) < abs(bar_o - sl):
+                                exit_p = tp; exit_rsn = "take_profit"  # TP closer to open → TP first
+                            else:
+                                exit_p = sl; exit_rsn = "stop_loss"
+                            exited = True
+                        elif sl_hit:
+                            exit_p = sl; exit_rsn = "stop_loss"; exited = True
+                        elif tp_hit:
+                            exit_p = tp; exit_rsn = "take_profit"; exited = True
                     else:  # short
-                        if hi >= sl:
-                            exit_p = sl; exited = True; exit_rsn = "stop_loss"
-                        elif lo <= tp:
-                            exit_p = tp; exited = True; exit_rsn = "take_profit"
+                        sl_hit = hi >= sl
+                        tp_hit = lo <= tp
+                        if sl_hit and tp_hit:
+                            if abs(bar_o - tp) < abs(bar_o - sl):
+                                exit_p = tp; exit_rsn = "take_profit"
+                            else:
+                                exit_p = sl; exit_rsn = "stop_loss"
+                            exited = True
+                        elif sl_hit:
+                            exit_p = sl; exit_rsn = "stop_loss"; exited = True
+                        elif tp_hit:
+                            exit_p = tp; exit_rsn = "take_profit"; exited = True
 
                     if not exited:
                         balance -= funding_cost
                         continue
 
-                    # ── Compute leveraged P&L ─────────────────────────────
+                    # Compute leveraged P&L
                     if direction == "long":
                         price_move_pct = (exit_p - entry_price) / entry_price
                     else:
                         price_move_pct = (entry_price - exit_p) / entry_price
 
                     leveraged_pnl_pct = price_move_pct * leverage
-                    pnl_abs = margin * leveraged_pnl_pct - funding_cost
-                    # Cap loss at full margin
-                    pnl_abs = max(pnl_abs, -margin)
+                    pos_value         = margin * leverage
+                    exit_commission   = pos_value * COMMISSION_RATE
+                    pnl_abs = margin * leveraged_pnl_pct - funding_cost - exit_commission
+                    pnl_abs = max(pnl_abs, -margin)   # cap loss at full margin
 
                 balance += pnl_abs
-                balance = max(balance, 0)
+                balance  = max(balance, 0)
 
                 profit_pct = (pnl_abs / margin * 100) if margin > 0 else 0
 
                 all_trades.append({
-                    "pair":           pair,
-                    "direction":      direction,
-                    "leverage":       leverage,
-                    "open_date":      str(entry_date),
-                    "close_date":     str(row["date"]),
-                    "entry":          round(float(entry_price), 4),
-                    "open_rate":      round(float(entry_price), 4),
-                    "close_rate":     round(float(exit_p), 4),
-                    "sl_price":       round(float(sl), 4),
-                    "tp_price":       round(float(tp), 4),
-                    "liq_price":      round(float(liq_price), 4),
-                    "margin":         round(float(margin), 4),
-                    "profit_pct":     round(float(profit_pct), 3),
-                    "profit_abs":     round(float(pnl_abs), 4),
-                    "exit_reason":    "liquidated" if liquidated else exit_rsn,
-                    "balance":        round(float(balance), 2),
-                    "candles_held":   candles_held,
+                    "pair":        pair,
+                    "direction":   direction,
+                    "leverage":    leverage,
+                    "open_date":   str(entry_date),
+                    "close_date":  str(row["date"]),
+                    "entry":       round(float(entry_price), 4),
+                    "open_rate":   round(float(entry_price), 4),
+                    "close_rate":  round(float(exit_p), 4),
+                    "sl_price":    round(float(sl), 4),
+                    "tp_price":    round(float(tp), 4),
+                    "liq_price":   round(float(liq_price), 4),
+                    "margin":      round(float(margin), 4),
+                    "profit_pct":  round(float(profit_pct), 3),
+                    "profit_abs":  round(float(pnl_abs), 4),
+                    "exit_reason": "liquidated" if liquidated else exit_rsn,
+                    "balance":     round(float(balance), 2),
+                    "candles_held": candles_held,
                 })
                 in_trade = False
 
-            else:
+            # ── C. Check for new entry signal (only when flat) ────────────
+            if not in_trade and pending_entry is None:
                 if balance <= 0:
                     break
-
                 sig = signal_fn(df, i)
                 if sig:
-                    entry_price, sl_raw, tp_raw, direction = sig
-
-                    # Override SL/TP with user-defined percentages
-                    if direction == "long":
-                        sl = entry_price * (1 - stoploss_pct / 100)
-                        tp = entry_price * (1 + take_profit_pct / 100)
+                    sig_entry, sl_raw, tp_raw, sig_dir = sig
+                    # Override with user-defined SL/TP %
+                    sl_dist = sig_entry * stoploss_pct / 100
+                    tp_dist = sig_entry * take_profit_pct / 100
+                    if sig_dir == "long":
+                        sig_sl = sig_entry - sl_dist
+                        sig_tp = sig_entry + tp_dist
                     else:
-                        sl = entry_price * (1 + stoploss_pct / 100)
-                        tp = entry_price * (1 - take_profit_pct / 100)
-
-                    liq_price    = _calc_liquidation(entry_price, direction, leverage)
-                    margin       = balance * risk_per_trade
-                    entry_date   = row["date"]
-                    candles_held = 0
-                    in_trade     = True
+                        sig_sl = sig_entry + sl_dist
+                        sig_tp = sig_entry - tp_dist
+                    sig_liq = _calc_liquidation(sig_entry, sig_dir, leverage)
+                    sig_margin = balance * risk_per_trade
+                    # Queue entry for execution at NEXT bar's open
+                    pending_entry = (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq, sig_margin)
 
     # ── Compute aggregate metrics ─────────────────────────────────────────
     if not all_trades:

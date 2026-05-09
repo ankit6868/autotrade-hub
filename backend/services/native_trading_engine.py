@@ -456,31 +456,30 @@ def _sig_bidirectional(df: pd.DataFrame) -> Optional[tuple]:
 
 def _sig_smc(df: pd.DataFrame) -> Optional[tuple]:
     """
-    SMC (Smart Money Concepts) Strategy — Full multi-layer implementation.
+    SMC (Smart Money Concepts) Strategy — OB/FVG/BOS model.
 
-    Logic:
-      1. HTF Bias  : EMA200 direction on current TF simulates 4H bias
-      2. Swing Det : swing_n=5 — detect swing highs/lows
-      3. BOS       : price breaks last swing high (bullish) or low (bearish)
-      4. FVG       : 3-candle gap (candle[i-2].high < candle[i].low = bullish FVG)
-      5. OB        : last bearish candle before BOS up = bullish OB
-      6. Discount  : price below 50% Fib of last swing range → buy zone
-      7. Liq Sweep : current low < recent equal-low cluster (stops swept)
-      8. NY session: 13:00–21:00 UTC
-      Entry : FVG midpoint or OB mitigation after sweep + BOS
-      SL    : below liquidity sweep low (-buffer)
-      TP    : SL distance × 2 (2R)
+    Matches TradingView 'SMC Strategy v2 - OB/FVG/BOS' logic:
+      1. HTF Bias  : EMA50 direction (simulates higher TF trend, fast warmup)
+      2. BOS       : price breaks 20-bar swing high/low (structure break)
+      3. FVG       : 3-candle Fair Value Gap within last 10 bars
+      4. OB        : last opposing candle before the move (Order Block)
+      5. NY Session: 13:00–21:00 UTC
+
+    Entry: OB midpoint (price pulled back to OB zone) OR FVG midpoint
+    SL   : Below swing low (LONG) / above swing high (SHORT), ~1.5%
+    TP   : 2R from entry
+
+    This 3-condition model generates similar trade frequency to TradingView.
     """
-    swing_n = 5
-    min_bars = swing_n * 4 + 10
-    if len(df) < min_bars:
+    if len(df) < 55:          # EMA50 warmup (50 bars minimum)
         return None
 
     row   = df.iloc[-1]
     close = row["close"]
     ts    = row.get("date", None)
+    n     = len(df)
 
-    # ── NY Session filter: 13:00–21:00 UTC ───────────────────────────────────
+    # ── NY Session filter 13:00–21:00 UTC ────────────────────────────────────
     if ts is not None:
         try:
             import pandas as _pd
@@ -493,116 +492,88 @@ def _sig_smc(df: pd.DataFrame) -> Optional[tuple]:
         except Exception:
             pass
 
-    highs = df["high"].values
-    lows  = df["low"].values
+    highs  = df["high"].values
+    lows   = df["low"].values
+    opens  = df["open"].values
     closes = df["close"].values
-    n = len(df)
 
-    # ── 1. HTF Bias via EMA200 (simulate 4H trend on 15m data) ───────────────
-    ema200 = df["close"].ewm(span=200, adjust=False).mean().iloc[-1]
-    htf_bullish = close > ema200
-    htf_bearish = close < ema200
+    # ── 1. HTF Bias: EMA50 direction ─────────────────────────────────────────
+    ema50       = df["close"].ewm(span=50, adjust=False).mean().iloc[-1]
+    htf_bullish = close > ema50
+    htf_bearish = close < ema50
 
-    # ── 2. Swing High / Low Detection ─────────────────────────────────────────
-    def is_swing_high(i: int) -> bool:
-        if i < swing_n or i > n - swing_n - 1:
-            return False
-        return all(highs[i] > highs[i - j] for j in range(1, swing_n + 1)) and \
-               all(highs[i] > highs[i + j] for j in range(1, swing_n + 1))
+    # ── 2. BOS: Break of 20-bar swing high/low ───────────────────────────────
+    lookback    = min(20, n - 2)
+    swing_high  = highs[-lookback - 1 : -1].max()   # highest in last 20 bars (excl. current)
+    swing_low   = lows[-lookback - 1 : -1].min()    # lowest in last 20 bars (excl. current)
 
-    def is_swing_low(i: int) -> bool:
-        if i < swing_n or i > n - swing_n - 1:
-            return False
-        return all(lows[i] < lows[i - j] for j in range(1, swing_n + 1)) and \
-               all(lows[i] < lows[i + j] for j in range(1, swing_n + 1))
+    bos_bull    = close > swing_high                 # bullish BOS: break above 20-bar high
+    bos_bear    = close < swing_low                  # bearish BOS: break below 20-bar low
 
-    # Collect recent swings (last 60 bars to stay fast)
-    window = min(60, n - swing_n - 1)
-    sw_highs = [(i, highs[i]) for i in range(n - window, n - swing_n) if is_swing_high(i)]
-    sw_lows  = [(i, lows[i])  for i in range(n - window, n - swing_n) if is_swing_low(i)]
-
-    if not sw_highs or not sw_lows:
-        return None
-
-    last_sh_idx, last_sh = sw_highs[-1]
-    last_sl_idx, last_sl = sw_lows[-1]
-
-    # ── 3. BOS (Break of Structure) ───────────────────────────────────────────
-    # Bullish BOS: current close breaks above last swing high
-    bos_bull = close > last_sh and last_sl_idx > last_sh_idx   # HL after SH = bullish trend
-    # Bearish BOS: current close breaks below last swing low
-    bos_bear = close < last_sl and last_sh_idx > last_sl_idx   # LH after SL = bearish trend
-
-    # ── 4. Fair Value Gap (FVG) ───────────────────────────────────────────────
-    # Bullish FVG: candle[i-2].high < candle[i].low (gap up)
-    bull_fvg = highs[-3] < lows[-1] if n >= 3 else False
-    # Bearish FVG: candle[i-2].low > candle[i].high (gap down)
-    bear_fvg = lows[-3] > highs[-1] if n >= 3 else False
-
-    # FVG midpoint (entry price)
-    bull_fvg_mid = (highs[-3] + lows[-1]) / 2 if bull_fvg else None
-    bear_fvg_mid = (lows[-3] + highs[-1]) / 2 if bear_fvg else None
-
-    # ── 5. Order Block (OB) ───────────────────────────────────────────────────
-    # Bullish OB = last bearish candle before recent bullish push
-    bull_ob = None
-    for i in range(n - 2, max(n - 20, 0), -1):
-        if df.iloc[i]["close"] < df.iloc[i]["open"]:   # bearish candle
-            bull_ob = (df.iloc[i]["low"] + df.iloc[i]["high"]) / 2
+    # ── 3. FVG: 3-candle Fair Value Gap in last 10 bars ──────────────────────
+    fvg_window  = min(10, n - 1)
+    bull_fvg    = False
+    bear_fvg    = False
+    bull_fvg_mid = None
+    bear_fvg_mid = None
+    for k in range(2, fvg_window + 1):             # k = offset from current bar
+        if k >= n:
             break
-    # Bearish OB = last bullish candle before bearish push
-    bear_ob = None
-    for i in range(n - 2, max(n - 20, 0), -1):
-        if df.iloc[i]["close"] > df.iloc[i]["open"]:   # bullish candle
-            bear_ob = (df.iloc[i]["low"] + df.iloc[i]["high"]) / 2
+        i = n - k
+        # Bullish FVG: candle[-k-2].high < candle[-k].low
+        if i >= 2 and highs[i - 2] < lows[i]:
+            bull_fvg     = True
+            bull_fvg_mid = (highs[i - 2] + lows[i]) / 2
+            break
+    for k in range(2, fvg_window + 1):
+        if k >= n:
+            break
+        i = n - k
+        # Bearish FVG: candle[-k-2].low > candle[-k].high
+        if i >= 2 and lows[i - 2] > highs[i]:
+            bear_fvg     = True
+            bear_fvg_mid = (lows[i - 2] + highs[i]) / 2
             break
 
-    # ── 6. Premium / Discount Zone (Fibonacci 50%) ───────────────────────────
-    swing_range  = last_sh - last_sl
-    fib_50       = last_sl + swing_range * 0.5 if swing_range > 0 else close
-    in_discount  = close < fib_50    # below 50% = buy zone
-    in_premium   = close > fib_50    # above 50% = sell zone
+    # ── 4. OB: last opposing candle in last 20 bars ───────────────────────────
+    bull_ob = None      # last bearish candle → potential demand OB
+    bear_ob = None      # last bullish candle → potential supply OB
+    for k in range(2, min(21, n)):
+        i = n - k
+        if bull_ob is None and closes[i] < opens[i]:     # bearish candle = demand OB
+            bull_ob = (lows[i] + highs[i]) / 2
+        if bear_ob is None and closes[i] > opens[i]:     # bullish candle = supply OB
+            bear_ob = (lows[i] + highs[i]) / 2
+        if bull_ob and bear_ob:
+            break
 
-    # ── 7. Liquidity Sweep ────────────────────────────────────────────────────
-    # Sell-side sweep: current low dips below last swing low then closes above it
-    sell_side_swept = lows[-1] < last_sl and close > last_sl
-    # Buy-side sweep: current high above last swing high then closes below it
-    buy_side_swept  = highs[-1] > last_sh and close < last_sh
+    # Price mitigation check: has price pulled back to OB zone (±0.5%)?
+    near_bull_ob = bull_ob is not None and close <= bull_ob * 1.005
+    near_bear_ob = bear_ob is not None and close >= bear_ob * 0.995
 
-    # ── 8. Full Entry Logic ───────────────────────────────────────────────────
-    # BUY: HTF bullish + discount zone + (FVG or OB) + sell-side sweep + bullish BOS
-    long_ok = (
-        htf_bullish and
-        in_discount and
-        (bull_fvg or (bull_ob and close <= bull_ob * 1.002)) and
-        sell_side_swept and
-        bos_bull
-    )
-    # SELL: HTF bearish + premium zone + (FVG or OB) + buy-side sweep + bearish BOS
-    short_ok = (
-        htf_bearish and
-        in_premium and
-        (bear_fvg or (bear_ob and close >= bear_ob * 0.998)) and
-        buy_side_swept and
-        bos_bear
-    )
+    # ── 5. Entry Conditions ───────────────────────────────────────────────────
+    # LONG: HTF bullish + BOS up + (FVG present OR price at OB)
+    long_ok  = htf_bullish and bos_bull and (bull_fvg or near_bull_ob)
+    # SHORT: HTF bearish + BOS down + (FVG present OR price at OB)
+    short_ok = htf_bearish and bos_bear and (bear_fvg or near_bear_ob)
 
+    # ── 6. Execute entry ──────────────────────────────────────────────────────
     if long_ok:
-        entry = bull_fvg_mid if bull_fvg_mid else close
-        sl    = round(last_sl * 0.999, 6)          # below swept low with small buffer
+        entry = bull_fvg_mid if bull_fvg_mid else (bull_ob if bull_ob else close)
+        sl    = round(swing_low * 0.9985, 6)     # just below 20-bar low
         risk  = entry - sl
-        if risk <= 0:
+        if risk <= 0 or risk > entry * 0.05:     # cap max risk at 5%
             return None
-        tp    = round(entry + risk * 2, 6)          # 2R target
+        tp    = round(entry + risk * 2, 6)       # 2R
         return entry, sl, tp, "long"
 
     if short_ok:
-        entry = bear_fvg_mid if bear_fvg_mid else close
-        sl    = round(last_sh * 1.001, 6)          # above swept high with buffer
+        entry = bear_fvg_mid if bear_fvg_mid else (bear_ob if bear_ob else close)
+        sl    = round(swing_high * 1.0015, 6)    # just above 20-bar high
         risk  = sl - entry
-        if risk <= 0:
+        if risk <= 0 or risk > entry * 0.05:
             return None
-        tp    = round(entry - risk * 2, 6)          # 2R target
+        tp    = round(entry - risk * 2, 6)       # 2R
         return entry, sl, tp, "short"
 
     return None
