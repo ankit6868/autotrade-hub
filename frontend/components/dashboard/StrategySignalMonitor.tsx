@@ -52,23 +52,28 @@ function buildStatus(
   let ready = false;
 
   if (n.includes('macd')) {
-    const crossedUp = macd > macdS;
-    const macdPositive = macd > 0;
+    const crossedUp   = macd > macdS;
+    const crossedDown = macd < macdS;
+    const macdPos     = macd > 0;
+    const longSig     = crossedUp && macdPos;
+    const shortSig    = crossedDown && !macdPos;
     conditions = [
-      { label: 'MACD > Signal (buy crossover)', met: crossedUp, value: `${macd?.toFixed(4) || '?'}`, required: `> ${macdS?.toFixed(4) || '?'}` },
-      { label: 'MACD histogram positive', met: macdPositive, value: macd?.toFixed(4) || '?', required: '> 0' },
-      { label: 'Signal: BUY or STRONG_BUY', met: rec === 'BUY' || rec === 'STRONG_BUY', value: rec, required: 'BUY or STRONG_BUY' },
+      { label: 'MACD crossed above signal → LONG',  met: crossedUp,   value: `${macd?.toFixed(4) || '?'}`, required: `> ${macdS?.toFixed(4) || '?'}` },
+      { label: 'MACD crossed below signal → SHORT', met: crossedDown, value: `${macd?.toFixed(4) || '?'}`, required: `< ${macdS?.toFixed(4) || '?'}` },
+      { label: 'Market signal',                      met: rec === 'BUY' || rec === 'SELL', value: rec, required: 'BUY or SELL' },
     ];
-    ready = crossedUp && macdPositive;
+    ready = longSig || shortSig;
   } else if (n.includes('rsi') || n.includes('bollinger')) {
-    const oversold = rsi < 30;
-    const belowBB = price && bbLower ? price < bbLower : false;
+    const oversold   = rsi < 30;
+    const overbought = rsi > 70;
+    const bbUpper    = ind.bb_upper as number;
+    const belowBB    = price && bbLower ? price < bbLower : false;
+    const aboveBB    = price && bbUpper ? price > bbUpper : false;
     conditions = [
-      { label: 'RSI < 30 (oversold)', met: oversold, value: rsi?.toFixed(1) || '?', required: '< 30' },
-      { label: 'Price below BB Lower', met: belowBB, value: price?.toFixed(2) || '?', required: `< ${bbLower?.toFixed(2) || '?'}` },
-      { label: 'ADX > 20 (trending)', met: adx > 20, value: adx?.toFixed(1) || '?', required: '> 20' },
+      { label: 'RSI < 30 AND price < BB Lower → LONG',  met: oversold && belowBB,   value: `RSI ${rsi?.toFixed(1) || '?'} · ${price?.toFixed(2) || '?'}`, required: `RSI<30 & Price<${bbLower?.toFixed(2) || '?'}` },
+      { label: 'RSI > 70 AND price > BB Upper → SHORT', met: overbought && aboveBB, value: `RSI ${rsi?.toFixed(1) || '?'} · ${price?.toFixed(2) || '?'}`, required: `RSI>70 & Price>${bbUpper?.toFixed(2) || '?'}` },
     ];
-    ready = oversold && belowBB;
+    ready = (oversold && belowBB) || (overbought && aboveBB);
   } else if (n.includes('ema') || n.includes('scalp')) {
     const ema9 = ind.ema_9 as number || ema20 * 0.98;
     const ema21 = ind.ema_20 as number;
@@ -101,28 +106,45 @@ function buildStatus(
     ];
     ready = rec === 'BUY' || rec === 'STRONG_BUY';
   } else if (n.includes('simple') || n.includes('target')) {
-    // SimpleTargetStrategy: RSI < 55 near EMA-20  OR  RSI < 38 (oversold)
-    const oversold   = rsi < 38;
-    const mildDip    = rsi < 55 && (price && ema20 ? price <= ema20 * 1.005 : false);
-    const entryReady = oversold || mildDip;
+    // SimpleTargetStrategy — bidirectional: LONG on oversold, SHORT on overbought
+    const oversold    = rsi < 38;
+    const mildDip     = rsi < 55 && (price && ema20 ? price <= ema20 * 1.005 : false);
+    const longReady   = oversold || mildDip;
+    const overbought  = rsi > 72;
+    const mildTop     = rsi > 65 && (price && ema20 ? price > ema20 * 1.005 : false);
+    const shortReady  = overbought || mildTop;
+    const entryReady  = longReady || shortReady;
+    const signalDir   = longReady ? '📈 LONG' : shortReady ? '📉 SHORT' : '—';
     conditions = [
       {
-        label: 'RSI < 38 (oversold) — strong buy',
+        label: 'RSI < 38 (strongly oversold) → LONG',
         met:   oversold,
         value: rsi?.toFixed(1) || '?',
         required: '< 38',
       },
       {
-        label: 'RSI < 55 AND price near EMA-20',
+        label: 'RSI < 55 AND price near EMA-20 → LONG',
         met:   mildDip,
         value: `RSI ${rsi?.toFixed(1) || '?'} · Price ${price?.toFixed(0) || '?'}`,
         required: `RSI<55 & Price ≤ ${ema20?.toFixed(0) || '?'} × 1.005`,
       },
       {
-        label: 'Take-profit target: +1.5%',
-        met:   true,  // always shown as configured
-        value: price ? `TP @ ${(price * 1.015).toFixed(1)}` : '?',
-        required: '+1.5% above entry',
+        label: 'RSI > 72 (strongly overbought) → SHORT',
+        met:   overbought,
+        value: rsi?.toFixed(1) || '?',
+        required: '> 72',
+      },
+      {
+        label: 'RSI > 65 AND price above EMA-20 → SHORT',
+        met:   mildTop,
+        value: `RSI ${rsi?.toFixed(1) || '?'} · Price ${price?.toFixed(0) || '?'}`,
+        required: `RSI>65 & Price > ${ema20?.toFixed(0) || '?'} × 1.005`,
+      },
+      {
+        label: `Signal direction: ${signalDir}`,
+        met:   entryReady,
+        value: entryReady ? signalDir : 'NEUTRAL — waiting for setup',
+        required: 'LONG or SHORT entry',
       },
     ];
     ready = entryReady;

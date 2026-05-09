@@ -30,6 +30,7 @@ const INTERVAL_TO_TV: Record<string, string> = {
 export default function Dashboard() {
   const [configStatus, setConfigStatus] = useState<any>(null);
   const [botStatus, setBotStatus] = useState<any>(null);
+  const [futuresStatus, setFuturesStatus] = useState<any>(null);
   const [openTrades, setOpenTrades] = useState<any[]>([]);
   const [recentTrades, setRecentTrades] = useState<any[]>([]);
   const [chartPair, setChartPair] = useState('BTC/USDT');
@@ -43,25 +44,46 @@ export default function Dashboard() {
 
   async function loadDashboard() {
     try {
-      const [config, status, open, history] = await Promise.all([
+      const [config, status, futStatus, open, futOpen, history, futHistory] = await Promise.all([
         api.config.status(),
         api.trade.status(),
+        api.futures.status().catch(() => null),
         api.trade.open(),
-        api.trade.history({ limit: '10' }),
+        api.futures.open().catch(() => ({ trades: [] })),
+        api.trade.history({ limit: '20' }),
+        api.futures.history({ limit: '20' }).catch(() => ({ trades: [] })),
       ]);
       setConfigStatus(config);
       setBotStatus(status);
-      setOpenTrades(open.trades);
-      setRecentTrades(history.trades);
+      setFuturesStatus(futStatus);
+      // Merge spot + futures open trades, tag each with market type
+      const allOpen = [
+        ...(open.trades || []).map((t: any) => ({ ...t, _market: 'spot' })),
+        ...(futOpen.trades || []).map((t: any) => ({ ...t, _market: 'futures' })),
+      ];
+      setOpenTrades(allOpen);
+      // Merge spot + futures closed trades for P&L / win rate
+      const allTrades = [
+        ...(history.trades || []),
+        ...(futHistory.trades || []),
+      ].sort((a: any, b: any) => new Date(b.exit_time || b.close_date || 0).getTime() - new Date(a.exit_time || a.close_date || 0).getTime())
+        .slice(0, 20);
+      setRecentTrades(allTrades);
     } catch {
       // Backend not running yet
     }
   }
 
+  // Combined P&L and win rate across spot + futures
   const totalPnl = recentTrades.reduce((sum, t) => sum + (Number(t.profit_abs) || 0), 0);
   const winRate = recentTrades.length > 0
     ? (recentTrades.filter((t) => Number(t.profit_abs) > 0).length / recentTrades.length) * 100
     : 0;
+  // Determine active bot (futures or spot)
+  const activeBotStatus = (futuresStatus?.running) ? futuresStatus : botStatus;
+  const activeBotMode = futuresStatus?.running
+    ? `futures-${futuresStatus.mode}${futuresStatus.leverage ? ` ${futuresStatus.leverage}x` : ''}`
+    : botStatus?.mode;
 
   const tvSymbol = PAIR_TO_TV[chartPair] || 'KUCOIN:BTCUSDT';
   const tvInterval = INTERVAL_TO_TV[chartInterval] || '15';
@@ -81,10 +103,10 @@ export default function Dashboard() {
           </h1>
           <p className="text-slate-400 mt-1 text-sm">AutoTrade Hub overview</p>
         </div>
-        {botStatus && (
+        {(botStatus || futuresStatus) && (
           <StatusBadge
-            status={botStatus.running ? 'running' : 'stopped'}
-            label={botStatus.running ? `${botStatus.mode} trading` : 'Bot stopped'}
+            status={activeBotStatus?.running ? 'running' : 'stopped'}
+            label={activeBotStatus?.running ? `${activeBotMode} trading` : 'Bot stopped'}
           />
         )}
       </div>
@@ -120,10 +142,10 @@ export default function Dashboard() {
           <MetricCard title="Open Trades" value={openTrades.length} icon={<span>📈</span>} />
           <MetricCard
             title="Bot Status"
-            value={botStatus?.running ? 'Running' : 'Stopped'}
-            subtitle={botStatus?.mode ? String(botStatus.mode) : undefined}
-            color={botStatus?.running ? 'profit' : 'default'}
-            icon={<span>{botStatus?.running ? '🟢' : '⚪'}</span>}
+            value={activeBotStatus?.running ? 'Running' : 'Stopped'}
+            subtitle={activeBotMode || undefined}
+            color={activeBotStatus?.running ? 'profit' : 'default'}
+            icon={<span>{activeBotStatus?.running ? '🟢' : '⚪'}</span>}
           />
         </div>
       </div>

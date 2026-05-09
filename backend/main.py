@@ -44,10 +44,28 @@ _SIMPLE_STRATEGY_CODE = '''
 class SimpleTargetStrategy:
     """
     Buys when RSI < 55 and price is near EMA-20 (pullback zone),
-    or when RSI < 38 (oversold). Exits at +1.5% take-profit or -1.5% stop-loss.
-    Works in any market condition — fires every few candles.
+    or when RSI < 38 (oversold). Exits at +3% take-profit or -1.5% stop-loss (2:1 R:R).
+    Also shorts when RSI > 65 and price above EMA-20, or RSI > 72 (overbought).
+    Works in any market condition — bidirectional LONG + SHORT.
     """
-    minimal_roi = {"0": 0.015}
+    minimal_roi = {"0": 0.030}
+    stoploss = -0.015
+    timeframe = "15m"
+'''
+
+_BIDIR_STRATEGY_CODE = '''
+class BidirectionalStrategy:
+    """
+    Trend-following strategy that trades BOTH directions.
+
+    LONG:  EMA9 > EMA21 (uptrend confirmed) AND RSI < 60 (not overbought)
+    SHORT: EMA9 < EMA21 (downtrend confirmed) AND RSI > 40 (not oversold)
+    SL: 1.5% | TP: 3.0% | Leverage: 10x recommended
+
+    Designed specifically to test and validate SHORT position flow
+    in futures paper trading, live trading, and backtesting.
+    """
+    minimal_roi = {"0": 0.030}
     stoploss = -0.015
     timeframe = "15m"
 '''
@@ -73,37 +91,60 @@ def _cleanup_stale_test_trades(db):
 
 
 def _seed_builtin_strategies(db):
-    """Ensure SimpleTargetStrategy exists as a global template with correct trading config."""
+    """Ensure template strategies exist with correct trading configs."""
     from backend.models.strategy import Strategy
-    existing = db.execute(
-        select(Strategy).where(Strategy.name == "SimpleTargetStrategy", Strategy.is_template == True)  # noqa: E712
-    ).scalar_one_or_none()
-    if not existing:
-        db.add(Strategy(
-            user_id="system",
-            name="SimpleTargetStrategy",
-            description="Buys on RSI dips near EMA-20. Takes profit at +1.5%, stops at -3%. "
-                        "Works in any market — good for both spot and futures testing.",
-            original_text="Buy on pullbacks, sell at target",
-            generated_code=_SIMPLE_STRATEGY_CODE,
-            timeframe="15m",
-            stoploss=-0.03,         # 3% stop-loss
-            take_profit=0.015,      # 1.5% take-profit
-            default_leverage=10,    # 10x for futures (ignored in spot mode)
-        is_template=True,
-        ))
-        db.commit()
-    else:
-        # Always patch up any missing/wrong trading-config fields on the template
-        changed = False
-        if not getattr(existing, "take_profit", None):
-            existing.take_profit = 0.015; changed = True
-        if not getattr(existing, "default_leverage", None) or existing.default_leverage < 2:
-            existing.default_leverage = 10; changed = True
-        if existing.stoploss != -0.03:
-            existing.stoploss = -0.03; changed = True
-        if changed:
-            db.commit()
+
+    templates = [
+        {
+            "name": "SimpleTargetStrategy",
+            "description": "Bidirectional mean-reversion: LONG when RSI<55 near EMA-20 or RSI<38 (oversold); "
+                           "SHORT when RSI>65 above EMA-20 or RSI>72 (overbought). TP 3%, SL 1.5% (2:1 R:R).",
+            "code": _SIMPLE_STRATEGY_CODE,
+            "stoploss": -0.015,
+            "take_profit": 0.030,
+            "leverage": 10,
+        },
+        {
+            "name": "BidirectionalStrategy",
+            "description": "Trend-following LONG+SHORT strategy: LONG when EMA9>EMA21 (uptrend) AND RSI<60; "
+                           "SHORT when EMA9<EMA21 (downtrend) AND RSI>40. TP 3%, SL 1.5%. "
+                           "Ideal for testing short positions in futures paper/live/backtest.",
+            "code": _BIDIR_STRATEGY_CODE,
+            "stoploss": -0.015,
+            "take_profit": 0.030,
+            "leverage": 10,
+        },
+    ]
+
+    for tmpl in templates:
+        existing = db.execute(
+            select(Strategy).where(Strategy.name == tmpl["name"], Strategy.is_template == True)  # noqa: E712
+        ).scalar_one_or_none()
+        if not existing:
+            db.add(Strategy(
+                user_id="system",
+                name=tmpl["name"],
+                description=tmpl["description"],
+                original_text=tmpl["description"],
+                generated_code=tmpl["code"],
+                timeframe="15m",
+                stoploss=tmpl["stoploss"],
+                take_profit=tmpl["take_profit"],
+                default_leverage=tmpl["leverage"],
+                is_template=True,
+            ))
+        else:
+            changed = False
+            if existing.take_profit != tmpl["take_profit"]:
+                existing.take_profit = tmpl["take_profit"]; changed = True
+            if existing.stoploss != tmpl["stoploss"]:
+                existing.stoploss = tmpl["stoploss"]; changed = True
+            if not getattr(existing, "default_leverage", None) or existing.default_leverage < 2:
+                existing.default_leverage = tmpl["leverage"]; changed = True
+            if changed:
+                pass  # commit below
+
+    db.commit()
 
 
 async def _background_startup():

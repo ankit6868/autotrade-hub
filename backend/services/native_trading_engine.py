@@ -337,63 +337,120 @@ def _sig_miss_candle_long(df: pd.DataFrame) -> Optional[tuple]:
 
 
 def _sig_macd_crossover(df: pd.DataFrame) -> Optional[tuple]:
+    """MACD crossover — LONG on bullish cross, SHORT on bearish cross."""
     if len(df) < 3:
         return None
     prev, row = df.iloc[-2], df.iloc[-1]
+    e = row["close"]
+    # Bullish crossover: MACD crosses above signal → LONG
     if prev["macd"] < prev["macd_s"] and row["macd"] > row["macd_s"]:
-        e = row["close"]
         return e, e * 0.97, e * 1.09, "long"
+    # Bearish crossover: MACD crosses below signal → SHORT
+    if prev["macd"] > prev["macd_s"] and row["macd"] < row["macd_s"]:
+        return e, e * 1.03, e * 0.91, "short"
     return None
 
 
 def _sig_rsi_bollinger(df: pd.DataFrame) -> Optional[tuple]:
+    """RSI + Bollinger Bands — LONG on oversold, SHORT on overbought."""
     if len(df) < 20:
         return None
     row = df.iloc[-1]
-    if row["rsi"] < 30 and row["close"] < row["bb_lower"]:
-        e = row["close"]
+    e = row["close"]
+    # Oversold: RSI < 30 AND price below lower band → LONG
+    if row["rsi"] < 30 and e < row["bb_lower"]:
         return e, e * 0.97, row["bb_mid"], "long"
+    # Overbought: RSI > 70 AND price above upper band → SHORT
+    if row["rsi"] > 70 and e > row["bb_upper"]:
+        return e, e * 1.03, row["bb_mid"], "short"
     return None
 
 
 def _sig_ema_scalping(df: pd.DataFrame) -> Optional[tuple]:
+    """EMA scalping — LONG on golden cross, SHORT on death cross (volume confirmed)."""
     if len(df) < 21:
         return None
     prev, row = df.iloc[-2], df.iloc[-1]
-    if (prev["ema9"] < prev["ema21"] and row["ema9"] > row["ema21"]
-            and row["vol"] > row["vol_sma"] * 1.5):
-        e = row["close"]
+    vol_ok = row["vol"] > row["vol_sma"] * 1.5
+    e = row["close"]
+    # Golden cross: EMA9 crosses above EMA21 → LONG
+    if prev["ema9"] < prev["ema21"] and row["ema9"] > row["ema21"] and vol_ok:
         return e, e * 0.985, e * 1.015, "long"
+    # Death cross: EMA9 crosses below EMA21 → SHORT
+    if prev["ema9"] > prev["ema21"] and row["ema9"] < row["ema21"] and vol_ok:
+        return e, e * 1.015, e * 0.985, "short"
     return None
 
 
 def _sig_simple_target(df: pd.DataFrame) -> Optional[tuple]:
     """
-    SimpleTargetStrategy — fires frequently in any market condition.
+    SimpleTargetStrategy — bidirectional mean-reversion.
 
-    Logic  : Buy when RSI is below 55 (not overbought) AND price is
-             near or below EMA-20 (fair-value / pullback zone).
-             Also fires on strong oversold (RSI < 38) regardless of EMA.
-    Exit   : Take-profit +1.5%, stop-loss -1.5% (1:1 R:R, quick cycles).
-    Rationale: Works in sideways & uptrending markets; stops out quickly
-               in strong downtrends so losses stay small.
+    LONG : RSI < 55 AND price near/below EMA20, OR RSI < 38 (strong oversold)
+    SHORT: RSI > 65 AND price above EMA20 × 1.005, OR RSI > 72 (strong overbought)
+    SL/TP: 1.5% / 3.0% (2:1 reward:risk)
     """
     if len(df) < 21:
         return None
-    row  = df.iloc[-1]
-    rsi  = row.get("rsi",   50.0)
+    row   = df.iloc[-1]
+    rsi   = row.get("rsi",   50.0)
     close = row["close"]
     ema20 = row.get("ema20", row.get("ema_20", close))
 
-    near_ema    = close <= ema20 * 1.005          # at or slightly above EMA20
-    oversold    = rsi < 38                         # strongly oversold
-    mild_dip    = rsi < 55 and near_ema            # neutral RSI + near EMA
+    # ── LONG conditions ───────────────────────────────────────────────────────
+    near_ema = close <= ema20 * 1.005
+    oversold = rsi < 38
+    mild_dip = rsi < 55 and near_ema
 
     if oversold or mild_dip:
         entry = close
         sl    = round(entry * 0.985, 8)    # -1.5% stop-loss
-        tp    = round(entry * 1.015, 8)    # +1.5% take-profit
+        tp    = round(entry * 1.030, 8)    # +3.0% take-profit (2:1 R:R)
         return entry, sl, tp, "long"
+
+    # ── SHORT conditions ──────────────────────────────────────────────────────
+    extended  = close >= ema20 * 0.995    # at or slightly below EMA20 from above
+    overbought  = rsi > 72               # strongly overbought
+    mild_top    = rsi > 65 and not near_ema  # elevated RSI + price extended above EMA
+
+    if overbought or mild_top:
+        entry = close
+        sl    = round(entry * 1.015, 8)    # +1.5% stop-loss
+        tp    = round(entry * 0.970, 8)    # -3.0% take-profit (2:1 R:R)
+        return entry, sl, tp, "short"
+
+    return None
+
+
+def _sig_bidirectional(df: pd.DataFrame) -> Optional[tuple]:
+    """
+    BidirectionalStrategy — explicit LONG + SHORT test strategy.
+
+    LONG entry:  EMA9 > EMA21 (uptrend) AND RSI < 60 (not extreme overbought)
+    SHORT entry: EMA9 < EMA21 (downtrend) AND RSI > 40 (not extreme oversold)
+    SL/TP: 1.5% / 3.0% (2:1 R:R) — good for futures testing
+    """
+    if len(df) < 21:
+        return None
+    row   = df.iloc[-1]
+    prev  = df.iloc[-2]
+    close = row["close"]
+    ema9  = row.get("ema9",  close)
+    ema21 = row.get("ema21", close)
+    rsi   = row.get("rsi",   50.0)
+    # Trend confirmation: require EMA alignment for at least 2 bars
+    prev_ema9  = prev.get("ema9",  close)
+    prev_ema21 = prev.get("ema21", close)
+
+    uptrend   = ema9 > ema21 and prev_ema9 > prev_ema21
+    downtrend = ema9 < ema21 and prev_ema9 < prev_ema21
+
+    if uptrend and rsi < 60:
+        entry = close
+        return entry, round(entry * 0.985, 6), round(entry * 1.030, 6), "long"
+    if downtrend and rsi > 40:
+        entry = close
+        return entry, round(entry * 1.015, 6), round(entry * 0.970, 6), "short"
     return None
 
 
@@ -404,6 +461,7 @@ _STRATEGY_SIGNALS = {
     "RsiBollingerStrategy":    _sig_rsi_bollinger,
     "EmaScalpingStrategy":     _sig_ema_scalping,
     "SimpleTargetStrategy":    _sig_simple_target,
+    "BidirectionalStrategy":   _sig_bidirectional,
 }
 
 
@@ -414,12 +472,13 @@ def _get_signal_fn(name: str):
     for k, fn in _STRATEGY_SIGNALS.items():
         if k.lower() in n or n in k.lower():
             return fn
-    if "miss" in n and "short" in n: return _sig_miss_candle_short
-    if "miss" in n:                  return _sig_miss_candle_long
-    if "macd" in n:                  return _sig_macd_crossover
-    if "rsi" in n or "boll" in n:    return _sig_rsi_bollinger
-    if "simple" in n or "target" in n: return _sig_simple_target
-    return _sig_simple_target   # default fallback = most likely to fire
+    if "miss" in n and "short" in n:    return _sig_miss_candle_short
+    if "miss" in n:                     return _sig_miss_candle_long
+    if "macd" in n:                     return _sig_macd_crossover
+    if "rsi" in n or "boll" in n:       return _sig_rsi_bollinger
+    if "bidir" in n or "two" in n:      return _sig_bidirectional
+    if "simple" in n or "target" in n:  return _sig_simple_target
+    return _sig_simple_target   # default fallback
 
 
 # ─────────────────────────── position ─────────────────────────────────────
