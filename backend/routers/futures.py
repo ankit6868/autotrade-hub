@@ -400,25 +400,46 @@ def futures_open_positions(
     if mode:
         query = query.where(Trade.mode == mode)
 
-    db_trades = [
-        {
+    db_rows = db.execute(query).scalars().all()
+
+    # Fetch live prices for DB-only pairs not already retrieved above
+    pairs_in_native = {p["pair"] for p in native_positions}
+    db_only_pairs   = {t.pair for t in db_rows if t.pair not in pairs_in_native}
+    for pair_name in db_only_pairs:
+        if pair_name not in live_prices:
+            try:
+                sym  = pair_name.replace("/", "-")
+                data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
+                if str(data.get("code")) == "200000":
+                    live_prices[pair_name] = float(data["data"]["price"])
+            except Exception:
+                pass
+
+    db_trades = []
+    for t in db_rows:
+        entry   = t.entry_price or 0
+        cur     = live_prices.get(t.pair, entry)
+        lev     = t.leverage or 1
+        side    = t.side or "long"
+        raw_pnl = (cur - entry) / entry if (entry and side == "long") \
+                  else (entry - cur) / entry if entry else 0
+        unreal  = round(t.amount * raw_pnl * lev, 4) if entry else 0
+        db_trades.append({
             "id":                t.id,
             "pair":              t.pair,
-            "side":              t.side,
-            "entry_price":       t.entry_price,
+            "side":              side,
+            "entry_price":       entry,
+            "current_price":     round(cur, 6) if cur != entry else 0,
             "amount":            t.amount,
-            "leverage":          t.leverage,
+            "leverage":          lev,
             "liquidation_price": t.liquidation_price,
             "stoploss_price":    t.stoploss_price,
             "entry_time":        str(t.entry_time),
             "mode":              t.mode,
             "market_type":       "futures",
-            "unrealized_pnl":    0,
-        }
-        for t in db.execute(query).scalars().all()
-    ]
+            "unrealized_pnl":    unreal,
+        })
 
-    pairs_in_native = {p["pair"] for p in native_positions}
     merged = native_trades + [t for t in db_trades if t["pair"] not in pairs_in_native]
     return {"trades": merged}
 
@@ -522,6 +543,12 @@ def futures_manual_entry(
         size=stake, leverage=leverage, opened_at=now,
     )
 
+    # Guard: only allow 1 open position per pair at a time
+    with eng._lock:
+        existing_pairs = [p.pair for p in eng.positions.values()]
+    if pair in existing_pairs:
+        return {"error": f"Already have an open position for {pair}. Close it first."}
+
     pos_key = f"{pair}-{direction}-manual-{int(now.timestamp())}"
     with eng._lock:
         eng.positions[pos_key] = pos
@@ -561,36 +588,78 @@ def futures_force_close(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
+    """Close ALL open in-memory + DB futures positions for the given pair."""
     from backend.services.native_trading_engine import _kucoin_get, _persist_closed_trade
+    from sqlalchemy import update as sql_update
     from datetime import timezone as _tz
 
     eng = futures_engine_registry.for_user(user_id)
 
+    # Fetch live exit price once
+    try:
+        sym  = pair.replace("/", "-")
+        data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
+        exit_price = float(data["data"]["price"]) if str(data.get("code")) == "200000" else None
+    except Exception:
+        exit_price = None
+
+    now = datetime.now(_tz.utc)
+    closed_positions = []
+
+    # ── Close all in-memory positions for this pair ────────────────────────
     with eng._lock:
-        trade_key = None
-        pos = None
-        for k, p in eng.positions.items():
-            if p.pair == pair:
-                trade_key = k
-                pos = p
-                break
-        if pos is None:
-            return {"error": f"No open futures position for {pair}"}
+        matching_keys = [k for k, p in eng.positions.items() if p.pair == pair]
+        if not matching_keys:
+            # No in-memory positions — still close DB ones below
+            pass
+        for trade_key in matching_keys:
+            pos = eng.positions.pop(trade_key)
+            ep  = exit_price or pos.entry
+            pos.close(ep, "force_closed", now)
+            eng.balance += pos.pnl_abs
+            eng.closed_trades.append(pos)
+            closed_positions.append(pos)
 
-        try:
-            sym  = pair.replace("/", "-")
-            data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
-            exit_price = float(data["data"]["price"]) if str(data.get("code")) == "200000" else pos.entry
-        except Exception:
-            exit_price = pos.entry
+    # Persist each closed in-memory position
+    total_pnl = 0.0
+    for pos in closed_positions:
+        _persist_closed_trade(user_id, pos, eng._mode, eng._strategy_id, pos.db_id)
+        total_pnl += pos.pnl_abs
 
-        pos.close(exit_price, "force_closed", datetime.now(_tz.utc))
-        eng.balance += pos.pnl_abs
-        eng.closed_trades.append(pos)
-        del eng.positions[trade_key]
+    # ── Also close any orphaned open DB positions for this pair ───────────
+    # (positions that exist in DB but not in engine memory — from previous sessions)
+    orphan_trades = db.execute(
+        select(Trade).where(
+            Trade.user_id    == user_id,
+            Trade.pair       == pair,
+            Trade.market_type == "futures",
+            Trade.status     == "open",
+        )
+    ).scalars().all()
 
-    _persist_closed_trade(user_id, pos, eng._mode, eng._strategy_id, pos.db_id)
+    for t in orphan_trades:
+        ep = exit_price or t.entry_price
+        t.exit_price  = ep
+        t.exit_time   = now
+        t.exit_reason = "force_closed"
+        t.status      = "closed"
+        t.profit_pct  = round((ep - t.entry_price) / t.entry_price * 100 * (t.leverage or 1), 4)
+        t.profit_abs  = round(t.amount * t.profit_pct / 100, 4)
+        total_pnl    += t.profit_abs
+
+    if orphan_trades:
+        db.commit()
+
+    total_closed = len(closed_positions) + len(orphan_trades)
+    if total_closed == 0:
+        return {"error": f"No open futures position for {pair}"}
+
     log_event(db, user_id, "futures.force_close", request,
-              payload={"pair": pair, "exit_price": exit_price, "leverage": eng._leverage})
-    return {"status": "closed", "pair": pair, "exit_price": exit_price,
-            "pnl_abs": round(pos.pnl_abs, 4), "leverage": eng._leverage}
+              payload={"pair": pair, "exit_price": exit_price, "count": total_closed})
+    return {
+        "status":       "closed",
+        "pair":         pair,
+        "exit_price":   exit_price,
+        "closed_count": total_closed,
+        "pnl_abs":      round(total_pnl, 4),
+    }

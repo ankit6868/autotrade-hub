@@ -268,6 +268,7 @@ def _build_df(candles: list[dict]) -> pd.DataFrame:
     # Indicators
     df["ema5"]  = df["close"].ewm(span=5,  adjust=False).mean()
     df["ema9"]  = df["close"].ewm(span=9,  adjust=False).mean()
+    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()   # ← used by SimpleTarget
     df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
     ema12 = df["close"].ewm(span=12, adjust=False).mean()
     ema26 = df["close"].ewm(span=26, adjust=False).mean()
@@ -521,12 +522,13 @@ class NativeTradingEngine:
 
         # state
         self.balance:   float              = 1000.0
-        self.positions: dict[str, Position]= {}   # pair → open position
+        self.positions: dict[str, Position]= {}   # trade_key → open position
         self.closed_trades: list[Position] = []
         self.ticks:     int                = 0
         self.errors:    int                = 0
         self.last_action: str              = ""
         self.started_at: Optional[datetime] = None
+        self._last_prices: dict[str, float] = {}  # pair → last known live price
 
     # ── public API ──────────────────────────────────────────────────────
 
@@ -554,7 +556,11 @@ class NativeTradingEngine:
                 "realized_pnl": round(sum(t.pnl_abs for t in self.closed_trades), 4),
                 "unrealized_pnl": round(
                     sum(
-                        p.size * ((p.entry - p.entry) / p.entry)  # placeholder
+                        p.size * (
+                            (self._last_prices.get(p.pair, p.entry) - p.entry) / p.entry
+                            if p.direction == "long" else
+                            (p.entry - self._last_prices.get(p.pair, p.entry)) / p.entry
+                        ) * getattr(p, "leverage", 1)
                         for p in self.positions.values()
                     ), 4
                 ),
@@ -808,10 +814,12 @@ class NativeTradingEngine:
             symbol = pair.replace("/", "-")
             data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": symbol})
             if str(data.get("code")) == "200000":
-                return float(data["data"]["price"])
+                price = float(data["data"]["price"])
+                self._last_prices[pair] = price   # cache for status / unrealized P&L
+                return price
         except Exception:
             pass
-        return None
+        return self._last_prices.get(pair)  # return stale price rather than None
 
     def _tick_continuous(self, signal_fn, seen_signal: dict,
                          last_signal_ts: dict | None = None,

@@ -75,6 +75,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df["ema5"]   = df["close"].ewm(span=5,  adjust=False).mean()
     df["ema9"]   = df["close"].ewm(span=9,  adjust=False).mean()
+    df["ema20"]  = df["close"].ewm(span=20, adjust=False).mean()   # ← SimpleTarget uses this
     df["ema21"]  = df["close"].ewm(span=21, adjust=False).mean()
     ema12 = df["close"].ewm(span=12, adjust=False).mean()
     ema26 = df["close"].ewm(span=26, adjust=False).mean()
@@ -89,6 +90,7 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     bb_std         = df["close"].rolling(20).std()
     df["bb_upper"] = df["bb_mid"] + 2 * bb_std
     df["bb_lower"] = df["bb_mid"] - 2 * bb_std
+    df["vol_sma"]  = df["vol"].rolling(20).mean()
     return df
 
 
@@ -167,11 +169,37 @@ def _signal_ema_scalping(df: pd.DataFrame, i: int):
     if i < 2:
         return None
     prev, row = df.iloc[i - 1], df.iloc[i]
+    vol_sma = df["vol_sma"].iloc[i] if "vol_sma" in df.columns else df["vol"].rolling(20).mean().iloc[i]
     if (prev["ema9"] < prev["ema21"] and row["ema9"] > row["ema21"]
-            and row["vol"] > df["vol"].rolling(20).mean().iloc[i] * 1.5):
+            and row["vol"] > vol_sma * 1.5):
         entry = row["close"]
         sl    = entry * 0.985
         tp    = entry * 1.015
+        return entry, sl, tp, "long"
+    return None
+
+
+def _signal_simple_target(df: pd.DataFrame, i: int):
+    """
+    SimpleTargetStrategy — RSI below 55 (not overbought) AND price at/below EMA20.
+    Also fires on strong oversold (RSI < 38) regardless of EMA.
+    Exit: +1.5% TP / -1.5% SL (1:1 R:R).
+    """
+    if i < 21:
+        return None
+    row   = df.iloc[i]
+    rsi   = row.get("rsi", 50.0)
+    close = row["close"]
+    ema20 = row.get("ema20", close)   # ema20 now always present
+
+    near_ema = close <= ema20 * 1.005   # at or slightly above EMA20
+    oversold = rsi < 38                 # strongly oversold
+    mild_dip = rsi < 55 and near_ema   # neutral + near fair-value
+
+    if oversold or mild_dip:
+        entry = close
+        sl    = round(entry * 0.985, 8)   # -1.5%
+        tp    = round(entry * 1.015, 8)   # +1.5%
         return entry, sl, tp, "long"
     return None
 
@@ -182,6 +210,7 @@ _STRATEGY_FN = {
     "MacdCrossoverStrategy":    _signal_macd_crossover,
     "RsiBollingerStrategy":     _signal_rsi_bollinger,
     "EmaScalpingStrategy":      _signal_ema_scalping,
+    "SimpleTargetStrategy":     _signal_simple_target,
 }
 
 
@@ -201,7 +230,9 @@ def _guess_strategy(name: str):
         return _signal_rsi_bollinger
     if "ema" in n or "scalp" in n:
         return _signal_ema_scalping
-    return _signal_macd_crossover  # default fallback
+    if "simple" in n or "target" in n:
+        return _signal_simple_target
+    return _signal_simple_target   # default: most reliable for general use
 
 
 # ─────────────────────────── backtest engine ──────────────────────────────

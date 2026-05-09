@@ -120,6 +120,7 @@ class FuturesEngine(NativeTradingEngine):
         self._mode         = mode
         self._market_type  = "futures"
         self._max_open     = max_open_trades
+        self._max_per_pair = 1   # ← STRICT: only 1 open position per pair at a time
         self._risk_pct     = max_position_pct / 100.0
         self._api_key      = kucoin_key
         self._api_sec      = kucoin_secret

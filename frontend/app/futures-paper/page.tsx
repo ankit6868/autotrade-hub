@@ -80,6 +80,11 @@ function FuturesPaperInner() {
   const totalPnl = tradeHistory.reduce((s: number, t: any) => s + (Number(t.profit_abs) || 0), 0);
   const wins = tradeHistory.filter((t: any) => (t.profit_abs || 0) > 0).length;
   const winRate = tradeHistory.length > 0 ? Math.round((wins / tradeHistory.length) * 100) : 0;
+  // Show live engine balance when running, otherwise static wallet setting
+  const displayBalance = isRunning && botStatus?.balance != null
+    ? Number(botStatus.balance)
+    : wallet;
+  const totalUnreal = openTrades.reduce((s: number, t: any) => s + (Number(t.unrealized_pnl) || 0), 0);
 
   return (
     <div className="max-w-6xl mx-auto">
@@ -158,11 +163,11 @@ function FuturesPaperInner() {
       {/* Stats */}
       <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6">
         {[
-          { label: 'Virtual Margin', value: `${wallet.toFixed(0)} USDT` },
+          { label: 'Virtual Balance', value: `${displayBalance.toFixed(2)} USDT`, color: displayBalance < wallet ? 'text-red-400' : 'text-white' },
           { label: 'Realized P&L', value: `${totalPnl >= 0 ? '+' : ''}${totalPnl.toFixed(4)} USDT`, color: totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400' },
-          { label: 'Unrealized P&L', value: `${openTrades.reduce((s: number, t: any) => s + (Number(t.unrealized_pnl) || 0), 0).toFixed(4)} USDT` },
+          { label: 'Unrealized P&L', value: `${totalUnreal >= 0 ? '+' : ''}${totalUnreal.toFixed(4)} USDT`, color: totalUnreal >= 0 ? 'text-emerald-400' : 'text-red-400' },
           { label: 'Open Positions', value: openTrades.length },
-          { label: 'Win Rate', value: `${winRate}%` },
+          { label: 'Win Rate', value: `${winRate}%`, color: winRate >= 50 ? 'text-emerald-400' : winRate > 0 ? 'text-amber-400' : 'text-white' },
         ].map(m => (
           <div key={m.label} className="card card-hover">
             <p className="text-xs text-slate-400 uppercase tracking-wider mb-1">{m.label}</p>
@@ -187,7 +192,7 @@ function FuturesPaperInner() {
       <div className="card mb-6">
         <h2 className="text-lg font-semibold mb-4 flex items-center gap-2">
           Open Positions
-          {openTrades.length > 0 && <span className="text-sm text-slate-400">Unrealized: <span className={openTrades.reduce((s: number, t: any) => s + (t.unrealized_pnl || 0), 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>{openTrades.reduce((s: number, t: any) => s + (t.unrealized_pnl || 0), 0).toFixed(4)} USDT</span></span>}
+          {openTrades.length > 0 && <span className="text-sm text-slate-400">Unrealized: <span className={totalUnreal >= 0 ? 'text-emerald-400' : 'text-red-400'}>{totalUnreal >= 0 ? '+' : ''}{totalUnreal.toFixed(4)} USDT</span></span>}
         </h2>
         {openTrades.length === 0 ? <p className="text-slate-500 text-sm">No open futures positions</p> : (
           <div className="overflow-x-auto">
