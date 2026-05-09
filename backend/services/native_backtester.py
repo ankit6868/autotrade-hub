@@ -325,8 +325,8 @@ def _signal_smc(df: pd.DataFrame, i: int):
     htf_bull = close > ema50
     htf_bear = close < ema50
 
-    # FVG: most recent in last 20 bars
-    fvg_lb = min(20, i - 1)
+    # FVG: most recent in last 15 bars (tighter window = higher quality imbalances)
+    fvg_lb = min(15, i - 1)
     bull_fvg_mid = bear_fvg_mid = None
     for k in range(2, fvg_lb + 1):
         j = i - k + 2
@@ -337,9 +337,9 @@ def _signal_smc(df: pd.DataFrame, i: int):
             bear_fvg_mid = (lows[j - 2] + highs[j]) / 2
         if bull_fvg_mid and bear_fvg_mid: break
 
-    # OB: last opposing candle in last 30 bars
+    # OB: last opposing candle in last 20 bars (tighter window = fresher OBs only)
     bull_ob = bear_ob = None
-    for k in range(1, min(31, i)):
+    for k in range(1, min(21, i)):
         j = i - k
         if bull_ob is None and closes[j] < opens[j]:
             bull_ob = (lows[j] + highs[j]) / 2
@@ -347,11 +347,11 @@ def _signal_smc(df: pd.DataFrame, i: int):
             bear_ob = (lows[j] + highs[j]) / 2
         if bull_ob and bear_ob: break
 
-    # Price must be near FVG midpoint or OB (within 0.5%)
-    at_bull_fvg = bull_fvg_mid is not None and abs(close - bull_fvg_mid) / bull_fvg_mid < 0.005
-    at_bear_fvg = bear_fvg_mid is not None and abs(close - bear_fvg_mid) / bear_fvg_mid < 0.005
-    at_bull_ob  = bull_ob is not None and bull_ob * 0.995 <= close <= bull_ob * 1.005
-    at_bear_ob  = bear_ob is not None and bear_ob * 0.995 <= close <= bear_ob * 1.005
+    # Price must be near FVG midpoint or OB (within 0.3% — tighter than before to reduce noise)
+    at_bull_fvg = bull_fvg_mid is not None and abs(close - bull_fvg_mid) / bull_fvg_mid < 0.003
+    at_bear_fvg = bear_fvg_mid is not None and abs(close - bear_fvg_mid) / bear_fvg_mid < 0.003
+    at_bull_ob  = bull_ob is not None and bull_ob * 0.997 <= close <= bull_ob * 1.003
+    at_bear_ob  = bear_ob is not None and bear_ob * 0.997 <= close <= bear_ob * 1.003
 
     # SL levels
     lb = min(20, i - 1)
