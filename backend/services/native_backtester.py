@@ -259,8 +259,8 @@ def _signal_smc(df: pd.DataFrame, i: int):
       OR price is at/near the last OB before the BOS (within 0.5%)
       4. EMA50 must agree with direction
     """
-    swing_n = 5
-    bos_lb  = 30   # look for BOS in last 30 bars
+    swing_n = 10   # larger pivot = more significant BOS (fewer events)
+    bos_lb  = 20   # look for BOS in last 20 bars only (very recent)
     if i < max(52, swing_n * 2 + bos_lb):
         return None
 
