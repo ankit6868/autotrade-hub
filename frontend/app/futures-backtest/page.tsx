@@ -36,7 +36,14 @@ function fromYMD(s: string): string {
 function buildTimerange(days: number): string {
   const end   = new Date();
   const start = new Date();
-  start.setDate(end.getDate() - days);
+  if (days === 7) {
+    // 1W: align to Monday of current week (matches TradingView's "1W" period)
+    const day = end.getDay();                      // 0=Sun … 6=Sat
+    const daysToMonday = day === 0 ? 6 : day - 1; // days since last Monday
+    start.setDate(end.getDate() - daysToMonday);
+  } else {
+    start.setDate(end.getDate() - days);
+  }
   return `${toYMD(start)}-${toYMD(end)}`;
 }
 

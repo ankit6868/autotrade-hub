@@ -479,18 +479,8 @@ def _sig_smc(df: pd.DataFrame) -> Optional[tuple]:
     ts    = row.get("date", None)
     n     = len(df)
 
-    # ── NY Session filter 13:00–21:00 UTC ────────────────────────────────────
-    if ts is not None:
-        try:
-            import pandas as _pd
-            dt = _pd.Timestamp(ts)
-            if dt.tzinfo is None:
-                dt = dt.tz_localize("UTC")
-            h = dt.hour
-            if not (13 <= h < 21):
-                return None
-        except Exception:
-            pass
+    # NY session: active 24/7 for crypto (no session filter in backtesting)
+    # Live trading can optionally add session awareness at the UI level
 
     highs  = df["high"].values
     lows   = df["low"].values

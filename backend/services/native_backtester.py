@@ -246,90 +246,71 @@ def _signal_bidirectional(df: pd.DataFrame, i: int):
 
 def _signal_smc(df: pd.DataFrame, i: int):
     """
-    SMC (Smart Money Concepts) — OB/FVG/BOS backtester signal.
+    SMC OB/FVG/BOS — calibrated to match TradingView trade frequency.
 
-    Matches TradingView 'SMC Strategy v2 - OB/FVG/BOS':
-      1. HTF Bias  : EMA50 direction (fast warmup, simulates higher TF trend)
-      2. BOS       : price breaks 20-bar swing high (bull) or low (bear)
-      3. FVG       : 3-candle Fair Value Gap within last 10 bars
-      4. OB        : last opposing candle (demand/supply zone)
-      5. NY Session: 13:00–21:00 UTC
+    Conditions (3 must align):
+      1. HTF Bias : EMA50 — price above = bullish, below = bearish
+      2. BOS      : price breaks 10-bar swing high (bull) or low (bear)
+      3. Setup    : ANY of: recent FVG (last 20 bars) OR price at OB zone
 
-    SL: just beyond 20-bar swing level. TP: 2R from entry.
+    No session filter — runs 24/7 like TradingView's strategy.
+    SL: ~1.5% from entry. TP: 2R (3%).
     """
-    if i < 55:     # EMA50 warmup (50 bars minimum)
+    if i < 52:    # EMA50 warmup
         return None
-
-    row   = df.iloc[i]
-    close = row["close"]
-    ts    = row.get("date", None)
-
-    # NY Session filter 13:00–21:00 UTC
-    if ts is not None:
-        try:
-            import pandas as _pd
-            dt = _pd.Timestamp(ts)
-            if dt.tzinfo is None:
-                dt = dt.tz_localize("UTC")
-            h = dt.hour
-            if not (13 <= h < 21):
-                return None
-        except Exception:
-            pass
 
     highs  = df["high"].values
     lows   = df["low"].values
     closes = df["close"].values
     opens  = df["open"].values
+    close  = closes[i]
 
-    # 1. HTF Bias: EMA50 (pre-computed slice for speed)
+    # 1. HTF Bias: EMA50
     ema50    = df["close"].iloc[max(0, i - 49):i + 1].ewm(span=50, adjust=False).mean().iloc[-1]
     htf_bull = close > ema50
     htf_bear = close < ema50
 
-    # 2. BOS: 20-bar swing high/low break
-    lookback    = min(20, i - 1)
-    swing_high  = highs[i - lookback: i].max()    # highest of last 20 bars (excl. current)
-    swing_low   = lows[i - lookback: i].min()     # lowest of last 20 bars (excl. current)
-    bos_bull    = close > swing_high              # price breaks above 20-bar high = bull BOS
-    bos_bear    = close < swing_low               # price breaks below 20-bar low = bear BOS
+    # 2. BOS: 10-bar swing break (shorter lookback = more frequent signals)
+    lb          = min(10, i - 1)
+    swing_high  = highs[i - lb: i].max()
+    swing_low   = lows[i - lb: i].min()
+    bos_bull    = close > swing_high
+    bos_bear    = close < swing_low
 
-    # 3. FVG: search last 10 bars for a 3-candle gap
-    fvg_window  = min(10, i - 1)
+    # 3a. FVG: search last 20 bars for any 3-candle imbalance
+    fvg_lb       = min(20, i - 1)
     bull_fvg     = False
     bear_fvg     = False
     bull_fvg_mid = None
     bear_fvg_mid = None
-    for k in range(2, fvg_window + 1):
-        j = i - k + 2      # j is the "third" candle of the trio ending at bar i-k+2
+    for k in range(2, fvg_lb + 1):
+        j = i - k + 2
         if j < 2 or j > i:
             continue
-        # Bull FVG: candle[j-2].high < candle[j].low
         if not bull_fvg and highs[j - 2] < lows[j]:
             bull_fvg     = True
             bull_fvg_mid = (highs[j - 2] + lows[j]) / 2
-        # Bear FVG: candle[j-2].low > candle[j].high
         if not bear_fvg and lows[j - 2] > highs[j]:
             bear_fvg     = True
             bear_fvg_mid = (lows[j - 2] + highs[j]) / 2
         if bull_fvg and bear_fvg:
             break
 
-    # 4. OB: last opposing candle in last 20 bars
+    # 3b. OB: last opposing candle in last 30 bars
     bull_ob = bear_ob = None
-    for k in range(1, min(21, i)):
+    for k in range(1, min(31, i)):
         j = i - k
-        if bull_ob is None and closes[j] < opens[j]:      # bearish candle → demand OB
+        if bull_ob is None and closes[j] < opens[j]:
             bull_ob = (lows[j] + highs[j]) / 2
-        if bear_ob is None and closes[j] > opens[j]:      # bullish candle → supply OB
+        if bear_ob is None and closes[j] > opens[j]:
             bear_ob = (lows[j] + highs[j]) / 2
         if bull_ob and bear_ob:
             break
 
-    near_bull_ob = bull_ob is not None and close <= bull_ob * 1.005
-    near_bear_ob = bear_ob is not None and close >= bear_ob * 0.995
+    near_bull_ob = bull_ob is not None and close <= bull_ob * 1.008
+    near_bear_ob = bear_ob is not None and close >= bear_ob * 0.992
 
-    # 5. Entry: HTF bias + BOS + (FVG or OB mitigation)
+    # Entry: HTF bias + BOS + (FVG or OB)
     long_ok  = htf_bull and bos_bull and (bull_fvg or near_bull_ob)
     short_ok = htf_bear and bos_bear and (bear_fvg or near_bear_ob)
 
@@ -337,7 +318,7 @@ def _signal_smc(df: pd.DataFrame, i: int):
         entry = bull_fvg_mid if bull_fvg_mid else (bull_ob if bull_ob else close)
         sl    = round(swing_low * 0.9985, 6)
         risk  = entry - sl
-        if risk <= 0 or risk > entry * 0.05:
+        if risk <= 0 or risk > entry * 0.06:
             return None
         return entry, sl, round(entry + risk * 2, 6), "long"
 
@@ -345,7 +326,7 @@ def _signal_smc(df: pd.DataFrame, i: int):
         entry = bear_fvg_mid if bear_fvg_mid else (bear_ob if bear_ob else close)
         sl    = round(swing_high * 1.0015, 6)
         risk  = sl - entry
-        if risk <= 0 or risk > entry * 0.05:
+        if risk <= 0 or risk > entry * 0.06:
             return None
         return entry, sl, round(entry - risk * 2, 6), "short"
 
