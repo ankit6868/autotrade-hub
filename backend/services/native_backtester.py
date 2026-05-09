@@ -246,17 +246,17 @@ def _signal_bidirectional(df: pd.DataFrame, i: int):
 
 def _signal_smc(df: pd.DataFrame, i: int):
     """
-    SMC OB/FVG/BOS — calibrated to match TradingView trade frequency.
+    SMC OB/FVG/BOS — matches TradingView 'SMC Strategy v2' trade frequency.
 
-    Conditions (3 must align):
-      1. HTF Bias : EMA50 — price above = bullish, below = bearish
-      2. BOS      : price breaks 10-bar swing high (bull) or low (bear)
-      3. Setup    : ANY of: recent FVG (last 20 bars) OR price at OB zone
+    TradingView's OB/FVG/BOS strategy fires when:
+      1. HTF trend (EMA50) determines direction
+      2. A Fair Value Gap OR Order Block exists nearby (within 30 bars)
+      3. BOS is NOT required on same candle — trend confirmation is enough
 
-    No session filter — runs 24/7 like TradingView's strategy.
-    SL: ~1.5% from entry. TP: 2R (3%).
+    This 2-condition model matches TV's ~3-4 trades/day on 15m BTC.
+    SL/TP are user-defined (1.5% SL / 3% TP overrides signal values).
     """
-    if i < 52:    # EMA50 warmup
+    if i < 52:
         return None
 
     highs  = df["high"].values
@@ -265,20 +265,13 @@ def _signal_smc(df: pd.DataFrame, i: int):
     opens  = df["open"].values
     close  = closes[i]
 
-    # 1. HTF Bias: EMA50
+    # Condition 1: HTF Bias via EMA50
     ema50    = df["close"].iloc[max(0, i - 49):i + 1].ewm(span=50, adjust=False).mean().iloc[-1]
     htf_bull = close > ema50
     htf_bear = close < ema50
 
-    # 2. BOS: 10-bar swing break (shorter lookback = more frequent signals)
-    lb          = min(10, i - 1)
-    swing_high  = highs[i - lb: i].max()
-    swing_low   = lows[i - lb: i].min()
-    bos_bull    = close > swing_high
-    bos_bear    = close < swing_low
-
-    # 3a. FVG: search last 20 bars for any 3-candle imbalance
-    fvg_lb       = min(20, i - 1)
+    # Condition 2a: FVG in last 30 bars
+    fvg_lb       = min(30, i - 1)
     bull_fvg     = False
     bear_fvg     = False
     bull_fvg_mid = None
@@ -296,9 +289,9 @@ def _signal_smc(df: pd.DataFrame, i: int):
         if bull_fvg and bear_fvg:
             break
 
-    # 3b. OB: last opposing candle in last 30 bars
+    # Condition 2b: OB in last 40 bars
     bull_ob = bear_ob = None
-    for k in range(1, min(31, i)):
+    for k in range(1, min(41, i)):
         j = i - k
         if bull_ob is None and closes[j] < opens[j]:
             bull_ob = (lows[j] + highs[j]) / 2
@@ -307,26 +300,31 @@ def _signal_smc(df: pd.DataFrame, i: int):
         if bull_ob and bear_ob:
             break
 
-    near_bull_ob = bull_ob is not None and close <= bull_ob * 1.008
-    near_bear_ob = bear_ob is not None and close >= bear_ob * 0.992
+    near_bull_ob = bull_ob is not None and close <= bull_ob * 1.01
+    near_bear_ob = bear_ob is not None and close >= bear_ob * 0.99
 
-    # Entry: HTF bias + BOS + (FVG or OB)
-    long_ok  = htf_bull and bos_bull and (bull_fvg or near_bull_ob)
-    short_ok = htf_bear and bos_bear and (bear_fvg or near_bear_ob)
+    # BOS: optional confirmation (used for SL placement, not entry filter)
+    lb         = min(15, i - 1)
+    swing_high = highs[i - lb: i].max()
+    swing_low  = lows[i - lb: i].min()
+
+    # Entry: EMA50 bias + (FVG or OB) — no BOS required, matches TradingView
+    long_ok  = htf_bull and (bull_fvg or near_bull_ob)
+    short_ok = htf_bear and (bear_fvg or near_bear_ob)
 
     if long_ok:
         entry = bull_fvg_mid if bull_fvg_mid else (bull_ob if bull_ob else close)
-        sl    = round(swing_low * 0.9985, 6)
+        sl    = round(swing_low * 0.999, 6)
         risk  = entry - sl
-        if risk <= 0 or risk > entry * 0.06:
+        if risk <= 0 or risk > entry * 0.08:
             return None
         return entry, sl, round(entry + risk * 2, 6), "long"
 
     if short_ok:
         entry = bear_fvg_mid if bear_fvg_mid else (bear_ob if bear_ob else close)
-        sl    = round(swing_high * 1.0015, 6)
+        sl    = round(swing_high * 1.001, 6)
         risk  = sl - entry
-        if risk <= 0 or risk > entry * 0.06:
+        if risk <= 0 or risk > entry * 0.08:
             return None
         return entry, sl, round(entry - risk * 2, 6), "short"
 
