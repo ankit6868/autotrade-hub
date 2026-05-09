@@ -246,17 +246,22 @@ def _signal_bidirectional(df: pd.DataFrame, i: int):
 
 def _signal_smc(df: pd.DataFrame, i: int):
     """
-    SMC OB/FVG/BOS — matches TradingView 'SMC Strategy v2' trade frequency.
+    SMC OB/FVG/BOS — proper BOS-gated implementation.
 
-    TradingView's OB/FVG/BOS strategy fires when:
-      1. HTF trend (EMA50) determines direction
-      2. A Fair Value Gap OR Order Block exists nearby (within 30 bars)
-      3. BOS is NOT required on same candle — trend confirmation is enough
+    TradingView's SMC v2 ONLY enters after a confirmed BOS event.
+    ONE setup per BOS: after BOS, wait for pullback to FVG or OB → enter.
+    This naturally limits to ~0.2-0.3 trades/day (matching TV's 29 in 4M).
 
-    This 2-condition model matches TV's ~3-4 trades/day on 15m BTC.
-    SL/TP are user-defined (1.5% SL / 3% TP overrides signal values).
+    Logic:
+      1. Detect recent BOS (price broke N-bar swing high/low within last 30 bars)
+      2. Confirm FVG formed between BOS bar and current bar (imbalance in move)
+      3. Confirm price has pulled BACK to that FVG midpoint (within 0.5%)
+      OR price is at/near the last OB before the BOS (within 0.5%)
+      4. EMA50 must agree with direction
     """
-    if i < 52:
+    swing_n = 5
+    bos_lb  = 30   # look for BOS in last 30 bars
+    if i < max(52, swing_n * 2 + bos_lb):
         return None
 
     highs  = df["high"].values
@@ -265,75 +270,92 @@ def _signal_smc(df: pd.DataFrame, i: int):
     opens  = df["open"].values
     close  = closes[i]
 
-    # Condition 1: HTF Bias via EMA50
+    # 1. HTF Bias: EMA50
     ema50    = df["close"].iloc[max(0, i - 49):i + 1].ewm(span=50, adjust=False).mean().iloc[-1]
     htf_bull = close > ema50
     htf_bear = close < ema50
 
-    # Condition 2a: FVG in last 30 bars
-    fvg_lb       = min(30, i - 1)
-    bull_fvg     = False
-    bear_fvg     = False
+    # 2. Find most recent BOS bar (within last bos_lb bars)
+    #    Bull BOS: bar j where close[j] > max(high[j-swing_n : j])
+    #    Bear BOS: bar j where close[j] < min(low[j-swing_n : j])
+    last_bull_bos = -1
+    last_bear_bos = -1
+    for k in range(1, bos_lb + 1):
+        j = i - k
+        if j < swing_n:
+            break
+        pre_high = highs[j - swing_n: j].max()
+        pre_low  = lows[j - swing_n: j].min()
+        if last_bull_bos == -1 and closes[j] > pre_high:
+            last_bull_bos = j
+        if last_bear_bos == -1 and closes[j] < pre_low:
+            last_bear_bos = j
+        if last_bull_bos != -1 and last_bear_bos != -1:
+            break
+
+    # 3. After BOS: look for FVG that formed BETWEEN BOS bar and current bar
     bull_fvg_mid = None
     bear_fvg_mid = None
-    for k in range(2, fvg_lb + 1):
-        j = i - k + 2
-        if j < 2 or j > i:
-            continue
-        if not bull_fvg and highs[j - 2] < lows[j]:
-            bull_fvg     = True
-            bull_fvg_mid = (highs[j - 2] + lows[j]) / 2
-        if not bear_fvg and lows[j - 2] > highs[j]:
-            bear_fvg     = True
-            bear_fvg_mid = (lows[j - 2] + highs[j]) / 2
-        if bull_fvg and bear_fvg:
-            break
 
-    # Condition 2b: OB in last 40 bars
+    if last_bull_bos != -1:
+        # Look for bull FVG formed after the bull BOS (in the pull-back zone)
+        for j in range(last_bull_bos, i - 1):
+            if j >= 2 and highs[j - 2] < lows[j]:
+                bull_fvg_mid = (highs[j - 2] + lows[j]) / 2
+                # Take the MOST RECENT (closest to current bar)
+
+    if last_bear_bos != -1:
+        # Look for bear FVG formed after bear BOS
+        for j in range(last_bear_bos, i - 1):
+            if j >= 2 and lows[j - 2] > highs[j]:
+                bear_fvg_mid = (lows[j - 2] + highs[j]) / 2
+
+    # 4. Price must be AT the FVG midpoint (within 0.5%)
+    at_bull_fvg = (bull_fvg_mid is not None and
+                   abs(close - bull_fvg_mid) / bull_fvg_mid < 0.005)
+    at_bear_fvg = (bear_fvg_mid is not None and
+                   abs(close - bear_fvg_mid) / bear_fvg_mid < 0.005)
+
+    # 5. OB: last opposing candle before the BOS (demand/supply)
     bull_ob = bear_ob = None
-    for k in range(1, min(41, i)):
-        j = i - k
-        if bull_ob is None and closes[j] < opens[j]:
-            bull_ob = (lows[j] + highs[j]) / 2
-        if bear_ob is None and closes[j] > opens[j]:
-            bear_ob = (lows[j] + highs[j]) / 2
-        if bull_ob and bear_ob:
-            break
+    if last_bull_bos != -1:
+        for j in range(last_bull_bos - 1, max(last_bull_bos - 20, 0), -1):
+            if closes[j] < opens[j]:
+                bull_ob = (lows[j] + highs[j]) / 2
+                break
+    if last_bear_bos != -1:
+        for j in range(last_bear_bos - 1, max(last_bear_bos - 20, 0), -1):
+            if closes[j] > opens[j]:
+                bear_ob = (lows[j] + highs[j]) / 2
+                break
 
-    # OB proximity: price must be AT the OB zone (within 0.5%)
-    near_bull_ob = (bull_ob is not None and
-                    bull_ob * 0.995 <= close <= bull_ob * 1.005)
-    near_bear_ob = (bear_ob is not None and
-                    bear_ob * 0.995 <= close <= bear_ob * 1.005)
+    at_bull_ob = (bull_ob is not None and
+                  bull_ob * 0.995 <= close <= bull_ob * 1.005)
+    at_bear_ob = (bear_ob is not None and
+                  bear_ob * 0.995 <= close <= bear_ob * 1.005)
 
-    # FVG proximity: price must be within the FVG range (or very close to midpoint)
-    bull_fvg_valid = (bull_fvg and bull_fvg_mid is not None and
-                      abs(close - bull_fvg_mid) / bull_fvg_mid < 0.008)
-    bear_fvg_valid = (bear_fvg and bear_fvg_mid is not None and
-                      abs(close - bear_fvg_mid) / bear_fvg_mid < 0.008)
-
-    # BOS: 15-bar swing for SL placement
-    lb         = min(15, i - 1)
+    # 6. SL: swing low/high for risk calculation
+    lb         = min(swing_n * 2, i - 1)
     swing_high = highs[i - lb: i].max()
     swing_low  = lows[i - lb: i].min()
 
-    # Entry: EMA50 bias + price AT FVG zone OR AT OB zone
-    long_ok  = htf_bull and (bull_fvg_valid or near_bull_ob)
-    short_ok = htf_bear and (bear_fvg_valid or near_bear_ob)
+    # Entry: EMA50 confirms direction + recent BOS + price at FVG or OB
+    long_ok  = htf_bull and last_bull_bos != -1 and (at_bull_fvg or at_bull_ob)
+    short_ok = htf_bear and last_bear_bos != -1 and (at_bear_fvg or at_bear_ob)
 
     if long_ok:
-        entry = bull_fvg_mid if bull_fvg_mid else (bull_ob if bull_ob else close)
+        entry = bull_fvg_mid if at_bull_fvg else (bull_ob if at_bull_ob else close)
         sl    = round(swing_low * 0.999, 6)
         risk  = entry - sl
-        if risk <= 0 or risk > entry * 0.08:
+        if risk <= 0 or risk > entry * 0.05:
             return None
         return entry, sl, round(entry + risk * 2, 6), "long"
 
     if short_ok:
-        entry = bear_fvg_mid if bear_fvg_mid else (bear_ob if bear_ob else close)
+        entry = bear_fvg_mid if at_bear_fvg else (bear_ob if at_bear_ob else close)
         sl    = round(swing_high * 1.001, 6)
         risk  = sl - entry
-        if risk <= 0 or risk > entry * 0.08:
+        if risk <= 0 or risk > entry * 0.05:
             return None
         return entry, sl, round(entry - risk * 2, 6), "short"
 
