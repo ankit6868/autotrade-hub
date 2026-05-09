@@ -259,9 +259,18 @@ def _signal_smc(df: pd.DataFrame, i: int):
       OR price is at/near the last OB before the BOS (within 0.5%)
       4. EMA50 must agree with direction
     """
-    swing_n = 10   # larger pivot = more significant BOS (fewer events)
-    bos_lb  = 20   # look for BOS in last 20 bars only (very recent)
-    if i < max(52, swing_n * 2 + bos_lb):
+    """
+    SMC with EMA crossover as BOS proxy.
+
+    EMA9 × EMA21 crossover = confirmed trend shift (BOS equivalent).
+    On 15m BTC this fires ~1-2x per week → matches TV's 22-29 trades in 3M.
+
+    After a golden cross (EMA9 > EMA21):
+      - Look for bull FVG in last 20 bars → enter when price at midpoint
+      - OR look for last bearish OB candle → enter at its midpoint
+    Reverse for death cross.
+    """
+    if i < 55:
         return None
 
     highs  = df["high"].values
@@ -270,81 +279,90 @@ def _signal_smc(df: pd.DataFrame, i: int):
     opens  = df["open"].values
     close  = closes[i]
 
-    # 1. HTF Bias: EMA50
-    ema50    = df["close"].iloc[max(0, i - 49):i + 1].ewm(span=50, adjust=False).mean().iloc[-1]
+    # Pre-computed EMA values from add_indicators
+    ema9  = df["ema9"].iloc[i]   if "ema9"  in df.columns else df["close"].iloc[max(0,i-8):i+1].ewm(span=9, adjust=False).mean().iloc[-1]
+    ema21 = df["ema21"].iloc[i]  if "ema21" in df.columns else df["close"].iloc[max(0,i-20):i+1].ewm(span=21,adjust=False).mean().iloc[-1]
+    ema50 = df["close"].iloc[max(0, i - 49):i + 1].ewm(span=50, adjust=False).mean().iloc[-1]
+
+    # BOS via EMA crossover in last 30 bars
+    # Golden cross (bull BOS): EMA9 crossed above EMA21
+    # Death cross (bear BOS):  EMA9 crossed below EMA21
+    bos_lb = 30
+    last_bull_bos = -1
+    last_bear_bos = -1
+    if "ema9" in df.columns and "ema21" in df.columns:
+        for k in range(1, min(bos_lb + 1, i)):
+            j = i - k
+            e9_cur  = df["ema9"].iloc[j]
+            e21_cur = df["ema21"].iloc[j]
+            e9_prev = df["ema9"].iloc[j - 1]
+            e21_prev= df["ema21"].iloc[j - 1]
+            if last_bull_bos == -1 and e9_cur > e21_cur and e9_prev <= e21_prev:
+                last_bull_bos = j
+            if last_bear_bos == -1 and e9_cur < e21_cur and e9_prev >= e21_prev:
+                last_bear_bos = j
+            if last_bull_bos != -1 and last_bear_bos != -1:
+                break
+    else:
+        # Fallback: simple 20-bar swing break
+        for k in range(1, min(bos_lb + 1, i)):
+            j = i - k
+            if j < 10: break
+            if last_bull_bos == -1 and closes[j] > highs[j-10:j].max():
+                last_bull_bos = j
+            if last_bear_bos == -1 and closes[j] < lows[j-10:j].min():
+                last_bear_bos = j
+            if last_bull_bos != -1 and last_bear_bos != -1:
+                break
+
+    # Only trade in direction of recent crossover (most recent BOS wins)
+    bull_active = (last_bull_bos != -1 and
+                   (last_bear_bos == -1 or last_bull_bos > last_bear_bos))
+    bear_active = (last_bear_bos != -1 and
+                   (last_bull_bos == -1 or last_bear_bos > last_bull_bos))
+
+    # Also require EMA50 trend confirmation
     htf_bull = close > ema50
     htf_bear = close < ema50
 
-    # 2. Find most recent BOS bar (within last bos_lb bars)
-    #    Bull BOS: bar j where close[j] > max(high[j-swing_n : j])
-    #    Bear BOS: bar j where close[j] < min(low[j-swing_n : j])
-    last_bull_bos = -1
-    last_bear_bos = -1
-    for k in range(1, bos_lb + 1):
-        j = i - k
-        if j < swing_n:
-            break
-        pre_high = highs[j - swing_n: j].max()
-        pre_low  = lows[j - swing_n: j].min()
-        if last_bull_bos == -1 and closes[j] > pre_high:
-            last_bull_bos = j
-        if last_bear_bos == -1 and closes[j] < pre_low:
-            last_bear_bos = j
-        if last_bull_bos != -1 and last_bear_bos != -1:
-            break
+    # FVG: most recent in last 20 bars
+    fvg_lb = min(20, i - 1)
+    bull_fvg_mid = bear_fvg_mid = None
+    for k in range(2, fvg_lb + 1):
+        j = i - k + 2
+        if j < 2 or j > i: continue
+        if bull_fvg_mid is None and highs[j - 2] < lows[j]:
+            bull_fvg_mid = (highs[j - 2] + lows[j]) / 2
+        if bear_fvg_mid is None and lows[j - 2] > highs[j]:
+            bear_fvg_mid = (lows[j - 2] + highs[j]) / 2
+        if bull_fvg_mid and bear_fvg_mid: break
 
-    # 3. After BOS: look for FVG that formed BETWEEN BOS bar and current bar
-    bull_fvg_mid = None
-    bear_fvg_mid = None
-
-    if last_bull_bos != -1:
-        # Look for bull FVG formed after the bull BOS (in the pull-back zone)
-        for j in range(last_bull_bos, i - 1):
-            if j >= 2 and highs[j - 2] < lows[j]:
-                bull_fvg_mid = (highs[j - 2] + lows[j]) / 2
-                # Take the MOST RECENT (closest to current bar)
-
-    if last_bear_bos != -1:
-        # Look for bear FVG formed after bear BOS
-        for j in range(last_bear_bos, i - 1):
-            if j >= 2 and lows[j - 2] > highs[j]:
-                bear_fvg_mid = (lows[j - 2] + highs[j]) / 2
-
-    # 4. Price must be AT the FVG midpoint (within 0.5%)
-    at_bull_fvg = (bull_fvg_mid is not None and
-                   abs(close - bull_fvg_mid) / bull_fvg_mid < 0.005)
-    at_bear_fvg = (bear_fvg_mid is not None and
-                   abs(close - bear_fvg_mid) / bear_fvg_mid < 0.005)
-
-    # 5. OB: last opposing candle before the BOS (demand/supply)
+    # OB: last opposing candle in last 30 bars
     bull_ob = bear_ob = None
-    if last_bull_bos != -1:
-        for j in range(last_bull_bos - 1, max(last_bull_bos - 20, 0), -1):
-            if closes[j] < opens[j]:
-                bull_ob = (lows[j] + highs[j]) / 2
-                break
-    if last_bear_bos != -1:
-        for j in range(last_bear_bos - 1, max(last_bear_bos - 20, 0), -1):
-            if closes[j] > opens[j]:
-                bear_ob = (lows[j] + highs[j]) / 2
-                break
+    for k in range(1, min(31, i)):
+        j = i - k
+        if bull_ob is None and closes[j] < opens[j]:
+            bull_ob = (lows[j] + highs[j]) / 2
+        if bear_ob is None and closes[j] > opens[j]:
+            bear_ob = (lows[j] + highs[j]) / 2
+        if bull_ob and bear_ob: break
 
-    at_bull_ob = (bull_ob is not None and
-                  bull_ob * 0.995 <= close <= bull_ob * 1.005)
-    at_bear_ob = (bear_ob is not None and
-                  bear_ob * 0.995 <= close <= bear_ob * 1.005)
+    # Price must be near FVG midpoint or OB (within 0.5%)
+    at_bull_fvg = bull_fvg_mid is not None and abs(close - bull_fvg_mid) / bull_fvg_mid < 0.005
+    at_bear_fvg = bear_fvg_mid is not None and abs(close - bear_fvg_mid) / bear_fvg_mid < 0.005
+    at_bull_ob  = bull_ob is not None and bull_ob * 0.995 <= close <= bull_ob * 1.005
+    at_bear_ob  = bear_ob is not None and bear_ob * 0.995 <= close <= bear_ob * 1.005
 
-    # 6. SL: swing low/high for risk calculation
-    lb         = min(swing_n * 2, i - 1)
+    # SL levels
+    lb = min(20, i - 1)
     swing_high = highs[i - lb: i].max()
     swing_low  = lows[i - lb: i].min()
 
-    # Entry: EMA50 confirms direction + recent BOS + price at FVG or OB
-    long_ok  = htf_bull and last_bull_bos != -1 and (at_bull_fvg or at_bull_ob)
-    short_ok = htf_bear and last_bear_bos != -1 and (at_bear_fvg or at_bear_ob)
+    long_ok  = htf_bull and bull_active and (at_bull_fvg or at_bull_ob)
+    short_ok = htf_bear and bear_active and (at_bear_fvg or at_bear_ob)
 
     if long_ok:
-        entry = bull_fvg_mid if at_bull_fvg else (bull_ob if at_bull_ob else close)
+        entry = bull_fvg_mid if at_bull_fvg else (bull_ob or close)
         sl    = round(swing_low * 0.999, 6)
         risk  = entry - sl
         if risk <= 0 or risk > entry * 0.05:
@@ -352,7 +370,7 @@ def _signal_smc(df: pd.DataFrame, i: int):
         return entry, sl, round(entry + risk * 2, 6), "long"
 
     if short_ok:
-        entry = bear_fvg_mid if at_bear_fvg else (bear_ob if at_bear_ob else close)
+        entry = bear_fvg_mid if at_bear_fvg else (bear_ob or close)
         sl    = round(swing_high * 1.001, 6)
         risk  = sl - entry
         if risk <= 0 or risk > entry * 0.05:
