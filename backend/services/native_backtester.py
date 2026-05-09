@@ -300,17 +300,26 @@ def _signal_smc(df: pd.DataFrame, i: int):
         if bull_ob and bear_ob:
             break
 
-    near_bull_ob = bull_ob is not None and close <= bull_ob * 1.01
-    near_bear_ob = bear_ob is not None and close >= bear_ob * 0.99
+    # OB proximity: price must be AT the OB zone (within 0.5%)
+    near_bull_ob = (bull_ob is not None and
+                    bull_ob * 0.995 <= close <= bull_ob * 1.005)
+    near_bear_ob = (bear_ob is not None and
+                    bear_ob * 0.995 <= close <= bear_ob * 1.005)
 
-    # BOS: optional confirmation (used for SL placement, not entry filter)
+    # FVG proximity: price must be within the FVG range (or very close to midpoint)
+    bull_fvg_valid = (bull_fvg and bull_fvg_mid is not None and
+                      abs(close - bull_fvg_mid) / bull_fvg_mid < 0.008)
+    bear_fvg_valid = (bear_fvg and bear_fvg_mid is not None and
+                      abs(close - bear_fvg_mid) / bear_fvg_mid < 0.008)
+
+    # BOS: 15-bar swing for SL placement
     lb         = min(15, i - 1)
     swing_high = highs[i - lb: i].max()
     swing_low  = lows[i - lb: i].min()
 
-    # Entry: EMA50 bias + (FVG or OB) — no BOS required, matches TradingView
-    long_ok  = htf_bull and (bull_fvg or near_bull_ob)
-    short_ok = htf_bear and (bear_fvg or near_bear_ob)
+    # Entry: EMA50 bias + price AT FVG zone OR AT OB zone
+    long_ok  = htf_bull and (bull_fvg_valid or near_bull_ob)
+    short_ok = htf_bear and (bear_fvg_valid or near_bear_ob)
 
     if long_ok:
         entry = bull_fvg_mid if bull_fvg_mid else (bull_ob if bull_ob else close)
