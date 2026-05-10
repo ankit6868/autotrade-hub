@@ -102,7 +102,10 @@ def run_futures_backtest(
                        "1h": 3600, "4h": 14400}
         tf_secs = tf_secs_map.get(timeframe, 900)
         if strategy_name in ("SMCStrategyTV",):
-            cooldown_bars = 0     # TV SMC v2 has no cooldown
+            # TV has no artificial cooldown, but we use 4 bars minimum to prevent
+            # same-bar double-entry when BOS fires on adjacent candles.
+            # 4 bars × 15m = 1 hour minimum between trades.
+            cooldown_bars = 4
         else:
             cooldown_secs = 2 * 24 * 3600   # 2-day cooldown for other strategies
             cooldown_bars = max(1, int(cooldown_secs / tf_secs))

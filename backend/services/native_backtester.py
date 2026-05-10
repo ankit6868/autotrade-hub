@@ -416,24 +416,24 @@ def _signal_smc_tv(df: pd.DataFrame, i: int):
         return None
 
     # ── 2. BOS — price breaks above last pivot high (bull) / below pivot low (bear)
+    # TradingView fires a signal ONLY on the bar where price first crosses the level.
+    # We allow a 2-bar window (signal bar + 1 confirmation bar) to catch next-bar-open fills.
     prev_close = closes[i - 1]
-    bull_bos = (last_ph is not None and
-                prev_close <= last_ph and close > last_ph)   # crossover this bar
-    bear_bos = (last_pl is not None and
-                prev_close >= last_pl and close < last_pl)   # crossunder this bar
 
-    # If no fresh BOS this bar, check if we're within 3 bars of a recent BOS
-    # (TV entries can fire within a few bars of the BOS event)
-    if not bull_bos and not bear_bos:
-        # Allow entries up to 5 bars after a BOS event
-        for lag in range(1, 6):
-            j = i - lag
-            if j < 1: break
-            pc = closes[j - 1]
-            if last_ph is not None and pc <= last_ph and closes[j] > last_ph:
-                bull_bos = True; break
-            if last_pl is not None and pc >= last_pl and closes[j] < last_pl:
-                bear_bos = True; break
+    bull_bos = False
+    bear_bos = False
+
+    # Check this bar and the immediately previous bar for the crossover
+    for lag in range(0, 3):     # lag 0 = this bar, lag 1-2 = recent bars
+        j = i - lag
+        if j < 1: break
+        pc = closes[j - 1]
+        if last_ph is not None and not bull_bos and pc <= last_ph and closes[j] > last_ph:
+            bull_bos = True
+        if last_pl is not None and not bear_bos and pc >= last_pl and closes[j] < last_pl:
+            bear_bos = True
+        if bull_bos or bear_bos:
+            break   # only ONE direction per signal
 
     if not bull_bos and not bear_bos:
         return None
