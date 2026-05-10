@@ -184,11 +184,15 @@ def _signal_ema_scalping(df: pd.DataFrame, i: int):
 
 def _signal_simple_target(df: pd.DataFrame, i: int):
     """
-    SimpleTargetStrategy — bidirectional mean-reversion.
+    SimpleTargetStrategy — symmetric bidirectional mean-reversion.
 
-    LONG : RSI < 55 AND price near/below EMA20, OR RSI < 38 (strong oversold)
-    SHORT: RSI > 65 AND price above EMA20 × 1.005, OR RSI > 72 (strong overbought)
-    SL/TP: 1.5% / 3.0% (2:1 reward:risk)
+    LONG : RSI < 45 AND close < EMA20 (price pulling back below mean)
+        OR RSI < 30 (strong oversold regardless of EMA)
+    SHORT: RSI > 55 AND close > EMA20 (price pushing above mean)
+        OR RSI > 70 (strong overbought regardless of EMA)
+
+    Symmetric RSI thresholds (45/55) ensure balanced Long/Short signal count.
+    SL/TP set by user in backtest UI (1.5% / 3.0% default).
     """
     if i < 21:
         return None
@@ -197,18 +201,13 @@ def _signal_simple_target(df: pd.DataFrame, i: int):
     close = row["close"]
     ema20 = row.get("ema20", close)
 
-    # ── LONG ─────────────────────────────────────────────────────────────────
-    near_ema = close <= ema20 * 1.005
-    oversold = rsi < 38
-    mild_dip = rsi < 55 and near_ema
-    if oversold or mild_dip:
+    # ── LONG: dip below EMA20 with RSI cooling, or extreme oversold ──────────
+    if (rsi < 30) or (rsi < 45 and close < ema20):
         entry = close
         return entry, round(entry * 0.985, 8), round(entry * 1.030, 8), "long"
 
-    # ── SHORT ─────────────────────────────────────────────────────────────────
-    overbought = rsi > 72
-    mild_top   = rsi > 65 and not near_ema
-    if overbought or mild_top:
+    # ── SHORT: push above EMA20 with RSI hot, or extreme overbought ──────────
+    if (rsi > 70) or (rsi > 55 and close > ema20):
         entry = close
         return entry, round(entry * 1.015, 8), round(entry * 0.970, 8), "short"
 
