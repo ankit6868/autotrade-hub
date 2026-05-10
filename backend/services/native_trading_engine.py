@@ -864,18 +864,23 @@ class NativeTradingEngine:
 
     def get_open_positions(self) -> list[dict]:
         with self._lock:
-            return [
-                {
-                    "pair":      p.pair,
-                    "direction": p.direction,
-                    "entry":     round(p.entry, 6),
-                    "sl":        round(p.effective_sl, 6),
-                    "tp":        round(p.tp, 6),
-                    "stake":     round(p.size, 2),
-                    "opened_at": str(p.opened_at),
-                }
-                for p in self.positions.values()
-            ]
+            out = []
+            for p in self.positions.values():
+                # Include futures-specific fields if this is a FuturesPosition
+                liq = getattr(p, "liquidation_price", None)
+                lev = getattr(p, "leverage", 1)
+                out.append({
+                    "pair":              p.pair,
+                    "direction":         p.direction,
+                    "entry":             round(p.entry, 6),
+                    "sl":                round(p.effective_sl, 6),
+                    "tp":                round(p.tp, 6),
+                    "stake":             round(p.size, 2),
+                    "opened_at":         str(p.opened_at),
+                    "leverage":          lev,
+                    "liquidation_price": round(liq, 6) if liq else None,
+                })
+            return out
 
     def manual_entry(self, pair: str, direction: str = "long",
                      stake_override: float = 0) -> dict:
