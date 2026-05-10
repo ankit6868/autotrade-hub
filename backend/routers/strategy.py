@@ -430,3 +430,46 @@ def delete_strategy(
         fpath.unlink()
 
     return {"status": "deleted", "id": strategy_id}
+
+
+@router.post("/dedupe")
+def dedupe_strategies(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """
+    Delete duplicate user-created strategies, keeping only the most recent
+    instance of each unique name. Templates (is_template=True) are NEVER
+    touched — only user-uploaded strategies with duplicate names are pruned.
+    """
+    user_strategies = db.execute(
+        select(Strategy)
+        .where(Strategy.user_id == user_id, Strategy.is_template == False)  # noqa: E712
+        .order_by(Strategy.created_at.desc())
+    ).scalars().all()
+
+    seen_names: set[str] = set()
+    deleted_ids: list[int] = []
+    for s in user_strategies:
+        if s.name in seen_names:
+            # Older duplicate — delete it
+            fpath = USER_STRATEGIES_DIR / user_id / f"strategy_{s.id}.py"
+            if fpath.exists():
+                try:
+                    fpath.unlink()
+                except Exception:
+                    pass
+            deleted_ids.append(s.id)
+            db.delete(s)
+        else:
+            seen_names.add(s.name)
+
+    if deleted_ids:
+        db.commit()
+
+    return {
+        "status":     "ok",
+        "deleted":    len(deleted_ids),
+        "deleted_ids": deleted_ids,
+        "kept":       len(seen_names),
+    }
