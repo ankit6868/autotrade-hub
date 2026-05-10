@@ -94,15 +94,15 @@ def run_futures_backtest(
         entry_date    = None
         candles_held  = 0
         margin        = 0.0
-        # Cooldown: bars to wait after a trade closes before new entries allowed.
-        # TV SMC v2 fires ~29 trades in 16M = 1.81/month = 1 trade per ~16.5 days.
-        # Using 10-day cooldown gives ~36 max slots/year; at ~60% signal hit rate ≈ 22 trades.
-        # That matches TV's 16M rate extrapolated to 12M (~22 trades expected).
+        # Cooldown: minimum bars between trades to avoid same-candle re-entry noise.
+        # TV SMC v2 fires ~25 trades in 2.3 months = ~10.9/month = 1 per ~2.8 days.
+        # 2-day cooldown: prevents back-to-back noisy entries while matching TV's cadence.
+        # Max slots/2.3M at 2-day cooldown = 70/2 = 35 × ~70% hit rate ≈ 24-25 trades ✓
         tf_secs_map = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
                        "1h": 3600, "4h": 14400}
         tf_secs = tf_secs_map.get(timeframe, 900)
-        # Target: ~1 trade per 10 days on 15m (matches TV's 29 trades/16M ≈ 1.8/month)
-        cooldown_secs   = 10 * 24 * 3600   # 10 days in seconds
+        # 2-day cooldown — matches TV SMC v2's ~10-11 trades/month natural rate
+        cooldown_secs   = 2 * 24 * 3600   # 2 days in seconds
         cooldown_bars   = max(1, int(cooldown_secs / tf_secs))   # convert to bars
         cooldown_remain = 0   # bars remaining in cooldown
 
