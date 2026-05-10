@@ -117,19 +117,29 @@ def run_futures_backtest(
             # ── A. Execute pending entry at this bar's OPEN ───────────────
             # (TradingView: signal fires at bar[i-1] close → entry at bar[i] open)
             if pending_entry is not None and not in_trade:
-                direction, entry_price, sl, tp, liq_price, margin = pending_entry
+                direction, entry_price, sl, tp, liq_price, margin, use_signal_sltp = pending_entry
                 pending_entry = None
                 # Use actual open price as fill (matches TradingView's next-bar-open fill)
-                entry_price = bar_o
-                # Recalculate SL/TP distances relative to actual fill
-                sl_dist = abs(entry_price * stoploss_pct / 100)
-                tp_dist = abs(entry_price * take_profit_pct / 100)
-                if direction == "long":
-                    sl = entry_price - sl_dist
-                    tp = entry_price + tp_dist
+                actual_fill = bar_o
+
+                if use_signal_sltp:
+                    # SMCStrategyTV: keep structural SL/TP from the signal as-is.
+                    # SL/TP are absolute price levels (swing-based), not relative
+                    # to entry price — keep them even though fill is at next bar open.
+                    entry_price = actual_fill
+                    # sl and tp already set from signal
                 else:
-                    sl = entry_price + sl_dist
-                    tp = entry_price - tp_dist
+                    # Fixed-% strategies: recalculate SL/TP from actual fill price
+                    entry_price = actual_fill
+                    sl_dist = abs(entry_price * stoploss_pct / 100)
+                    tp_dist = abs(entry_price * take_profit_pct / 100)
+                    if direction == "long":
+                        sl = entry_price - sl_dist
+                        tp = entry_price + tp_dist
+                    else:
+                        sl = entry_price + sl_dist
+                        tp = entry_price - tp_dist
+
                 liq_price = _calc_liquidation(entry_price, direction, leverage)
                 entry_date   = row["date"]
                 candles_held = 0
@@ -267,8 +277,9 @@ def run_futures_backtest(
 
                     sig_liq = _calc_liquidation(sig_entry, sig_dir, leverage)
                     sig_margin = balance * risk_per_trade
+                    use_signal_sltp = strategy_name in ("SMCStrategyTV",)
                     # Queue entry for execution at NEXT bar's open
-                    pending_entry = (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq, sig_margin)
+                    pending_entry = (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq, sig_margin, use_signal_sltp)
 
     # ── Compute aggregate metrics ─────────────────────────────────────────
     if not all_trades:
