@@ -14,6 +14,7 @@ function FuturesPaperInner() {
   const [wallet, setWallet] = useState(1000);
   const [stoploss, setStoploss] = useState(1.5);   // SL ≤ TP for positive R:R
   const [takeProfit, setTakeProfit] = useState(3);  // 2:1 TP:SL is minimum for leveraged futures
+  const [maxPositionPct, setMaxPositionPct] = useState(5); // % of wallet per trade
   const [botStatus, setBotStatus] = useState<any>({ running: false });
   const [openTrades, setOpenTrades] = useState<any[]>([]);
   const [tradeHistory, setTradeHistory] = useState<any[]>([]);
@@ -65,7 +66,7 @@ function FuturesPaperInner() {
       const r = await api.futures.start({
         strategy_id: strategyId, mode: 'paper', pairs, leverage,
         timeframe, stoploss: -(stoploss / 100), wallet,
-        take_profit_pct: takeProfit, max_position_pct: 5,
+        take_profit_pct: takeProfit, max_position_pct: maxPositionPct,
       });
       if (r.error) setError(r.error); else refreshData();
     } catch (e) { setError(String(e)); }
@@ -138,15 +139,20 @@ function FuturesPaperInner() {
             <input className="input" type="number" value={wallet} onChange={e => setWallet(Number(e.target.value))} disabled={isRunning} />
           </div>
         </div>
-        <div className="grid grid-cols-2 gap-4 mb-4">
+        <div className="grid grid-cols-3 gap-4 mb-4">
           <div>
             <label className="label">Stop-Loss: {stoploss}% (liq at ~{(100 / leverage).toFixed(1)}%)</label>
             <input type="range" min={0.5} max={10} step={0.5} value={stoploss} onChange={e => setStoploss(Number(e.target.value))} disabled={isRunning} className="w-full accent-red-500 mt-2" />
-            <p className="text-xs text-orange-400 mt-1">⚠ With {leverage}x leverage, liquidation at ~{(100 / leverage).toFixed(1)}% move</p>
+            <p className="text-xs text-orange-400 mt-1">⚠ Liq at ~{(100 / leverage).toFixed(1)}% move</p>
           </div>
           <div>
-            <label className="label">Take-Profit: {takeProfit}% → leveraged: {(takeProfit * leverage).toFixed(1)}%</label>
+            <label className="label">Take-Profit: {takeProfit}% → {(takeProfit * leverage).toFixed(1)}% leveraged</label>
             <input type="range" min={0.1} max={10} step={0.1} value={takeProfit} onChange={e => setTakeProfit(Number(e.target.value))} disabled={isRunning} className="w-full accent-emerald-500 mt-2" />
+          </div>
+          <div>
+            <label className="label">Position Size: {maxPositionPct}% of wallet per trade</label>
+            <input type="range" min={1} max={50} step={1} value={maxPositionPct} onChange={e => setMaxPositionPct(Number(e.target.value))} disabled={isRunning} className="w-full accent-purple-500 mt-2" />
+            <p className="text-xs text-slate-400 mt-1">Each trade uses ${((wallet * maxPositionPct) / 100).toFixed(2)} USDT as margin</p>
           </div>
         </div>
         <div className="flex gap-3">
@@ -182,6 +188,7 @@ function FuturesPaperInner() {
           strategyName={strategies.find(s => s.id === strategyId)?.name || 'Strategy'}
           pair={pairs[0] || 'BTC/USDT'} timeframe={timeframe}
           isRunning={isRunning} isFutures={true}
+          manualStakePct={maxPositionPct}
         />
       )}
 

@@ -15,8 +15,9 @@ interface Props {
   pair: string;
   timeframe: string;
   isRunning: boolean;
-  isLive?: boolean;     // true = live trading, false/undefined = paper
-  isFutures?: boolean;  // true = futures engine (isolated from spot)
+  isLive?: boolean;        // true = live trading, false/undefined = paper
+  isFutures?: boolean;     // true = futures engine (isolated from spot)
+  manualStakePct?: number; // % of balance to use for manual entries (default 5)
   onManualBuy?: () => void;
   onManualSell?: () => void;
 }
@@ -159,7 +160,7 @@ function buildStatus(
   return { ready, conditions, recommendation: rec, fireCount: tradeCount, lastFired: lastTrade };
 }
 
-export default function StrategySignalMonitor({ strategyName, pair, timeframe, isRunning, isLive = false, isFutures = false, onManualBuy, onManualSell }: Props) {
+export default function StrategySignalMonitor({ strategyName, pair, timeframe, isRunning, isLive = false, isFutures = false, manualStakePct = 5, onManualBuy, onManualSell }: Props) {
   const [status, setStatus] = useState<SignalStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [buyLoading, setBuyLoading] = useState(false);
@@ -201,7 +202,7 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
       // isFutures=true → futures engine (market_type='futures', isolated DB rows)
       // isFutures=false → spot engine (market_type='spot')
       const res = isFutures
-        ? await api.futures.manualEntry(pair, 'long')
+        ? await api.futures.manualEntry(pair, 'long', manualStakePct)
         : await api.trade.manualEntry(pair, 'long');
       if (res?.entered) {
         const liqInfo = res.liq ? ` | Liq: ${res.liq}` : '';
@@ -223,7 +224,7 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
     setSellLoading(true);
     try {
       const res = isFutures
-        ? await api.futures.manualEntry(pair, 'short')
+        ? await api.futures.manualEntry(pair, 'short', manualStakePct)
         : await api.trade.manualEntry(pair, 'short');
       if (res?.entered) {
         const liqInfo = res.liq ? ` | Liq: ${res.liq}` : '';
@@ -314,21 +315,21 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
             </div>
           )}
 
-          {/* Manual Buy / Sell buttons */}
+          {/* Manual Long / Short (Futures) or Buy / Sell (Spot) buttons */}
           <div className="flex gap-3">
             <button
               onClick={handleManualBuy}
               disabled={buyLoading}
               className="flex-1 py-2.5 rounded-xl font-semibold text-sm border transition-all disabled:opacity-50 bg-emerald-500/15 border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/25"
             >
-              {buyLoading ? '⏳' : '⚡'} {buyLoading ? 'Buying...' : `Buy ${pair} Now`}
+              {buyLoading ? '⏳' : '⚡'} {buyLoading ? (isFutures ? 'Opening Long...' : 'Buying...') : (isFutures ? `Long ${pair}` : `Buy ${pair} Now`)}
             </button>
             <button
               onClick={handleManualSell}
               disabled={sellLoading}
               className="flex-1 py-2.5 rounded-xl font-semibold text-sm border transition-all disabled:opacity-50 bg-red-500/15 border-red-500/40 text-red-300 hover:bg-red-500/25"
             >
-              {sellLoading ? '⏳' : '📉'} {sellLoading ? 'Selling...' : `Sell ${pair} Now`}
+              {sellLoading ? '⏳' : '📉'} {sellLoading ? (isFutures ? 'Opening Short...' : 'Selling...') : (isFutures ? `Short ${pair}` : `Sell ${pair} Now`)}
             </button>
           </div>
 

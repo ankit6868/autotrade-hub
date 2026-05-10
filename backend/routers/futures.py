@@ -504,8 +504,8 @@ def futures_manual_entry(
     from datetime import datetime, timezone as _tz
 
     pair      = req.get("pair", "BTC/USDT")
-    direction = req.get("direction", "long")
-    stake_pct = float(req.get("stake_pct", 5.0))
+    direction = req.get("direction", "long").lower()   # "long" or "short"
+    stake_pct = float(req.get("stake_pct", 5.0))       # % of balance as margin
 
     eng = futures_engine_registry.for_user(user_id)
 
@@ -513,8 +513,10 @@ def futures_manual_entry(
     leverage = eng._leverage if eng._leverage else 10
     mode     = eng._mode     if eng._mode     else "paper"
     balance  = eng.balance   if eng.balance   else 1000.0
-    sl_pct   = abs(eng._stoploss or 0.03)
-    tp_pct   = eng._take_profit_pct if hasattr(eng, "_take_profit_pct") and eng._take_profit_pct else 1.5
+    sl_pct   = abs(eng._stoploss or 0.015)
+    # Fix: engine stores _take_profit as decimal (0.03), not percent (3.0)
+    _raw_tp = getattr(eng, "_take_profit", None) or getattr(eng, "_take_profit_pct", None)
+    tp_pct   = float(_raw_tp) * 100 if (_raw_tp and float(_raw_tp) <= 1) else (float(_raw_tp) if _raw_tp else 3.0)
 
     # Fetch current price from KuCoin
     try:
@@ -643,7 +645,12 @@ def futures_force_close(
         t.exit_time   = now
         t.exit_reason = "force_closed"
         t.status      = "closed"
-        t.profit_pct  = round((ep - t.entry_price) / t.entry_price * 100 * (t.leverage or 1), 4)
+        # Fix: SHORT P&L is inverted vs LONG
+        side = getattr(t, "side", "long") or "long"
+        if side == "short":
+            t.profit_pct = round((t.entry_price - ep) / t.entry_price * 100 * (t.leverage or 1), 4)
+        else:
+            t.profit_pct = round((ep - t.entry_price) / t.entry_price * 100 * (t.leverage or 1), 4)
         t.profit_abs  = round(t.amount * t.profit_pct / 100, 4)
         total_pnl    += t.profit_abs
 

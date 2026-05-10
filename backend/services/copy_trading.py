@@ -4,9 +4,15 @@ CopyTradingService — broadcast master signals and auto-fill followers.
 Flow:
   1. Master engine opens/closes a position → calls broadcast()
   2. broadcast() inserts CopySignal row (expires in 5 min)
-  3. For each active CopySubscription, open_copy_trade() is called
-  4. Follower engine enters the same position (scaled by risk_multiplier)
+  3. For each active CopySubscription, _execute_for_follower() is called
+  4. Follower engine enters the same position (scaled by eff_stake_pct)
   5. All copied trades have copy_source_id set in Trade row
+
+Fixes applied:
+  - Direction (long/short) is properly forwarded to follower engines
+  - stake_pct from subscription override is used for position sizing
+  - Futures copy trades correctly create FuturesPosition (not spot)
+  - update_signal_result works by pair lookup, not fragile signal_id
 """
 from __future__ import annotations
 
@@ -23,7 +29,7 @@ class CopyTradingService:
         self,
         master_user_id: str,
         pair: str,
-        direction: str,
+        direction: str,                     # "long" or "short"
         entry_price: float,
         sl_price: float,
         tp_price: float,
@@ -32,8 +38,16 @@ class CopyTradingService:
         leverage: int = 1,
         strategy_name: str = "",
         signal_type: str = "entry",
+        db_signal_id: Optional[int] = None,  # master's DB trade id for reference
+        # accept alternate kwarg spelling from engine
+        master_id: Optional[str] = None,
     ) -> Optional[int]:
         """Insert a CopySignal row and dispatch to all active followers."""
+        # Allow both 'master_user_id' and 'master_id' spellings
+        master_user_id = master_user_id or master_id or ""
+        if not master_user_id:
+            return None
+
         try:
             from backend.models.database import SessionLocal
             from backend.models.trade import CopySignal, CopySubscription
@@ -94,46 +108,106 @@ class CopyTradingService:
         entry_price: float, sl: float, tp: float, stake_pct: float,
         market_type: str, leverage: int, signal_time: datetime,
     ):
-        """Enter a copy trade for one follower."""
-        from .native_trading_engine import native_engine_registry
-        from .futures_engine import futures_engine_registry
+        """
+        Enter a copy trade for one follower.
+        Properly forwards direction (long/short) and stake_pct.
+        """
+        from .futures_engine import futures_engine_registry, FuturesPosition
+        from .native_trading_engine import native_engine_registry, _persist_open_trade
 
-        # Cap leverage at subscriber's max
-        eff_leverage = min(leverage, sub.max_leverage or 10)
-        # Use override stake or master's stake
-        eff_stake_pct = sub.stake_override_pct or stake_pct
+        # Cap leverage at subscriber's max; use override stake if set
+        eff_leverage  = min(leverage, sub.max_leverage or 10)
+        eff_stake_pct = float(sub.stake_override_pct or stake_pct)
+
+        now = datetime.now(timezone.utc)
 
         if market_type == "futures":
             eng = futures_engine_registry.for_user(sub.follower_user_id)
             if not eng.is_running:
-                # Auto-start in paper futures for copy
+                # Auto-start follower's futures engine in paper mode
                 eng.start_futures(
                     strategy_name="CopyTrade",
                     pairs=[pair],
                     leverage=eff_leverage,
                     mode=sub.copy_mode or "paper",
                 )
+
+            # Create a FuturesPosition directly (correct for SHORT support)
+            stake  = (eng.balance or 1000.0) * (eff_stake_pct / 100)
+            pos    = FuturesPosition(
+                pair=pair, direction=direction,
+                entry=entry_price, sl=sl, tp=tp,
+                size=stake, leverage=eff_leverage,
+                opened_at=now,
+                trade_id=f"copy-{signal_id}-{sub.follower_user_id}",
+            )
+            mode = eng._mode or sub.copy_mode or "paper"
+            pos.db_id = _persist_open_trade(
+                sub.follower_user_id, pos, mode, None,
+                leverage=eff_leverage, market_type="futures",
+            )
+            with eng._lock:
+                eng.positions[pos.trade_id] = pos
+                eng.balance = max(0.0, (eng.balance or 1000.0) - stake)
+
+            log.info("[copy] futures follower %s: %s %s @ %.4f lev=%dx",
+                     sub.follower_user_id, direction, pair, entry_price, eff_leverage)
+
         else:
+            # Spot copy trade
             eng = native_engine_registry.for_user(sub.follower_user_id)
             if not eng.is_running:
                 eng._mode = sub.copy_mode or "paper"
                 eng.balance = eng._wallet or 1000.0
 
-        result = eng.manual_entry(pair, direction)
-        log.info("[copy] follower %s: %s", sub.follower_user_id, result)
+            # For spot, call manual_entry with direction
+            try:
+                result = eng.manual_entry(pair, direction)
+                log.info("[copy] spot follower %s: %s", sub.follower_user_id, result)
+            except Exception as e:
+                log.error("[copy] spot manual_entry error for %s: %s", sub.follower_user_id, e)
 
-    def update_signal_result(self, signal_id: int, profit_pct: float, profit_abs: float):
-        """Update copy signal with closed trade P&L."""
+    def update_signal_result(
+        self,
+        master_id: Optional[str] = None,
+        pair: Optional[str] = None,
+        exit_price: Optional[float] = None,
+        pnl_pct: Optional[float] = None,
+        reason: Optional[str] = None,
+        # legacy signature support
+        signal_id: Optional[int] = None,
+        profit_pct: Optional[float] = None,
+        profit_abs: Optional[float] = None,
+    ):
+        """Update copy signal with closed trade P&L. Supports both new and legacy calls."""
+        effective_profit_pct = pnl_pct or profit_pct or 0.0
+        effective_profit_abs = profit_abs or 0.0
+
         try:
             from backend.models.database import SessionLocal
             from backend.models.trade import CopySignal
+            from sqlalchemy import select, desc
             db = SessionLocal()
             try:
-                sig = db.get(CopySignal, signal_id)
+                sig = None
+                # Try to find the open signal by pair + master
+                if master_id and pair:
+                    sig = db.execute(
+                        select(CopySignal).where(
+                            CopySignal.master_user_id == master_id,
+                            CopySignal.pair == pair,
+                            CopySignal.signal_type == "entry",
+                            CopySignal.closed_at.is_(None),
+                        ).order_by(desc(CopySignal.broadcasted_at))
+                    ).scalar_one_or_none()
+                # Fallback: by signal_id
+                if sig is None and signal_id:
+                    sig = db.get(CopySignal, signal_id)
+
                 if sig:
-                    sig.profit_pct = profit_pct
-                    sig.profit_abs = profit_abs
-                    sig.closed_at  = datetime.now(timezone.utc)
+                    sig.profit_pct  = effective_profit_pct
+                    sig.profit_abs  = effective_profit_abs
+                    sig.closed_at   = datetime.now(timezone.utc)
                     sig.signal_type = "exit"
                     db.commit()
             finally:

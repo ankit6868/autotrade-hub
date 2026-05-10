@@ -22,6 +22,7 @@ function FuturesLiveInner() {
   const [leverage, setLeverage]         = useState(5);
   const [stoploss, setStoploss]         = useState(1.5);  // SL < TP for favorable R:R
   const [takeProfit, setTakeProfit]     = useState(3.0);  // 2:1 TP:SL minimum for live futures
+  const [maxPositionPct, setMaxPositionPct] = useState(5); // % of balance per trade (conservative for live)
   const [acknowledged, setAcknowledged] = useState<Record<string, boolean>>({});
   const allAcknowledged = SAFETY_ITEMS.every(i => acknowledged[i.id]);
 
@@ -41,7 +42,10 @@ function FuturesLiveInner() {
     try {
       const b = await api.futures.balance();
       setLiveBalance(b);
-    } catch { /* no credentials yet */ }
+    } catch (e) {
+      // Show error in UI instead of silently swallowing it
+      setLiveBalance({ error: 'Could not fetch balance — check API key in Setup', balance: 0 });
+    }
   }, []);
 
   // ── Data refresh (polls every 10 s) ──────────────────────────────────────
@@ -105,7 +109,9 @@ function FuturesLiveInner() {
         timeframe,
         stoploss:         -(stoploss / 100),
         take_profit_pct:  takeProfit,
-        max_position_pct: 5,
+        max_position_pct: maxPositionPct,
+        // For live: pass actual KuCoin balance as wallet so position sizing is correct
+        wallet: liveBalance?.balance ?? 1000,
       });
       if (r.error) setError(r.error);
       else refreshData();
@@ -295,7 +301,7 @@ function FuturesLiveInner() {
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-4 mb-4">
+        <div className="grid grid-cols-3 gap-4 mb-4">
           <div>
             <label className="label">Stop-Loss: {stoploss}%</label>
             <input
@@ -304,6 +310,7 @@ function FuturesLiveInner() {
               disabled={isRunning}
               className="w-full accent-red-500 mt-2"
             />
+            <p className="text-xs text-orange-400 mt-1">⚠ Liq at ~{(100 / leverage).toFixed(1)}% move</p>
           </div>
           <div>
             <label className="label">
@@ -315,6 +322,18 @@ function FuturesLiveInner() {
               disabled={isRunning}
               className="w-full accent-emerald-500 mt-2"
             />
+          </div>
+          <div>
+            <label className="label">Position Size: {maxPositionPct}% per trade</label>
+            <input
+              type="range" min={1} max={20} step={1} value={maxPositionPct}
+              onChange={e => setMaxPositionPct(Number(e.target.value))}
+              disabled={isRunning}
+              className="w-full accent-purple-500 mt-2"
+            />
+            <p className="text-xs text-slate-400 mt-1">
+              ${(((liveBalance?.balance ?? 0) * maxPositionPct) / 100).toFixed(2)} USDT margin per trade
+            </p>
           </div>
         </div>
 
@@ -387,6 +406,7 @@ function FuturesLiveInner() {
           isRunning={isRunning}
           isLive={true}
           isFutures={true}
+          manualStakePct={maxPositionPct}
         />
       )}
 

@@ -210,6 +210,18 @@ class FuturesEngine(NativeTradingEngine):
                                               self._strategy_id, pos.db_id)
                         if self._mode == "live":
                             self._place_live_exit(pair, pos, exit_price)
+                        # ── Notify copy followers of close ────────────────
+                        try:
+                            from backend.services.copy_trading import copy_trading_service
+                            copy_trading_service.update_signal_result(
+                                master_id=self.user_id,
+                                pair=pair,
+                                exit_price=exit_price,
+                                pnl_pct=pos.pnl_pct,
+                                reason=reason,
+                            )
+                        except Exception:
+                            pass
 
                 # Position limit guards
                 if len(self.positions) >= self._max_open:
@@ -280,6 +292,25 @@ class FuturesEngine(NativeTradingEngine):
                 log.info("[%s] %s", self.user_id, self.last_action)
                 if self._mode == "live":
                     self._place_live_entry(pair, pos)
+
+                # ── Broadcast to copy-trading followers ─────────────────
+                try:
+                    from backend.services.copy_trading import copy_trading_service
+                    copy_trading_service.broadcast(
+                        master_id=self.user_id,
+                        signal_type="entry",
+                        pair=pair,
+                        direction=direction,
+                        entry_price=entry,
+                        sl_price=sl,
+                        tp_price=tp,
+                        leverage=self._leverage,
+                        market_type="futures",
+                        stake_pct=self._risk_pct * 100,
+                        db_signal_id=pos.db_id,
+                    )
+                except Exception as _cte:
+                    log.debug("[%s] copy-broadcast skipped: %s", self.user_id, _cte)
 
     # ── Live order placement via KuCoin Futures API ─────────────────────
 
