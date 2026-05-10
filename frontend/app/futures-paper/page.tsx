@@ -189,6 +189,7 @@ function FuturesPaperInner() {
           pair={pairs[0] || 'BTC/USDT'} timeframe={timeframe}
           isRunning={isRunning} isFutures={true}
           manualStakePct={maxPositionPct}
+          manualLeverage={leverage}
         />
       )}
 

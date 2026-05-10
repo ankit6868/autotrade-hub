@@ -18,6 +18,7 @@ interface Props {
   isLive?: boolean;        // true = live trading, false/undefined = paper
   isFutures?: boolean;     // true = futures engine (isolated from spot)
   manualStakePct?: number; // % of balance to use for manual entries (default 5)
+  manualLeverage?: number; // leverage for standalone manual entries (default 10)
   onManualBuy?: () => void;
   onManualSell?: () => void;
 }
@@ -160,7 +161,7 @@ function buildStatus(
   return { ready, conditions, recommendation: rec, fireCount: tradeCount, lastFired: lastTrade };
 }
 
-export default function StrategySignalMonitor({ strategyName, pair, timeframe, isRunning, isLive = false, isFutures = false, manualStakePct = 5, onManualBuy, onManualSell }: Props) {
+export default function StrategySignalMonitor({ strategyName, pair, timeframe, isRunning, isLive = false, isFutures = false, manualStakePct = 5, manualLeverage = 10, onManualBuy, onManualSell }: Props) {
   const [status, setStatus] = useState<SignalStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [buyLoading, setBuyLoading] = useState(false);
@@ -202,7 +203,7 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
       // isFutures=true → futures engine (market_type='futures', isolated DB rows)
       // isFutures=false → spot engine (market_type='spot')
       const res = isFutures
-        ? await api.futures.manualEntry(pair, 'long', manualStakePct)
+        ? await api.futures.manualEntry(pair, 'long', manualStakePct, manualLeverage)
         : await api.trade.manualEntry(pair, 'long');
       if (res?.entered) {
         const liqInfo = res.liq ? ` | Liq: ${res.liq}` : '';
@@ -224,7 +225,7 @@ export default function StrategySignalMonitor({ strategyName, pair, timeframe, i
     setSellLoading(true);
     try {
       const res = isFutures
-        ? await api.futures.manualEntry(pair, 'short', manualStakePct)
+        ? await api.futures.manualEntry(pair, 'short', manualStakePct, manualLeverage)
         : await api.trade.manualEntry(pair, 'short');
       if (res?.entered) {
         const liqInfo = res.liq ? ` | Liq: ${res.liq}` : '';

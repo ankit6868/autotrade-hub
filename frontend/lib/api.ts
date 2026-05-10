@@ -187,10 +187,10 @@ export const api = {
     },
     forceClose: (pair: string) =>
       request<any>(`/api/futures/force-close/${pair}`, { method: 'POST' }),
-    manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5) =>
+    manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5, leverage?: number) =>
       request<any>('/api/futures/manual-entry', {
         method: 'POST',
-        body: JSON.stringify({ pair, direction, stake_pct: stakePct }),
+        body: JSON.stringify({ pair, direction, stake_pct: stakePct, ...(leverage ? { leverage } : {}) }),
       }),
   },
 

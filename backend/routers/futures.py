@@ -503,14 +503,17 @@ def futures_manual_entry(
     from backend.services.futures_engine import FuturesPosition, _calc_liquidation_price
     from datetime import datetime, timezone as _tz
 
-    pair      = req.get("pair", "BTC/USDT")
-    direction = req.get("direction", "long").lower()   # "long" or "short"
-    stake_pct = float(req.get("stake_pct", 5.0))       # % of balance as margin
+    pair          = req.get("pair", "BTC/USDT")
+    direction     = req.get("direction", "long").lower()   # "long" or "short"
+    stake_pct     = float(req.get("stake_pct", 5.0))       # % of balance as margin
+    req_leverage  = req.get("leverage")                    # optional override from UI
 
     eng = futures_engine_registry.for_user(user_id)
 
     # Default sensible values if engine hasn't been started yet
-    leverage = eng._leverage if eng._leverage else 10
+    # NOTE: eng._leverage defaults to 1 (not None), so check > 1 to detect "not configured"
+    # UI can also pass leverage directly (for standalone manual entries without bot running)
+    leverage = int(req_leverage) if req_leverage else (eng._leverage if (eng._leverage and eng._leverage > 1) else 10)
     mode     = eng._mode     if eng._mode     else "paper"
     balance  = eng.balance   if eng.balance   else 1000.0
     sl_pct   = abs(eng._stoploss or 0.015)

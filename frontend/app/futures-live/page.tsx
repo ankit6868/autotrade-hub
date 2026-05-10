@@ -407,6 +407,7 @@ function FuturesLiveInner() {
           isLive={true}
           isFutures={true}
           manualStakePct={maxPositionPct}
+          manualLeverage={leverage}
         />
       )}
 
