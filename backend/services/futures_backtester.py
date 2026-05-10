@@ -94,17 +94,19 @@ def run_futures_backtest(
         entry_date    = None
         candles_held  = 0
         margin        = 0.0
-        # Cooldown: minimum bars between trades to avoid same-candle re-entry noise.
-        # TV SMC v2 fires ~25 trades in 2.3 months = ~10.9/month = 1 per ~2.8 days.
-        # 2-day cooldown: prevents back-to-back noisy entries while matching TV's cadence.
-        # Max slots/2.3M at 2-day cooldown = 70/2 = 35 × ~70% hit rate ≈ 24-25 trades ✓
+        # Cooldown: minimum bars between trades.
+        # SMCStrategyTV uses NO cooldown (matches TradingView behaviour exactly —
+        # TV allows back-to-back trades when conditions re-trigger).
+        # Other strategies use a 2-day cooldown to prevent signal noise.
         tf_secs_map = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
                        "1h": 3600, "4h": 14400}
         tf_secs = tf_secs_map.get(timeframe, 900)
-        # 2-day cooldown — matches TV SMC v2's ~10-11 trades/month natural rate
-        cooldown_secs   = 2 * 24 * 3600   # 2 days in seconds
-        cooldown_bars   = max(1, int(cooldown_secs / tf_secs))   # convert to bars
-        cooldown_remain = 0   # bars remaining in cooldown
+        if strategy_name in ("SMCStrategyTV",):
+            cooldown_bars = 0     # TV SMC v2 has no cooldown
+        else:
+            cooldown_secs = 2 * 24 * 3600   # 2-day cooldown for other strategies
+            cooldown_bars = max(1, int(cooldown_secs / tf_secs))
+        cooldown_remain = 0
 
         n = len(df)
         for i in range(3, n):
@@ -246,15 +248,23 @@ def run_futures_backtest(
                 sig = signal_fn(df, i)
                 if sig:
                     sig_entry, sl_raw, tp_raw, sig_dir = sig
-                    # Override with user-defined SL/TP %
-                    sl_dist = sig_entry * stoploss_pct / 100
-                    tp_dist = sig_entry * take_profit_pct / 100
-                    if sig_dir == "long":
-                        sig_sl = sig_entry - sl_dist
-                        sig_tp = sig_entry + tp_dist
+
+                    # SMCStrategyTV uses structural (dynamic) SL/TP from signal.
+                    # All other strategies use the user-defined fixed SL/TP %.
+                    if strategy_name in ("SMCStrategyTV",):
+                        sig_sl = sl_raw
+                        sig_tp = tp_raw
                     else:
-                        sig_sl = sig_entry + sl_dist
-                        sig_tp = sig_entry - tp_dist
+                        # Override with user-defined SL/TP %
+                        sl_dist = sig_entry * stoploss_pct / 100
+                        tp_dist = sig_entry * take_profit_pct / 100
+                        if sig_dir == "long":
+                            sig_sl = sig_entry - sl_dist
+                            sig_tp = sig_entry + tp_dist
+                        else:
+                            sig_sl = sig_entry + sl_dist
+                            sig_tp = sig_entry - tp_dist
+
                     sig_liq = _calc_liquidation(sig_entry, sig_dir, leverage)
                     sig_margin = balance * risk_per_trade
                     # Queue entry for execution at NEXT bar's open

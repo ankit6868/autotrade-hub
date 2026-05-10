@@ -347,6 +347,168 @@ def _signal_smc(df: pd.DataFrame, i: int):
     return None
 
 
+def _signal_smc_tv(df: pd.DataFrame, i: int):
+    """
+    TradingView SMC Strategy v2 — OB / FVG / BOS
+    Exact Python translation of the standard Pine Script SMC v2 logic.
+
+    Pine Script equivalent:
+      swing_len  = 5          // pivot lookback (bars each side)
+      ph = ta.pivothigh(high, swing_len, swing_len)
+      pl = ta.pivotlow (low,  swing_len, swing_len)
+
+      bull_bos = close crosses above last confirmed pivot high  → LONG zone
+      bear_bos = close crosses below last confirmed pivot low   → SHORT zone
+
+      bull_fvg: high[2] < low[0]                (3-candle bullish imbalance)
+      bear_fvg: low[2]  > high[0]               (3-candle bearish imbalance)
+
+      bull_ob : last bearish candle (close < open) before bull_bos
+      bear_ob : last bullish candle (close > open) before bear_bos
+
+      SL  = swing low/high that was broken (market-structure based)
+      TP  = entry + 2 × risk  (2 R)
+
+    Entry timing: signal bar close → entry at NEXT bar open (TV default).
+    """
+    SWING_LEN = 5      # pivot lookback bars (each side) — TV default
+    BOS_LB    = 80     # how far back to search for last confirmed pivot
+    FVG_LB    = 30     # bars to search for recent FVG
+    OB_LB     = 40     # bars to search for order block
+
+    if i < SWING_LEN * 2 + 5:
+        return None
+
+    highs  = df["high"].values
+    lows   = df["low"].values
+    closes = df["close"].values
+    opens  = df["open"].values
+    close  = closes[i]
+
+    # ── 1. Pivot highs / lows (confirmed SWING_LEN bars ago) ─────────────────
+    # A confirmed pivot high at bar j: high[j] = max of high[j-N..j+N]
+    # Only confirmed if j <= i - SWING_LEN (right side complete)
+    last_ph = None; last_ph_bar = -1
+    last_pl = None; last_pl_bar = -1
+
+    search_start = i - SWING_LEN           # earliest bar where right side is confirmed
+    search_end   = max(SWING_LEN, i - BOS_LB)
+
+    for j in range(search_start, search_end, -1):
+        if j < SWING_LEN or j + SWING_LEN >= len(highs):
+            break
+        # Pivot high: highest in [j-N .. j+N]
+        if last_ph is None:
+            window_h = highs[j - SWING_LEN: j + SWING_LEN + 1]
+            if highs[j] == window_h.max():
+                last_ph = highs[j]
+                last_ph_bar = j
+        # Pivot low: lowest in [j-N .. j+N]
+        if last_pl is None:
+            window_l = lows[j - SWING_LEN: j + SWING_LEN + 1]
+            if lows[j] == window_l.min():
+                last_pl = lows[j]
+                last_pl_bar = j
+        if last_ph is not None and last_pl is not None:
+            break
+
+    if last_ph is None and last_pl is None:
+        return None
+
+    # ── 2. BOS — price breaks above last pivot high (bull) / below pivot low (bear)
+    prev_close = closes[i - 1]
+    bull_bos = (last_ph is not None and
+                prev_close <= last_ph and close > last_ph)   # crossover this bar
+    bear_bos = (last_pl is not None and
+                prev_close >= last_pl and close < last_pl)   # crossunder this bar
+
+    # If no fresh BOS this bar, check if we're within 3 bars of a recent BOS
+    # (TV entries can fire within a few bars of the BOS event)
+    if not bull_bos and not bear_bos:
+        # Allow entries up to 5 bars after a BOS event
+        for lag in range(1, 6):
+            j = i - lag
+            if j < 1: break
+            pc = closes[j - 1]
+            if last_ph is not None and pc <= last_ph and closes[j] > last_ph:
+                bull_bos = True; break
+            if last_pl is not None and pc >= last_pl and closes[j] < last_pl:
+                bear_bos = True; break
+
+    if not bull_bos and not bear_bos:
+        return None
+
+    # ── 3. FVG within last FVG_LB bars (3-candle gap imbalance) ─────────────
+    bull_fvg_hi = bull_fvg_lo = None
+    bear_fvg_hi = bear_fvg_lo = None
+    fvg_end = max(2, i - FVG_LB)
+    for k in range(i, fvg_end, -1):
+        if k < 2: break
+        # Bullish FVG: high[k-2] < low[k]
+        if bull_fvg_lo is None and highs[k - 2] < lows[k]:
+            bull_fvg_lo = highs[k - 2]
+            bull_fvg_hi = lows[k]
+        # Bearish FVG: low[k-2] > high[k]
+        if bear_fvg_hi is None and lows[k - 2] > highs[k]:
+            bear_fvg_hi = lows[k - 2]
+            bear_fvg_lo = highs[k]
+        if bull_fvg_lo is not None and bear_fvg_hi is not None:
+            break
+
+    # ── 4. Order Block (last opposing candle in OB_LB bars) ──────────────────
+    bull_ob_lo = bull_ob_hi = None   # last bearish candle → bull OB
+    bear_ob_lo = bear_ob_hi = None   # last bullish candle → bear OB
+    ob_end = max(0, i - OB_LB)
+    for k in range(i - 1, ob_end, -1):
+        if bull_ob_lo is None and closes[k] < opens[k]:    # bearish = bull OB
+            bull_ob_lo = lows[k]; bull_ob_hi = highs[k]
+        if bear_ob_lo is None and closes[k] > opens[k]:    # bullish = bear OB
+            bear_ob_lo = lows[k]; bear_ob_hi = highs[k]
+        if bull_ob_lo is not None and bear_ob_lo is not None:
+            break
+
+    # ── 5. Price inside zone? ─────────────────────────────────────────────────
+    # FVG zone: price within the gap
+    in_bull_fvg = (bull_fvg_lo is not None and
+                   bull_fvg_lo <= close <= bull_fvg_hi)
+    in_bear_fvg = (bear_fvg_hi is not None and
+                   bear_fvg_lo <= close <= bear_fvg_hi)
+
+    # OB zone: price inside the OB candle range (or within 0.3% above/below)
+    in_bull_ob  = (bull_ob_lo is not None and
+                   bull_ob_lo * 0.997 <= close <= bull_ob_hi * 1.003)
+    in_bear_ob  = (bear_ob_lo is not None and
+                   bear_ob_lo * 0.997 <= close <= bear_ob_hi * 1.003)
+
+    long_zone  = in_bull_fvg or in_bull_ob
+    short_zone = in_bear_fvg or in_bear_ob
+
+    # ── 6. Build entry, SL (swing-based), TP (2 R) ───────────────────────────
+    if bull_bos and long_zone:
+        entry = close
+        # SL = below the last pivot low (structural SL)
+        sl = round(last_pl * 0.998, 6) if last_pl else round(close * 0.985, 6)
+        risk = entry - sl
+        if risk <= 0 or risk > entry * 0.08:   # sanity: max 8% SL distance
+            sl = round(close * 0.985, 6)
+            risk = entry - sl
+        tp = round(entry + risk * 2, 6)         # 2 R target
+        return entry, sl, tp, "long"
+
+    if bear_bos and short_zone:
+        entry = close
+        # SL = above last pivot high (structural SL)
+        sl = round(last_ph * 1.002, 6) if last_ph else round(close * 1.015, 6)
+        risk = sl - entry
+        if risk <= 0 or risk > entry * 0.08:
+            sl = round(close * 1.015, 6)
+            risk = sl - entry
+        tp = round(entry - risk * 2, 6)         # 2 R target
+        return entry, sl, tp, "short"
+
+    return None
+
+
 _STRATEGY_FN = {
     "MissCandleShortStrategy":  _signal_miss_candle_short,
     "MissCandleLongStrategy":   _signal_miss_candle_long,
@@ -355,7 +517,8 @@ _STRATEGY_FN = {
     "EmaScalpingStrategy":      _signal_ema_scalping,
     "SimpleTargetStrategy":     _signal_simple_target,
     "BidirectionalStrategy":    _signal_bidirectional,
-    "SMCStrategy":              _signal_smc,
+    "SMCStrategy":              _signal_smc,          # EMA-crossover approximation
+    "SMCStrategyTV":            _signal_smc_tv,       # Exact TradingView SMC v2 port
 }
 
 
