@@ -27,6 +27,8 @@ function EditorContent() {
   const [aiLoading, setAiLoading] = useState(false);
   const [strategies, setStrategies] = useState<Record<string, unknown>[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(strategyId ? Number(strategyId) : null);
+  const [msg, setMsg] = useState('');
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
 
   useEffect(() => {
     loadStrategies();
@@ -131,12 +133,15 @@ function EditorContent() {
           <input className="input max-w-xs" value={name} onChange={(e) => setName(e.target.value)} placeholder="Strategy name" />
           <button
             onClick={async () => {
-              if (!confirm('Remove duplicate user strategies (keeps newest of each name)?')) return;
               try {
                 const r = await api.strategy.dedupe();
-                alert(`Removed ${r.deleted ?? 0} duplicate strategies. ${r.kept ?? 0} unique kept.`);
+                setMsg(`✅ Cleaned: removed ${r.deleted ?? 0} duplicate(s), kept ${r.kept ?? 0} unique strategies`);
+                setTimeout(() => setMsg(''), 5000);
                 loadStrategies();
-              } catch (e) { alert(`Error: ${e}`); }
+              } catch (e) {
+                setMsg(`❌ Error: ${e}`);
+                setTimeout(() => setMsg(''), 5000);
+              }
             }}
             className="px-3 py-2 text-xs rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 transition"
             title="Remove duplicate user strategies (templates are never touched)"
@@ -146,17 +151,32 @@ function EditorContent() {
           {selectedId && (
             <button
               onClick={async () => {
-                if (!confirm(`Delete strategy "${name}"? This cannot be undone.`)) return;
+                if (!deleteConfirm) {
+                  setDeleteConfirm(true);
+                  setTimeout(() => setDeleteConfirm(false), 5000);
+                  return;
+                }
                 try {
                   await api.strategy.delete(selectedId);
                   setSelectedId(null);
+                  setDeleteConfirm(false);
                   loadStrategies();
-                } catch (e) { alert(`Error: ${e}`); }
+                  setMsg('✅ Strategy deleted');
+                  setTimeout(() => setMsg(''), 3000);
+                } catch (e) {
+                  setMsg(`❌ Error: ${e}`);
+                  setTimeout(() => setMsg(''), 3000);
+                }
               }}
-              className="px-3 py-2 text-xs rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 hover:bg-red-500/20 transition"
+              className={`px-3 py-2 text-xs rounded-lg border transition ${deleteConfirm ? 'bg-red-500/30 border-red-500 text-white animate-pulse' : 'bg-red-500/10 border-red-500/30 text-red-300 hover:bg-red-500/20'}`}
             >
-              🗑 Delete
+              {deleteConfirm ? '⚠ Click again to confirm' : '🗑 Delete'}
             </button>
+          )}
+          {msg && (
+            <span className="text-xs px-3 py-2 rounded-lg bg-slate-800/60 border border-slate-700 text-slate-200">
+              {msg}
+            </span>
           )}
         </div>
 
