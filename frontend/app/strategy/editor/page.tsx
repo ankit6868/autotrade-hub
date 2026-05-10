@@ -129,6 +129,35 @@ function EditorContent() {
             ))}
           </select>
           <input className="input max-w-xs" value={name} onChange={(e) => setName(e.target.value)} placeholder="Strategy name" />
+          <button
+            onClick={async () => {
+              if (!confirm('Remove duplicate user strategies (keeps newest of each name)?')) return;
+              try {
+                const r = await api.strategy.dedupe();
+                alert(`Removed ${r.deleted ?? 0} duplicate strategies. ${r.kept ?? 0} unique kept.`);
+                loadStrategies();
+              } catch (e) { alert(`Error: ${e}`); }
+            }}
+            className="px-3 py-2 text-xs rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300 hover:bg-amber-500/20 transition"
+            title="Remove duplicate user strategies (templates are never touched)"
+          >
+            🧹 Clean Duplicates
+          </button>
+          {selectedId && (
+            <button
+              onClick={async () => {
+                if (!confirm(`Delete strategy "${name}"? This cannot be undone.`)) return;
+                try {
+                  await api.strategy.delete(selectedId);
+                  setSelectedId(null);
+                  loadStrategies();
+                } catch (e) { alert(`Error: ${e}`); }
+              }}
+              className="px-3 py-2 text-xs rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 hover:bg-red-500/20 transition"
+            >
+              🗑 Delete
+            </button>
+          )}
         </div>
 
         <div className="flex-1 rounded-lg overflow-hidden border border-[#2a3a52]">

@@ -15,24 +15,40 @@ function CopyTradingInner() {
   const [msg, setMsg] = useState('');
   const [activeTab, setActiveTab] = useState<'master' | 'follow' | 'feed'>('follow');
 
+  // My user_id is fetched from the auth endpoint so we can display the master ID
+  const [myUserId, setMyUserId] = useState<string>('');
+  const [isMaster, setIsMaster] = useState(false);
+
   async function refresh() {
     setLoading(true);
     try {
-      const [signals, followers, subs, feedData] = await Promise.all([
+      const [signals, followers, subs, feedData, me] = await Promise.all([
         api.copy.mySignals(),
         api.copy.myFollowers(),
         api.copy.mySubscriptions(),
         api.copy.feed(),
+        // Get the current user_id (Clerk sub) for the master id display
+        fetch('/api/config/auth-status').then(r => r.ok ? r.json() : null).catch(() => null),
       ]);
       setMySignals(signals.signals || []);
       setMyFollowers(followers.followers || []);
       setMySubs(subs.subscriptions || []);
       setFeed(feedData.signals || []);
+      if (me?.user_id) setMyUserId(me.user_id);
+      // If user has any signals broadcast, they're already a master
+      if ((signals.signals || []).length > 0) setIsMaster(true);
     } catch {}
     setLoading(false);
   }
 
   useEffect(() => { refresh(); }, []);
+
+  function copyToClipboard(text: string) {
+    navigator.clipboard?.writeText(text).then(
+      () => { setMsg('✅ Copied to clipboard!'); setTimeout(() => setMsg(''), 2000); },
+      () => { setMsg('❌ Failed to copy'); setTimeout(() => setMsg(''), 2000); }
+    );
+  }
 
   async function subscribe() {
     if (!masterInput.trim()) return;
@@ -52,8 +68,10 @@ function CopyTradingInner() {
   }
 
   async function becomeMaster() {
-    await api.copy.becomeMaster();
-    setMsg('✅ Copy trading enabled on your account. Your trades will be broadcast to followers.');
+    const r = await api.copy.becomeMaster();
+    if (r?.user_id) setMyUserId(r.user_id);
+    setIsMaster(true);
+    setMsg('✅ Copy trading enabled! Share your Master ID below with followers.');
     setTimeout(() => setMsg(''), 5000);
   }
 
@@ -191,14 +209,36 @@ function CopyTradingInner() {
               Enable copy trading to let others follow your strategy. When your bot opens or closes a trade,
               it will be broadcast to all your followers who will auto-copy it.
             </p>
-            <div className="p-4 rounded-xl bg-emerald-500/5 border border-emerald-500/20 mb-4">
-              <p className="text-emerald-300 text-sm font-medium mb-2">Your Master ID:</p>
-              <p className="text-slate-400 text-xs">Share this with followers so they can subscribe to your signals.</p>
-              <p className="text-xs text-slate-500 mt-1">(User ID is shown in your profile settings)</p>
-            </div>
-            <button onClick={becomeMaster} className="btn-primary">
-              📡 Enable Copy Trading on My Account
-            </button>
+
+            {/* Show actual Master ID once enabled */}
+            {isMaster && myUserId ? (
+              <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 mb-4">
+                <p className="text-emerald-300 text-sm font-medium mb-2">📡 Copy Trading is ACTIVE</p>
+                <p className="text-slate-300 text-sm mb-2">Your Master ID:</p>
+                <div className="flex items-center gap-2 p-3 rounded-lg bg-[#0a0f1c] border border-emerald-500/40">
+                  <code className="flex-1 text-emerald-400 text-sm font-mono break-all">{myUserId}</code>
+                  <button
+                    onClick={() => copyToClipboard(myUserId)}
+                    className="text-xs px-3 py-1 rounded bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-emerald-300 transition"
+                  >
+                    📋 Copy
+                  </button>
+                </div>
+                <p className="text-slate-400 text-xs mt-2">Share this ID with followers — they paste it on the Follow Masters tab to auto-copy your trades.</p>
+                <p className="text-slate-400 text-xs mt-1">Followers: {myFollowers.length} · Signals broadcast: {mySignals.length}</p>
+              </div>
+            ) : (
+              <div className="p-4 rounded-xl bg-amber-500/5 border border-amber-500/30 mb-4">
+                <p className="text-amber-300 text-sm font-medium mb-2">⚠ Copy Trading is DISABLED</p>
+                <p className="text-slate-400 text-xs">Click below to enable. Once enabled, your trades will be broadcast to followers in real-time.</p>
+              </div>
+            )}
+
+            {!isMaster && (
+              <button onClick={becomeMaster} className="btn-primary">
+                📡 Enable Copy Trading on My Account
+              </button>
+            )}
           </div>
 
           {/* My signals broadcast history */}

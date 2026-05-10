@@ -77,6 +77,7 @@ export const api = {
     update: (id: number, data: Record<string, unknown>) =>
       request<any>(`/api/strategy/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     delete: (id: number) => request<any>(`/api/strategy/${id}`, { method: 'DELETE' }),
+    dedupe: () => request<any>('/api/strategy/dedupe', { method: 'POST' }),
   },
 
   backtest: {
