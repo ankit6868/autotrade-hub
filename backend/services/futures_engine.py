@@ -550,25 +550,55 @@ class FuturesEngine(NativeTradingEngine):
         return base
 
 
-# ── Registry — one FuturesEngine per user (separate from spot registry) ──
+# ── Registry — supports multiple concurrent bots per user ──────────────
 
 class FuturesEngineRegistry:
-    """Process-wide futures engine registry, isolated from spot NativeTradingRegistry."""
+    """Process-wide futures engine registry supporting multiple bots per user."""
 
     def __init__(self):
         import threading
         self._engines: dict[str, FuturesEngine] = {}
+        self._bot_engines: dict[str, FuturesEngine] = {}
         self._lock = threading.Lock()
 
     def for_user(self, user_id: str) -> FuturesEngine:
+        """Get the default (manual trading) engine for a user."""
         with self._lock:
             if user_id not in self._engines:
                 self._engines[user_id] = FuturesEngine(user_id)
             return self._engines[user_id]
 
+    def for_bot(self, user_id: str, bot_key: str) -> FuturesEngine:
+        """Get or create an isolated engine for a specific bot instance."""
+        full_key = f"{user_id}:{bot_key}"
+        with self._lock:
+            if full_key not in self._bot_engines:
+                self._bot_engines[full_key] = FuturesEngine(user_id)
+            return self._bot_engines[full_key]
+
+    def stop_bot(self, user_id: str, bot_key: str):
+        """Stop and remove a bot engine."""
+        full_key = f"{user_id}:{bot_key}"
+        with self._lock:
+            eng = self._bot_engines.pop(full_key, None)
+        if eng:
+            eng.stop()
+
+    def user_bot_engines(self, user_id: str) -> list[tuple[str, FuturesEngine]]:
+        """List all bot engines for a user."""
+        prefix = f"{user_id}:"
+        with self._lock:
+            return [
+                (k.split(":", 1)[1], e)
+                for k, e in self._bot_engines.items()
+                if k.startswith(prefix)
+            ]
+
     def all_running(self) -> list[tuple[str, FuturesEngine]]:
         with self._lock:
-            return [(uid, e) for uid, e in self._engines.items() if e.is_running]
+            running = [(uid, e) for uid, e in self._engines.items() if e.is_running]
+            running += [(k, e) for k, e in self._bot_engines.items() if e.is_running]
+            return running
 
 
 futures_engine_registry = FuturesEngineRegistry()

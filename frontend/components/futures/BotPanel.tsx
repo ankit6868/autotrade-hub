@@ -141,23 +141,34 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
       {/* Running Bots */}
       {runningBots.filter(b => b.is_running).length > 0 && (
         <div className="px-3 py-2 border-b border-white/[0.06]">
-          <p className="text-[10px] text-slate-500 font-medium mb-1.5">Active Bots</p>
+          <p className="text-[10px] text-slate-500 font-medium mb-1.5">Active Bots ({runningBots.filter(b => b.is_running).length})</p>
           {runningBots.filter(b => b.is_running).map(bot => (
-            <div key={bot.id} className="flex items-center justify-between py-1.5 text-[11px]">
-              <div className="flex items-center gap-2">
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                <span className="text-white font-medium">{bot.strategy_name}</span>
-                <span className="text-slate-500">{bot.pairs}</span>
+            <div key={bot.id} className="p-2 rounded-lg bg-[#1e222d] border border-white/[0.04] mb-1.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  <span className="text-white text-[11px] font-medium">{bot.strategy_name}</span>
+                </div>
+                <button
+                  onClick={async () => {
+                    await api.futures.bots.stop(bot.id);
+                    setRunningBots(prev => prev.map(b => b.id === bot.id ? { ...b, is_running: false } : b));
+                  }}
+                  className="text-red-400 hover:text-red-300 text-[10px] font-medium px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20"
+                >
+                  Stop
+                </button>
               </div>
-              <button
-                onClick={async () => {
-                  await api.futures.bots.stop(bot.id);
-                  setRunningBots(prev => prev.filter(b => b.id !== bot.id));
-                }}
-                className="text-red-400 hover:text-red-300 text-[10px] font-medium"
-              >
-                Stop
-              </button>
+              <div className="flex items-center gap-3 mt-1 text-[10px] text-slate-500">
+                <span>{bot.pairs}</span>
+                <span>{bot.leverage}x</span>
+                <span>{bot.mode}</span>
+                {bot.open_positions > 0 && <span className="text-emerald-400">{bot.open_positions} open</span>}
+                {bot.ticks > 0 && <span>{bot.ticks} ticks</span>}
+              </div>
+              {bot.last_action && (
+                <p className="text-[9px] text-slate-600 mt-1 truncate">{bot.last_action}</p>
+              )}
             </div>
           ))}
         </div>
@@ -295,6 +306,7 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
   const [stoploss, setStoploss] = useState('');
   const [takeprofit, setTakeprofit] = useState('');
   const [drawdownTolerance, setDrawdownTolerance] = useState(50);
+  const [maxPositionPct, setMaxPositionPct] = useState(5);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showSlModal, setShowSlModal] = useState(false);
   const [showTpModal, setShowTpModal] = useState(false);
@@ -355,6 +367,7 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
         stoploss: stoploss ? -(parseFloat(stoploss) / 100) : -0.03,
         takeprofit: takeprofit ? parseFloat(takeprofit) / 100 : 0.015,
         drawdown_tolerance: drawdownTolerance,
+        max_position_pct: maxPositionPct,
       });
       if (r.error) setError(r.error);
       else {
@@ -495,6 +508,29 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
 
               {showAdvanced && (
                 <div className="mt-3 space-y-3">
+                  {/* Wallet % risk per trade */}
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[11px] text-slate-400">Risk per Trade (% of wallet)</span>
+                      <span className="text-[11px] text-white font-medium">{maxPositionPct}%</span>
+                    </div>
+                    <div className="flex gap-1">
+                      {[2, 5, 10, 15, 25].map(pct => (
+                        <button
+                          key={pct}
+                          onClick={() => setMaxPositionPct(pct)}
+                          className={`flex-1 py-1 rounded text-[10px] font-medium border transition-colors ${
+                            maxPositionPct === pct
+                              ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                              : 'text-slate-400 bg-[#1e222d] border-white/[0.06] hover:border-emerald-500/30'
+                          }`}
+                        >
+                          {pct}%
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] text-slate-400">Drawdown Tolerance</span>
                     <span className="text-[11px] text-white">{drawdownTolerance}% &gt;</span>

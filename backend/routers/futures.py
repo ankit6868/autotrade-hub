@@ -1121,27 +1121,37 @@ def list_futures_bots(
         .order_by(desc(StrategyInstance.created_at))
     ).scalars().all()
 
-    return {
-        "bots": [
-            {
-                "id": i.id,
-                "strategy_name": i.strategy_name,
-                "strategy_id": i.strategy_id,
-                "mode": i.mode,
-                "pairs": i.pairs,
-                "leverage": i.leverage,
-                "timeframe": i.timeframe,
-                "wallet": i.wallet,
-                "is_running": i.is_running,
-                "total_trades": i.total_trades,
-                "total_pnl": i.total_pnl,
-                "stoploss": i.stoploss,
-                "takeprofit": i.takeprofit,
-                "created_at": str(i.created_at),
-            }
-            for i in instances
-        ]
-    }
+    # Check actual engine status for running bots
+    bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
+
+    bots = []
+    for i in instances:
+        eng = bot_engines.get(i.engine_key) if i.engine_key else None
+        engine_running = eng.is_running if eng else False
+        engine_status = eng.status if eng else None
+        bots.append({
+            "id": i.id,
+            "strategy_name": i.strategy_name,
+            "strategy_id": i.strategy_id,
+            "mode": i.mode,
+            "pairs": i.pairs,
+            "leverage": i.leverage,
+            "timeframe": i.timeframe,
+            "wallet": i.wallet,
+            "is_running": i.is_running and engine_running,
+            "engine_running": engine_running,
+            "total_trades": (engine_status or {}).get("closed_count", i.total_trades or 0),
+            "total_pnl": (engine_status or {}).get("total_pnl", i.total_pnl or 0),
+            "open_positions": (engine_status or {}).get("open_count", 0),
+            "ticks": (engine_status or {}).get("ticks", 0),
+            "last_action": (engine_status or {}).get("last_action", ""),
+            "risk_pct": i.risk_pct,
+            "stoploss": i.stoploss,
+            "takeprofit": i.takeprofit,
+            "engine_key": i.engine_key,
+            "created_at": str(i.created_at),
+        })
+    return {"bots": bots}
 
 
 @router.post("/bots")
@@ -1151,7 +1161,7 @@ def create_futures_bot(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Create and start a new futures bot instance."""
+    """Create and start a new futures bot instance (supports multiple concurrent bots)."""
     strategy_id   = req.get("strategy_id")
     strategy_name = req.get("strategy_name", "SimpleTargetStrategy")
     mode          = req.get("mode", "paper")
@@ -1162,6 +1172,7 @@ def create_futures_bot(
     stoploss      = float(req.get("stoploss", -0.03))
     takeprofit    = float(req.get("takeprofit", 0.015))
     drawdown_tolerance = float(req.get("drawdown_tolerance", 50))
+    max_position_pct   = float(req.get("max_position_pct", 5.0))
 
     if strategy_id:
         from backend.models.strategy import Strategy
@@ -1175,29 +1186,45 @@ def create_futures_bot(
         if strat:
             strategy_name = strat.name
 
-    engine_key = f"{user_id}:futures:{strategy_name}:{int(_time.time())}"
+    engine_key = f"bot-{strategy_name}-{int(_time.time())}"
     instance = StrategyInstance(
         user_id=user_id, strategy_id=strategy_id, strategy_name=strategy_name,
         market_type="futures", mode=mode, pairs=",".join(pairs),
         leverage=leverage, timeframe=timeframe, wallet=wallet,
-        stoploss=stoploss, takeprofit=takeprofit, risk_pct=drawdown_tolerance,
+        stoploss=stoploss, takeprofit=takeprofit, risk_pct=max_position_pct,
         is_running=True, engine_key=engine_key,
     )
     db.add(instance)
     db.commit()
     db.refresh(instance)
 
-    # Start the engine
-    eng = futures_engine_registry.for_user(user_id)
+    # Resolve KuCoin credentials for live mode
+    kk = ks = kp = ""
+    if mode == "live":
+        from backend.utils.encryption import decrypt, DecryptError
+        cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+        if cfg:
+            try:
+                kk = decrypt(cfg.kucoin_key_enc or "", user_id)
+                ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
+                kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+            except Exception:
+                pass
+
+    # Start an ISOLATED engine for this bot (supports multiple concurrent bots)
+    eng = futures_engine_registry.for_bot(user_id, engine_key)
     result = eng.start_futures(
         strategy_name=strategy_name, pairs=pairs, leverage=leverage,
         mode=mode, timeframe=timeframe, stoploss=stoploss,
         wallet=wallet, take_profit_pct=takeprofit * 100,
+        max_position_pct=max_position_pct,
         strategy_id=strategy_id,
+        kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
     )
 
     log_event(db, user_id, "futures.create_bot", request, payload={
         "instance_id": instance.id, "strategy": strategy_name, "leverage": leverage,
+        "mode": mode, "max_position_pct": max_position_pct,
     })
     return {"bot_id": instance.id, "engine_key": engine_key, **result}
 
@@ -1221,8 +1248,12 @@ def stop_futures_bot(
     instance.is_running = False
     db.commit()
 
-    eng = futures_engine_registry.for_user(user_id)
-    eng.stop()
+    # Stop the isolated bot engine
+    if instance.engine_key:
+        futures_engine_registry.stop_bot(user_id, instance.engine_key)
+    else:
+        eng = futures_engine_registry.for_user(user_id)
+        eng.stop()
 
     log_event(db, user_id, "futures.stop_bot", request, payload={"bot_id": bot_id})
     return {"stopped": True, "bot_id": bot_id}
