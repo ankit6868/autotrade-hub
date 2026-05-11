@@ -1065,6 +1065,50 @@ def set_position_tp_sl(
 
 # ── Bot Management ───────────────────────────────────────────────────────
 
+@router.get("/lead-trading-status")
+def lead_trading_status(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Check if the user has a KuCoin Futures Lead Trading API key configured."""
+    from backend.utils.encryption import decrypt, DecryptError
+
+    cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+    if not cfg:
+        return {"connected": False, "reason": "No config found"}
+    try:
+        kk = decrypt(cfg.kucoin_key_enc or "", user_id)
+        ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
+        kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+    except DecryptError:
+        return {"connected": False, "reason": "Could not decrypt credentials"}
+    if not kk or not ks:
+        return {"connected": False, "reason": "No API key configured"}
+
+    # Try to hit KuCoin Futures account overview to verify credentials + permissions
+    try:
+        from backend.services.native_trading_engine import _kucoin_get_signed
+        from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+        data = _kucoin_get_signed(
+            "/api/v1/account-overview", kk, ks, kp,
+            params={"currency": "USDT"},
+            base_url=KUCOIN_FUTURES_BASE,
+        )
+        if str(data.get("code")) == "200000":
+            acct = data.get("data", {})
+            return {
+                "connected": True,
+                "account_type": "futures_lead_trading",
+                "balance": float(acct.get("availableBalance", 0)),
+                "equity": float(acct.get("accountEquity", 0)),
+                "unrealized_pnl": float(acct.get("unrealisedPNL", 0)),
+            }
+        code = str(data.get("code", ""))
+        return {"connected": False, "reason": f"KuCoin error {code}: {data.get('msg', 'unknown')}"}
+    except Exception as e:
+        return {"connected": False, "reason": str(e)}
+
+
 @router.get("/bots")
 def list_futures_bots(
     db: Session = Depends(get_db),

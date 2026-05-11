@@ -24,6 +24,13 @@ export default function ManualOrderPanel({
   symbol, pair, mode, leverage, marginMode, availableBalance, lastPrice,
   onLeverageChange, onMarginModeChange, onOrderPlaced,
 }: Props) {
+  const [leadStatus, setLeadStatus] = useState<{ connected: boolean; account_type?: string } | null>(null);
+
+  useEffect(() => {
+    api.futures.leadTradingStatus()
+      .then(d => setLeadStatus(d))
+      .catch(() => setLeadStatus(null));
+  }, []);
   const [orderTab, setOrderTab] = useState<OrderTab>('limit');
   const [showAdvancedMenu, setShowAdvancedMenu] = useState(false);
   const [leverageModal, setLeverageModal] = useState(false);
@@ -112,6 +119,16 @@ export default function ManualOrderPanel({
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
+      {/* Lead Trading Account badge */}
+      {mode === 'live' && (
+        <div className={`flex items-center gap-2 px-3 py-1.5 text-[11px] font-medium border-b border-white/[0.06] ${
+          leadStatus?.connected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-yellow-500/10 text-yellow-400'
+        }`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${leadStatus?.connected ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
+          {leadStatus?.connected ? 'PL Lead Trading Account' : 'Lead Trading: Not Connected'}
+        </div>
+      )}
+
       {/* Cross/Isolated + Leverage row */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06]">
         {/* Margin mode dropdown */}

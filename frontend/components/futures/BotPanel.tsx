@@ -76,24 +76,32 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
   const [category, setCategory] = useState<Category>('all');
   const [strategies, setStrategies] = useState<any[]>([]);
   const [selectedBot, setSelectedBot] = useState<StrategyCard | null>(null);
+  const [leadStatus, setLeadStatus] = useState<{ connected: boolean } | null>(null);
+  const [runningBots, setRunningBots] = useState<any[]>([]);
 
   useEffect(() => {
     api.strategy.list().then(d => setStrategies(d.strategies || [])).catch(() => {});
+    api.futures.leadTradingStatus().then(d => setLeadStatus(d)).catch(() => {});
+    api.futures.bots.list().then(d => setRunningBots(d.bots || [])).catch(() => {});
   }, []);
 
-  const allBots: StrategyCard[] = [
-    ...BUILT_IN_BOTS,
-    ...strategies.filter(s => !BUILT_IN_BOTS.find(b => b.name === s.name)).map(s => ({
+  const userStrategyCards: StrategyCard[] = strategies
+    .filter(s => !BUILT_IN_BOTS.find(b => b.name === s.name))
+    .map(s => ({
       id: s.id,
       name: s.name,
-      label: s.name,
-      description: s.description || 'Custom strategy',
+      label: s.name.replace(/([A-Z])/g, ' $1').trim(),
+      description: s.description || 'Custom user strategy — generates signals for futures lead trading.',
       category: 'ai' as Category,
-      tags: [s.is_template ? 'Template' : 'Custom'],
-      icon: '🔧',
+      tags: s.is_template ? ['Template', 'Lead Trading'] : ['My Strategy', 'Lead Trading'],
+      icon: '🎯',
       users: 0,
       profitPct: 0,
-    })),
+    }));
+
+  const allBots: StrategyCard[] = [
+    ...userStrategyCards,
+    ...BUILT_IN_BOTS,
   ];
 
   const filtered = category === 'all' ? allBots : allBots.filter(b => b.category === category);
@@ -120,6 +128,41 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
 
   return (
     <div className="flex flex-col h-full">
+      {/* Lead Trading Status */}
+      {mode === 'live' && (
+        <div className={`flex items-center gap-2 px-3 py-1.5 text-[11px] font-medium border-b border-white/[0.06] ${
+          leadStatus?.connected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-yellow-500/10 text-yellow-400'
+        }`}>
+          <span className={`w-1.5 h-1.5 rounded-full ${leadStatus?.connected ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
+          {leadStatus?.connected ? 'Lead Trading API Connected' : 'Lead Trading: Configure in Setup'}
+        </div>
+      )}
+
+      {/* Running Bots */}
+      {runningBots.filter(b => b.is_running).length > 0 && (
+        <div className="px-3 py-2 border-b border-white/[0.06]">
+          <p className="text-[10px] text-slate-500 font-medium mb-1.5">Active Bots</p>
+          {runningBots.filter(b => b.is_running).map(bot => (
+            <div key={bot.id} className="flex items-center justify-between py-1.5 text-[11px]">
+              <div className="flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="text-white font-medium">{bot.strategy_name}</span>
+                <span className="text-slate-500">{bot.pairs}</span>
+              </div>
+              <button
+                onClick={async () => {
+                  await api.futures.bots.stop(bot.id);
+                  setRunningBots(prev => prev.filter(b => b.id !== bot.id));
+                }}
+                className="text-red-400 hover:text-red-300 text-[10px] font-medium"
+              >
+                Stop
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Category filter */}
       <div className="flex items-center gap-1 px-3 py-2 border-b border-white/[0.06] overflow-x-auto scrollbar-none">
         {categories.map(c => (
@@ -138,20 +181,40 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
 
       {/* Section labels + Bot cards */}
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1">
-        {/* Group by category with section headers */}
-        {category === 'all' && <p className="text-[10px] text-slate-500 font-medium pt-1 pb-1">Grid Strategy</p>}
-        {filtered.filter(b => category === 'all' ? b.category === 'grid' : true).map((bot, i) => (
-          <BotCard key={`grid-${i}`} bot={bot} onClick={() => setSelectedBot(bot)} />
-        ))}
-
-        {category === 'all' && (
+        {/* User's own strategies first */}
+        {userStrategyCards.length > 0 && (category === 'all' || category === 'ai') && (
           <>
-            <p className="text-[10px] text-slate-500 font-medium pt-3 pb-1">AI-Powered</p>
-            {allBots.filter(b => b.category === 'ai').map((bot, i) => (
+            <p className="text-[10px] text-emerald-400 font-medium pt-1 pb-1">My Strategies (Lead Trading)</p>
+            {userStrategyCards.map((bot, i) => (
+              <BotCard key={`user-${i}`} bot={bot} onClick={() => setSelectedBot(bot)} />
+            ))}
+          </>
+        )}
+
+        {/* Grid Strategy */}
+        {(category === 'all' || category === 'grid') && (
+          <>
+            {category === 'all' && <p className="text-[10px] text-slate-500 font-medium pt-3 pb-1">Grid Strategy</p>}
+            {allBots.filter(b => b.category === 'grid').map((bot, i) => (
+              <BotCard key={`grid-${i}`} bot={bot} onClick={() => setSelectedBot(bot)} />
+            ))}
+          </>
+        )}
+
+        {/* AI-Powered */}
+        {(category === 'all' || category === 'ai') && (
+          <>
+            {category === 'all' && <p className="text-[10px] text-slate-500 font-medium pt-3 pb-1">AI-Powered</p>}
+            {BUILT_IN_BOTS.filter(b => b.category === 'ai').map((bot, i) => (
               <BotCard key={`ai-${i}`} bot={bot} onClick={() => setSelectedBot(bot)} />
             ))}
+          </>
+        )}
 
-            <p className="text-[10px] text-slate-500 font-medium pt-3 pb-1">Cost-Averaging</p>
+        {/* Cost-Averaging */}
+        {(category === 'all' || category === 'dca') && (
+          <>
+            {category === 'all' && <p className="text-[10px] text-slate-500 font-medium pt-3 pb-1">Cost-Averaging</p>}
             {allBots.filter(b => b.category === 'dca').map((bot, i) => (
               <BotCard key={`dca-${i}`} bot={bot} onClick={() => setSelectedBot(bot)} />
             ))}
@@ -239,6 +302,15 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
   const [error, setError] = useState('');
   const [backtestData, setBacktestData] = useState<number[]>([]);
   const [currentPrice, setCurrentPrice] = useState(0);
+  const [liveBalance, setLiveBalance] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (mode === 'live') {
+      api.futures.leadTradingStatus().then(d => {
+        if (d.connected && d.balance) setLiveBalance(d.balance);
+      }).catch(() => {});
+    }
+  }, [mode]);
 
   useEffect(() => {
     api.market.price(pair).then(d => {
@@ -312,6 +384,15 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
         <button className="ml-auto text-slate-500 hover:text-white text-xs">?</button>
       </div>
 
+      {/* Lead Trading indicator */}
+      {mode === 'live' && (
+        <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] bg-emerald-500/10 border-b border-white/[0.06]">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+          <span className="text-emerald-400 font-medium">Lead Trading Mode</span>
+          <span className="text-slate-500 ml-auto">Followers will copy this bot</span>
+        </div>
+      )}
+
       {/* Leaderboard / Create tabs */}
       <div className="flex items-center border-b border-white/[0.06]">
         {(['leaderboard', 'create'] as const).map(t => (
@@ -366,7 +447,10 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
               </div>
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[10px] text-slate-500">Available</span>
-                <span className="text-[10px] text-emerald-400 font-medium">0 USDT <span className="cursor-pointer">⊕</span></span>
+                <span className="text-[10px] text-emerald-400 font-medium">
+                  {mode === 'live' && liveBalance !== null ? `${liveBalance.toFixed(2)} USDT` : '0 USDT'}
+                  {' '}<span className="cursor-pointer">⊕</span>
+                </span>
               </div>
               <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
                 <input

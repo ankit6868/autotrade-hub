@@ -216,6 +216,7 @@ export const api = {
     getLeverage: (symbol: string) => request<any>(`/api/futures/leverage/${symbol}`),
     setTpSl: (data: { pair: string; tp_price?: number; sl_price?: number }) =>
       request<any>('/api/futures/position/tp-sl', { method: 'POST', body: JSON.stringify(data) }),
+    leadTradingStatus: () => request<any>('/api/futures/lead-trading-status'),
     bots: {
       list: () => request<any>('/api/futures/bots'),
       create: (data: Record<string, unknown>) =>
