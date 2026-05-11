@@ -119,15 +119,32 @@ export default function ManualOrderPanel({
 
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Lead Trading Account badge */}
-      {mode === 'live' && (
-        <div className={`flex items-center gap-2 px-3 py-1.5 text-[11px] font-medium border-b border-white/[0.06] ${
-          leadStatus?.connected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-yellow-500/10 text-yellow-400'
-        }`}>
-          <span className={`w-1.5 h-1.5 rounded-full ${leadStatus?.connected ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
-          {leadStatus?.connected ? 'PL Lead Trading Account' : 'Lead Trading: Not Connected'}
+      {/* Lead Trading Account badge — always visible */}
+      <div className={`flex items-center justify-between px-3 py-1.5 text-[11px] font-medium border-b border-white/[0.06] ${
+        mode === 'live'
+          ? (leadStatus?.connected ? 'bg-emerald-500/10' : 'bg-yellow-500/10')
+          : 'bg-blue-500/10'
+      }`}>
+        <div className="flex items-center gap-2">
+          <span className={`w-1.5 h-1.5 rounded-full ${
+            mode === 'live'
+              ? (leadStatus?.connected ? 'bg-emerald-400' : 'bg-yellow-400')
+              : 'bg-blue-400'
+          }`} />
+          <span className={
+            mode === 'live'
+              ? (leadStatus?.connected ? 'text-emerald-400' : 'text-yellow-400')
+              : 'text-blue-400'
+          }>
+            {mode === 'live'
+              ? (leadStatus?.connected ? 'PL Lead Trading Account' : 'Lead Trading: Not Connected')
+              : 'Paper Trading Account'}
+          </span>
         </div>
-      )}
+        {mode === 'live' && leadStatus?.connected && (
+          <span className="text-[10px] text-emerald-400/70">{leadStatus.balance?.toFixed(2)} USDT</span>
+        )}
+      </div>
 
       {/* Cross/Isolated + Leverage row */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06]">

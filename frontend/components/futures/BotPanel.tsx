@@ -128,15 +128,29 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Lead Trading Status */}
-      {mode === 'live' && (
-        <div className={`flex items-center gap-2 px-3 py-1.5 text-[11px] font-medium border-b border-white/[0.06] ${
-          leadStatus?.connected ? 'bg-emerald-500/10 text-emerald-400' : 'bg-yellow-500/10 text-yellow-400'
-        }`}>
-          <span className={`w-1.5 h-1.5 rounded-full ${leadStatus?.connected ? 'bg-emerald-400' : 'bg-yellow-400'}`} />
-          {leadStatus?.connected ? 'Lead Trading API Connected' : 'Lead Trading: Configure in Setup'}
+      {/* Lead Trading / Mode Status — always visible */}
+      <div className={`flex items-center justify-between px-3 py-1.5 text-[11px] font-medium border-b border-white/[0.06] ${
+        mode === 'live'
+          ? (leadStatus?.connected ? 'bg-emerald-500/10' : 'bg-yellow-500/10')
+          : 'bg-blue-500/10'
+      }`}>
+        <div className="flex items-center gap-2">
+          <span className={`w-1.5 h-1.5 rounded-full ${
+            mode === 'live'
+              ? (leadStatus?.connected ? 'bg-emerald-400' : 'bg-yellow-400')
+              : 'bg-blue-400'
+          }`} />
+          <span className={
+            mode === 'live'
+              ? (leadStatus?.connected ? 'text-emerald-400' : 'text-yellow-400')
+              : 'text-blue-400'
+          }>
+            {mode === 'live'
+              ? (leadStatus?.connected ? 'Lead Trading API Connected' : 'Lead Trading: Configure in Setup')
+              : 'Paper Mode — Bots trade with simulated funds'}
+          </span>
         </div>
-      )}
+      </div>
 
       {/* Running Bots */}
       {runningBots.filter(b => b.is_running).length > 0 && (
