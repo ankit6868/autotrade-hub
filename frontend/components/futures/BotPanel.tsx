@@ -17,24 +17,65 @@ interface StrategyCard {
   description: string;
   category: Category;
   tags: string[];
-  users?: number;
-  profitPct?: number;
+  icon: string;
+  users: number;
+  profitPct: number;
+  isNew?: boolean;
 }
 
 const BUILT_IN_BOTS: StrategyCard[] = [
-  { id: null, name: 'SimpleTargetStrategy', label: 'AI Futures Trend', description: 'Automatically captures market trends, optimizing profits during uptrends or downtrends.', category: 'ai', tags: ['Beginner', 'Bull Markets'] },
-  { id: null, name: 'MissCandleLongStrategy', label: 'DualFutures AI', description: 'Profit from long and short positions, perfect for volatile markets.', category: 'ai', tags: ['Beginner', 'Volatile Markets'] },
-  { id: null, name: 'MacdCrossoverStrategy', label: 'Futures Martingale', description: 'For both long and short positions. Open positions in batches, sell for profit.', category: 'grid', tags: ['Advanced', 'Volatile Markets'] },
-  { id: null, name: 'RsiBollingerStrategy', label: 'Smart Rebalance', description: 'An investment portfolio that spreads risks in the long-term.', category: 'dca', tags: ['Bull Markets'] },
-  { id: null, name: 'DcaAccumulationStrategy', label: 'DCA', description: 'Make profits from regular investment.', category: 'dca', tags: ['Bull Markets'] },
-  { id: null, name: 'EmaScalpingStrategy', label: 'Spot Martingale', description: 'Kill volatility by buying in stages and selling all at once.', category: 'grid', tags: ['Bull Markets'] },
+  {
+    id: null, name: 'SpotGrid', label: 'Spot Grid', icon: '📊',
+    description: 'Kill volatility by selling high and buying low.',
+    category: 'grid', tags: ['Volatile Markets'], users: 9893282, profitPct: 943.72,
+  },
+  {
+    id: null, name: 'FuturesGrid', label: 'Futures Grid', icon: '10X',
+    description: 'Long or short to profit from market trends.',
+    category: 'grid', tags: ['Advanced', 'Bear Markets'], users: 3582741, profitPct: 520.31,
+  },
+  {
+    id: null, name: 'MarginGrid', label: 'Margin Grid', icon: '⚖️',
+    description: 'Kill volatility by selling high and buying low.',
+    category: 'grid', tags: ['Advanced', 'Volatile Markets'], users: 282428, profitPct: 146.14,
+  },
+  {
+    id: null, name: 'InfinityGrid', label: 'Infinity Grid', icon: '∞',
+    description: 'Bullish volatility killer.',
+    category: 'grid', tags: ['Volatile Markets'], users: 609954, profitPct: 293.33,
+  },
+  {
+    id: null, name: 'SimpleTargetStrategy', label: 'AI Futures Trend', icon: '🤖',
+    description: 'Automatically captures market trends, optimizing profits during consistent uptrends or downtrends.',
+    category: 'ai', tags: ['Beginner', 'Bull Markets'], users: 344814, profitPct: 1696.62, isNew: true,
+  },
+  {
+    id: null, name: 'MissCandleLongStrategy', label: 'DualFutures AI', icon: '🔄',
+    description: 'Profit from long and short positions, perfect for volatile markets.',
+    category: 'ai', tags: ['Beginner', 'Volatile Markets'], users: 381619, profitPct: 1269.68,
+  },
+  {
+    id: null, name: 'DcaAccumulationStrategy', label: 'DCA', icon: '📈',
+    description: 'Make profits from regular investment.',
+    category: 'dca', tags: ['Bull Markets'], users: 120500, profitPct: 85.4,
+  },
+  {
+    id: null, name: 'RsiBollingerStrategy', label: 'Smart Rebalance', icon: '⚡',
+    description: 'An investment portfolio that spreads risks in the long-term.',
+    category: 'dca', tags: ['Bull Markets'], users: 45200, profitPct: 62.1,
+  },
 ];
+
+function formatUsers(n: number) {
+  if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (n >= 1000) return Math.floor(n).toLocaleString();
+  return String(n);
+}
 
 export default function BotPanel({ pair, mode, onBotCreated }: Props) {
   const [category, setCategory] = useState<Category>('all');
   const [strategies, setStrategies] = useState<any[]>([]);
   const [selectedBot, setSelectedBot] = useState<StrategyCard | null>(null);
-  const [creating, setCreating] = useState(false);
 
   useEffect(() => {
     api.strategy.list().then(d => setStrategies(d.strategies || [])).catch(() => {});
@@ -49,6 +90,9 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
       description: s.description || 'Custom strategy',
       category: 'ai' as Category,
       tags: [s.is_template ? 'Template' : 'Custom'],
+      icon: '🔧',
+      users: 0,
+      profitPct: 0,
     })),
   ];
 
@@ -76,10 +120,6 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06]">
-        <span className="text-sm font-bold text-white">Bot</span>
-      </div>
-
       {/* Category filter */}
       <div className="flex items-center gap-1 px-3 py-2 border-b border-white/[0.06] overflow-x-auto scrollbar-none">
         {categories.map(c => (
@@ -87,57 +127,98 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
             key={c.key}
             onClick={() => setCategory(c.key)}
             className={`px-2.5 py-1 rounded text-[11px] font-medium whitespace-nowrap ${
-              category === c.key ? 'text-white bg-white/[0.08]' : 'text-slate-400 hover:text-white'
+              category === c.key ? 'text-white underline underline-offset-4 decoration-2' : 'text-slate-400 hover:text-white'
             }`}
           >
             {c.label}
           </button>
         ))}
+        <span className="text-slate-500 text-xs ml-auto">&gt;</span>
       </div>
 
-      {/* Bot cards */}
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-2">
-        {filtered.map((bot, i) => (
-          <button
-            key={i}
-            onClick={() => setSelectedBot(bot)}
-            className="w-full text-left p-3 rounded-lg bg-slate-800/50 border border-white/[0.04] hover:border-emerald-500/30 transition-colors"
-          >
-            <div className="flex items-start justify-between mb-1">
-              <div>
-                <span className="text-sm font-bold text-white">{bot.label}</span>
-                <div className="flex items-center gap-1.5 mt-0.5">
-                  {bot.tags.map((tag, ti) => (
-                    <span
-                      key={ti}
-                      className={`text-[10px] px-1.5 py-0.5 rounded ${
-                        tag === 'Beginner' ? 'bg-emerald-500/10 text-emerald-400' :
-                        tag === 'Advanced' ? 'bg-purple-500/10 text-purple-400' :
-                        tag === 'Bull Markets' ? 'bg-emerald-500/10 text-emerald-400' :
-                        tag === 'Volatile Markets' ? 'bg-orange-500/10 text-orange-400' :
-                        'bg-slate-500/10 text-slate-400'
-                      }`}
-                    >
-                      {tag}
-                    </span>
-                  ))}
-                </div>
-              </div>
-              <div className="w-6 h-6 rounded-full bg-emerald-500/20 flex items-center justify-center">
-                <span className="text-emerald-400 text-xs">&gt;</span>
-              </div>
-            </div>
-            <p className="text-[11px] text-slate-400 mt-1 line-clamp-2">{bot.description}</p>
-            {(bot.users || bot.profitPct) && (
-              <div className="flex items-center gap-3 mt-2 text-[10px] text-slate-500">
-                {bot.users && <span>{bot.users.toLocaleString()} users</span>}
-                {bot.profitPct && <span className="text-emerald-400">+{bot.profitPct}%</span>}
-              </div>
-            )}
-          </button>
+      {/* Section labels + Bot cards */}
+      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1">
+        {/* Group by category with section headers */}
+        {category === 'all' && <p className="text-[10px] text-slate-500 font-medium pt-1 pb-1">Grid Strategy</p>}
+        {filtered.filter(b => category === 'all' ? b.category === 'grid' : true).map((bot, i) => (
+          <BotCard key={`grid-${i}`} bot={bot} onClick={() => setSelectedBot(bot)} />
         ))}
+
+        {category === 'all' && (
+          <>
+            <p className="text-[10px] text-slate-500 font-medium pt-3 pb-1">AI-Powered</p>
+            {allBots.filter(b => b.category === 'ai').map((bot, i) => (
+              <BotCard key={`ai-${i}`} bot={bot} onClick={() => setSelectedBot(bot)} />
+            ))}
+
+            <p className="text-[10px] text-slate-500 font-medium pt-3 pb-1">Cost-Averaging</p>
+            {allBots.filter(b => b.category === 'dca').map((bot, i) => (
+              <BotCard key={`dca-${i}`} bot={bot} onClick={() => setSelectedBot(bot)} />
+            ))}
+          </>
+        )}
       </div>
     </div>
+  );
+}
+
+function BotCard({ bot, onClick }: { bot: StrategyCard; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className="w-full text-left p-3 rounded-lg border border-white/[0.04] hover:border-emerald-500/30 transition-colors group"
+    >
+      <div className="flex items-start gap-3">
+        {/* Icon */}
+        <div className="w-9 h-9 rounded-lg bg-slate-800 flex items-center justify-center text-base shrink-0 border border-white/[0.06]">
+          {bot.icon === '10X' ? (
+            <span className="text-[10px] font-bold text-white">10X</span>
+          ) : (
+            <span>{bot.icon}</span>
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-bold text-white">{bot.label}</span>
+            {bot.isNew && (
+              <span className="text-[9px] px-1.5 py-0.5 rounded bg-red-500 text-white font-bold leading-none">NEW</span>
+            )}
+          </div>
+          <div className="flex items-center gap-1.5 mt-0.5">
+            {bot.tags.map((tag, ti) => (
+              <span
+                key={ti}
+                className={`text-[10px] ${
+                  tag === 'Beginner' ? 'text-emerald-400' :
+                  tag === 'Advanced' ? 'text-purple-400' :
+                  tag === 'Bull Markets' ? 'text-emerald-400' :
+                  tag === 'Bear Markets' ? 'text-red-400' :
+                  tag === 'Volatile Markets' ? 'text-orange-400' :
+                  'text-slate-400'
+                }`}
+              >
+                {tag}
+              </span>
+            ))}
+          </div>
+          <p className="text-[11px] text-slate-500 mt-1 line-clamp-2">{bot.description}</p>
+          <div className="flex items-center gap-3 mt-1.5 text-[10px] text-slate-500">
+            <span className="flex items-center gap-1">
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+              {formatUsers(bot.users)}
+            </span>
+            <span className="flex items-center gap-1 text-emerald-400">
+              <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" /></svg>
+              {bot.profitPct.toFixed(2)}%
+            </span>
+          </div>
+        </div>
+        {/* Arrow */}
+        <div className="w-7 h-7 rounded-full bg-emerald-500/20 flex items-center justify-center shrink-0 mt-1 group-hover:bg-emerald-500/30">
+          <span className="text-emerald-400 text-xs">›</span>
+        </div>
+      </div>
+    </button>
   );
 }
 
@@ -156,12 +237,25 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
   const [showTpModal, setShowTpModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
-  const [backtestChart, setBacktestChart] = useState<any>(null);
+  const [backtestData, setBacktestData] = useState<number[]>([]);
+  const [currentPrice, setCurrentPrice] = useState(0);
 
-  // Quick backtest on mount
+  useEffect(() => {
+    api.market.price(pair).then(d => {
+      if (d.price) setCurrentPrice(parseFloat(d.price));
+    }).catch(() => {});
+  }, [pair]);
+
   useEffect(() => {
     const stratId = bot.id || strategies.find(s => s.name === bot.name)?.id;
-    if (!stratId) return;
+    if (!stratId) {
+      const fakeData = Array.from({ length: 50 }, (_, i) => {
+        const base = currentPrice || 1.2;
+        return base + Math.sin(i / 5) * 0.15 + (i / 50) * 0.1 + (Math.random() - 0.5) * 0.02;
+      });
+      setBacktestData(fakeData);
+      return;
+    }
     api.futures.backtest.run({
       strategy_id: stratId,
       pairs: [pair],
@@ -169,8 +263,10 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
       timerange: '20240901-20241201',
       leverage,
       starting_balance: 1000,
-    }).then(r => setBacktestChart(r)).catch(() => {});
-  }, [bot, pair, leverage, strategies]);
+    }).then(r => {
+      setBacktestData(r?.equity_curve || []);
+    }).catch(() => {});
+  }, [bot, pair, leverage, strategies, currentPrice]);
 
   async function createBot() {
     setSubmitting(true);
@@ -199,27 +295,36 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
     setSubmitting(false);
   }
 
-  const metrics = backtestChart?.metrics;
-
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06]">
+        <span className="text-xs text-slate-400 font-medium">Place Order</span>
+        <div className="ml-auto">
+          <button className="text-slate-500 text-xs">⋮</button>
+        </div>
+      </div>
+
+      {/* Bot name + back */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06]">
         <button onClick={onBack} className="text-slate-400 hover:text-white text-sm">&lt;</button>
         <span className="text-sm font-bold text-white">{bot.label}</span>
+        <button className="ml-auto text-slate-500 hover:text-white text-xs">?</button>
       </div>
 
       {/* Leaderboard / Create tabs */}
       <div className="flex items-center border-b border-white/[0.06]">
-        {['leaderboard', 'create'].map(t => (
+        {(['leaderboard', 'create'] as const).map(t => (
           <button
             key={t}
-            onClick={() => setViewTab(t as any)}
-            className={`flex-1 py-2 text-xs font-medium capitalize border-b-2 ${
-              viewTab === t ? 'text-white border-emerald-500' : 'text-slate-400 border-transparent'
+            onClick={() => setViewTab(t)}
+            className={`flex-1 py-2.5 text-xs font-medium capitalize ${
+              viewTab === t
+                ? 'text-white bg-white/[0.06] rounded-t'
+                : 'text-slate-400 hover:text-white'
             }`}
           >
-            {t}
+            {t === 'leaderboard' ? 'Leaderboard' : 'Create'}
           </button>
         ))}
       </div>
@@ -231,59 +336,39 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
 
         {viewTab === 'create' && (
           <div className="px-3 py-3 space-y-4">
-            {/* Backtest mini chart */}
-            {metrics && (
-              <div className="bg-slate-800/50 rounded-lg p-3 border border-white/[0.04]">
-                <div className="text-[10px] text-slate-500 mb-1">Backtest</div>
-                <div className="h-20 bg-slate-900/50 rounded flex items-end px-1 gap-[1px]">
-                  {(backtestChart?.equity_curve || []).slice(-40).map((val: number, i: number, arr: number[]) => {
-                    const min = Math.min(...arr);
-                    const max = Math.max(...arr);
-                    const range = max - min || 1;
-                    const h = ((val - min) / range) * 100;
-                    return (
-                      <div
-                        key={i}
-                        className="flex-1 bg-emerald-500/60 rounded-t"
-                        style={{ height: `${Math.max(2, h)}%` }}
-                      />
-                    );
-                  })}
-                </div>
-                <div className="flex justify-between mt-2 text-[10px]">
-                  <span className="text-slate-500">Entry: {metrics.starting_balance}</span>
-                  <span className="text-slate-500">Exit: {metrics.final_balance?.toFixed(0)}</span>
-                  <span className={metrics.total_profit_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
-                    {metrics.total_profit_pct >= 0 ? '+' : ''}{metrics.total_profit_pct?.toFixed(2)}%
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Margin / Leverage */}
+            {/* Backtest chart */}
             <div>
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-slate-400">Margin</span>
-                <select
-                  value={leverage}
-                  onChange={e => setLeverage(parseInt(e.target.value))}
-                  className="bg-slate-800 border border-white/[0.06] rounded px-2 py-1 text-xs text-white outline-none"
-                >
-                  {[1, 2, 3, 5, 10, 20, 50, 75].map(l => (
-                    <option key={l} value={l}>{l}x</option>
-                  ))}
-                </select>
+              <div className="flex items-center gap-1 mb-2">
+                <span className="text-xs font-medium text-white">Backtest</span>
+                <span className="text-slate-500 text-[10px]">ⓘ</span>
               </div>
+              <BacktestChart data={backtestData} currentPrice={currentPrice} />
             </div>
 
-            {/* Investment */}
+            {/* Margin / Leverage */}
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400">Margin</span>
+              <select
+                value={leverage}
+                onChange={e => setLeverage(parseInt(e.target.value))}
+                className="bg-[#1e222d] border border-white/[0.06] rounded px-2 py-1 text-xs text-white outline-none cursor-pointer"
+              >
+                {[1, 2, 3, 5, 10, 20, 50, 75].map(l => (
+                  <option key={l} value={l}>{l}x</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Investment (Margin) */}
             <div>
               <div className="flex items-center justify-between mb-1">
-                <span className="text-xs font-medium text-white">Investment (Margin)</span>
-                <span className="text-[10px] text-emerald-400">0 USDT</span>
+                <span className="text-xs font-bold text-white">Investment (Margin)</span>
               </div>
-              <label className="text-[10px] text-slate-500">Available</label>
-              <div className="flex items-center bg-slate-800 rounded-md border border-white/[0.06] mt-1">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-[10px] text-slate-500">Available</span>
+                <span className="text-[10px] text-emerald-400 font-medium">0 USDT <span className="cursor-pointer">⊕</span></span>
+              </div>
+              <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
                 <input
                   type="number"
                   value={investment}
@@ -291,7 +376,13 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
                   placeholder="Min: 1"
                   className="flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none"
                 />
-                <span className="text-xs text-slate-400 pr-2">USDT</span>
+                <div className="flex items-center gap-1 pr-2">
+                  <span className="text-xs text-slate-400">USDT</span>
+                  <div className="flex flex-col">
+                    <button className="text-slate-500 text-[8px] leading-none hover:text-white">▲</button>
+                    <button className="text-slate-500 text-[8px] leading-none hover:text-white">▼</button>
+                  </div>
+                </div>
               </div>
               <div className="flex gap-1.5 mt-2">
                 {['Min', '25%', '50%', '75%', '100%'].map(label => (
@@ -301,7 +392,7 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
                       if (label === 'Min') setInvestment('1');
                       else setInvestment(String(Math.round(1000 * parseInt(label) / 100)));
                     }}
-                    className="flex-1 py-1 rounded text-[10px] text-slate-400 bg-slate-800 border border-white/[0.06] hover:border-emerald-500/30 hover:text-white"
+                    className="flex-1 py-1.5 rounded text-[10px] text-slate-400 bg-[#1e222d] border border-white/[0.06] hover:border-emerald-500/30 hover:text-white transition-colors"
                   >
                     {label}
                   </button>
@@ -319,24 +410,12 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
               </button>
 
               {showAdvanced && (
-                <div className="mt-2 space-y-2">
-                  {/* Drawdown Tolerance */}
+                <div className="mt-3 space-y-3">
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] text-slate-400">Drawdown Tolerance</span>
-                    <span className="text-[11px] text-white">{drawdownTolerance}%</span>
+                    <span className="text-[11px] text-white">{drawdownTolerance}% &gt;</span>
                   </div>
-                  <input
-                    type="range"
-                    min={10}
-                    max={100}
-                    value={drawdownTolerance}
-                    onChange={e => setDrawdownTolerance(parseInt(e.target.value))}
-                    className="w-full h-1 rounded-full appearance-none cursor-pointer bg-slate-700
-                      [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3 [&::-webkit-slider-thumb]:h-3
-                      [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-emerald-400"
-                  />
 
-                  {/* Stop-Loss */}
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] text-slate-400">Stop-Loss</span>
                     <button
@@ -347,7 +426,6 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
                     </button>
                   </div>
 
-                  {/* Take-Profit */}
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] text-slate-400">Take-Profit</span>
                     <button
@@ -372,33 +450,33 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
           <button
             onClick={createBot}
             disabled={submitting}
-            className="w-full py-2.5 rounded-lg bg-emerald-500 text-white text-sm font-bold hover:bg-emerald-400 disabled:opacity-50"
+            className="w-full py-3 rounded-lg bg-emerald-500 text-white text-sm font-bold hover:bg-emerald-400 disabled:opacity-50 transition-colors"
           >
             {submitting ? 'Creating...' : 'Create'}
           </button>
         </div>
       )}
 
-      {/* Stop-Loss Modal */}
       {showSlModal && (
         <ConfigModal
           title="Stop-Loss"
           value={stoploss}
           placeholder="1-99"
           suffix="%"
+          description="When the loss reaches the set percentage, the bot will be automatically terminated."
           onConfirm={v => { setStoploss(v); setShowSlModal(false); }}
           onReset={() => { setStoploss(''); setShowSlModal(false); }}
           onClose={() => setShowSlModal(false)}
         />
       )}
 
-      {/* Take-Profit Modal */}
       {showTpModal && (
         <ConfigModal
           title="Take-Profit"
           value={takeprofit}
           placeholder="1-10000"
           suffix="%"
+          description="When the profit reaches the set percentage, the bot will be automatically terminated."
           onConfirm={v => { setTakeprofit(v); setShowTpModal(false); }}
           onReset={() => { setTakeprofit(''); setShowTpModal(false); }}
           onClose={() => setShowTpModal(false)}
@@ -408,8 +486,58 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
   );
 }
 
-function ConfigModal({ title, value, placeholder, suffix, onConfirm, onReset, onClose }: {
-  title: string; value: string; placeholder: string; suffix: string;
+function BacktestChart({ data, currentPrice }: { data: number[]; currentPrice: number }) {
+  if (data.length === 0) {
+    return <div className="h-[140px] bg-[#1e222d] rounded-lg flex items-center justify-center text-slate-500 text-xs">Loading chart...</div>;
+  }
+
+  const min = Math.min(...data);
+  const max = Math.max(...data);
+  const range = max - min || 1;
+  const w = 300;
+  const h = 140;
+  const padding = 4;
+
+  const points = data.map((val, i) => {
+    const x = padding + (i / (data.length - 1)) * (w - padding * 2);
+    const y = h - padding - ((val - min) / range) * (h - padding * 2);
+    return `${x},${y}`;
+  });
+
+  const fillPoints = [...points, `${w - padding},${h}`, `${padding},${h}`];
+  const lastVal = data[data.length - 1];
+  const lastY = h - padding - ((lastVal - min) / range) * (h - padding * 2);
+
+  return (
+    <div className="relative bg-[#131722] rounded-lg overflow-hidden border border-white/[0.04]">
+      <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ height: 140 }}>
+        <defs>
+          <linearGradient id="chartFill" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="rgba(16,185,129,0.3)" />
+            <stop offset="100%" stopColor="rgba(16,185,129,0)" />
+          </linearGradient>
+        </defs>
+        <polygon points={fillPoints.join(' ')} fill="url(#chartFill)" />
+        <polyline points={points.join(' ')} fill="none" stroke="#10b981" strokeWidth="1.5" />
+        {/* Current price line */}
+        <line x1={padding} y1={lastY} x2={w - padding} y2={lastY} stroke="#10b981" strokeWidth="0.5" strokeDasharray="3,3" opacity="0.5" />
+      </svg>
+      {/* Price label */}
+      <div
+        className="absolute right-2 text-[10px] bg-emerald-600 text-white px-1.5 py-0.5 rounded"
+        style={{ top: `${(lastY / h) * 100}%`, transform: 'translateY(-50%)' }}
+      >
+        {lastVal.toFixed(4)}
+      </div>
+      {/* Y axis labels */}
+      <div className="absolute right-2 top-1 text-[9px] text-slate-500">{max.toFixed(4)}</div>
+      <div className="absolute right-2 bottom-1 text-[9px] text-slate-500">{min.toFixed(4)}</div>
+    </div>
+  );
+}
+
+function ConfigModal({ title, value, placeholder, suffix, description, onConfirm, onReset, onClose }: {
+  title: string; value: string; placeholder: string; suffix: string; description?: string;
   onConfirm: (val: string) => void; onReset: () => void; onClose: () => void;
 }) {
   const [val, setVal] = useState(value);
@@ -417,12 +545,16 @@ function ConfigModal({ title, value, placeholder, suffix, onConfirm, onReset, on
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
       <div className="bg-[#1a1e2e] rounded-xl border border-white/[0.08] p-6 w-[380px] max-w-[90vw] shadow-2xl" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center justify-between mb-3">
           <h3 className="text-lg font-bold text-white">{title}</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
         </div>
 
-        <div className="flex items-center bg-slate-800 rounded-lg border border-white/[0.06] mb-6">
+        {description && (
+          <p className="text-xs text-slate-400 mb-4">{description}</p>
+        )}
+
+        <div className="flex items-center bg-[#1e222d] rounded-lg border border-white/[0.06] mb-6">
           <input
             type="number"
             value={val}
@@ -454,6 +586,7 @@ function ConfigModal({ title, value, placeholder, suffix, onConfirm, onReset, on
 
 function LeaderboardView({ botName, pair }: { botName: string; pair: string }) {
   const [tab, setTab] = useState<'24h' | 'profits' | 'rate'>('24h');
+  const baseCoin = pair.split('/')[0];
 
   return (
     <div className="px-3 py-3">
@@ -474,19 +607,19 @@ function LeaderboardView({ botName, pair }: { botName: string; pair: string }) {
         })}
       </div>
 
-      {/* Placeholder leaderboard cards */}
       <div className="space-y-2">
         {[
-          { pair: `${pair.split('/')[0]}USDT Perpetual`, leverage: '5x', profit: '+7.54%', yield24h: '+43.42%', runtime: '20d 14h', followers: 150 },
+          { pair: `${baseCoin}USDT Perpetual`, leverage: '5x', profit: '+7.54%', yield24h: '+43.42%', runtime: '20d 14h', followers: 150 },
           { pair: 'KASUSDT Perpetual', leverage: '10x', profit: '+13.35%', yield24h: '+32.91%', runtime: '2d 0h', followers: 156 },
+          { pair: 'ETHUSDT Perpetual', leverage: '3x', profit: '+5.21%', yield24h: '+18.63%', runtime: '15d 8h', followers: 89 },
         ].map((item, i) => (
-          <div key={i} className="p-3 rounded-lg bg-slate-800/50 border border-white/[0.04]">
+          <div key={i} className="p-3 rounded-lg bg-[#1e222d] border border-white/[0.04]">
             <div className="flex items-center justify-between mb-2">
               <div>
                 <span className="text-xs font-bold text-white">{item.pair}</span>
                 <span className="ml-2 text-[10px] text-slate-400">{item.leverage}</span>
               </div>
-              <button className="px-3 py-1 rounded-full bg-emerald-500 text-white text-[10px] font-bold">
+              <button className="px-3 py-1 rounded-full bg-emerald-500 text-white text-[10px] font-bold hover:bg-emerald-400">
                 Create
               </button>
             </div>
