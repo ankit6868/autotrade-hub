@@ -1,22 +1,30 @@
 """
 Futures trading endpoints — paper and live with leverage.
 Completely isolated from spot trading (different market_type='futures').
+
+Includes: order book, recent trades, manual order placement, leverage/margin control,
+pending orders, positions, bot management, and account overview.
 """
 from __future__ import annotations
 
+import time as _time
 from datetime import datetime
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select, desc
 
 from backend.models import get_db
-from backend.models.trade import Trade, StrategyInstance
+from backend.models.trade import Trade, StrategyInstance, FuturesOrder
 from backend.models.config import Config
 from backend.utils.clerk_auth import get_user_id
 from backend.services.futures_engine import futures_engine_registry
 from backend.utils.audit import log_event
 
 router = APIRouter(prefix="/api/futures", tags=["futures"])
+
+# Simple in-memory cache for order book / trades (avoid hammering KuCoin)
+_cache: dict[str, tuple[float, any]] = {}
+CACHE_TTL = 1.5  # seconds
 
 
 # ── Futures Backtest ─────────────────────────────────────────────────────────
@@ -672,4 +680,541 @@ def futures_force_close(
         "exit_price":   exit_price,
         "closed_count": total_closed,
         "pnl_abs":      round(total_pnl, 4),
+    }
+
+
+# ── Order Book (proxied from KuCoin, cached) ─────────────────────────────
+
+@router.get("/orderbook/{symbol}")
+async def futures_orderbook(
+    symbol: str,
+    user_id: str = Depends(get_user_id),
+):
+    """Get futures order book (20 levels) — cached 1.5s."""
+    cache_key = f"ob:{symbol}"
+    now = _time.time()
+    if cache_key in _cache and (now - _cache[cache_key][0]) < CACHE_TTL:
+        return _cache[cache_key][1]
+
+    try:
+        from backend.services.kucoin_futures_client import KuCoinFuturesClient
+        client = KuCoinFuturesClient()
+        data = await client.get_order_book(symbol)
+        result = {"symbol": symbol, "asks": data.get("asks", []), "bids": data.get("bids", []), "ts": data.get("ts")}
+    except Exception:
+        from backend.services.kucoin_futures_client import generate_paper_orderbook
+        from backend.services.native_trading_engine import _kucoin_get
+        pair = symbol.replace("USDTM", "/USDT").replace("-", "/")
+        try:
+            d = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": pair.replace("/", "-")})
+            price = float(d["data"]["price"]) if str(d.get("code")) == "200000" else 50000
+        except Exception:
+            price = 50000
+        ob = generate_paper_orderbook(price)
+        result = {"symbol": symbol, "asks": ob["asks"], "bids": ob["bids"], "ts": ob["ts"]}
+
+    _cache[cache_key] = (now, result)
+    return result
+
+
+@router.get("/trades/{symbol}")
+async def futures_recent_trades(
+    symbol: str,
+    user_id: str = Depends(get_user_id),
+):
+    """Get recent futures trades for a symbol."""
+    cache_key = f"rt:{symbol}"
+    now = _time.time()
+    if cache_key in _cache and (now - _cache[cache_key][0]) < CACHE_TTL:
+        return _cache[cache_key][1]
+
+    try:
+        from backend.services.kucoin_futures_client import KuCoinFuturesClient
+        client = KuCoinFuturesClient()
+        trades = await client.get_recent_trades(symbol)
+        result = {"symbol": symbol, "trades": trades[:50]}
+    except Exception:
+        result = {"symbol": symbol, "trades": []}
+
+    _cache[cache_key] = (now, result)
+    return result
+
+
+@router.get("/contracts")
+async def futures_contracts(
+    user_id: str = Depends(get_user_id),
+):
+    """List available futures contracts."""
+    cache_key = "contracts"
+    now = _time.time()
+    if cache_key in _cache and (now - _cache[cache_key][0]) < 60:
+        return _cache[cache_key][1]
+
+    try:
+        from backend.services.kucoin_futures_client import KuCoinFuturesClient
+        client = KuCoinFuturesClient()
+        contracts = await client.get_contracts()
+        result = {
+            "contracts": [
+                {
+                    "symbol": c.get("symbol"),
+                    "baseCurrency": c.get("baseCurrency"),
+                    "multiplier": c.get("multiplier"),
+                    "tickSize": c.get("tickSize"),
+                    "lotSize": c.get("lotSize"),
+                    "maxLeverage": c.get("maxLeverage"),
+                    "isInverse": c.get("isInverse", False),
+                    "status": c.get("status"),
+                }
+                for c in contracts
+                if c.get("status") == "Open"
+            ]
+        }
+    except Exception:
+        result = {"contracts": []}
+
+    _cache[cache_key] = (now, result)
+    return result
+
+
+# ── Pending Orders (limit/stop) ──────────────────────────────────────────
+
+@router.post("/order")
+def place_futures_order(
+    req: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Place a pending futures order (limit, stop, trailing_stop, etc.)."""
+    symbol     = req.get("symbol", "XBTUSDTM")
+    side       = req.get("side", "buy")
+    order_type = req.get("order_type", "limit")
+    size       = float(req.get("size", 0))
+    price      = req.get("price")
+    stop_price = req.get("stop_price")
+    leverage   = req.get("leverage")
+    tp_price   = req.get("tp_price")
+    sl_price   = req.get("sl_price")
+    hidden     = req.get("hidden", False)
+    post_only  = req.get("post_only", False)
+    reduce_only = req.get("reduce_only", False)
+    time_in_force = req.get("time_in_force", "GTC")
+
+    if size <= 0:
+        return {"error": "size must be positive"}
+
+    eng = futures_engine_registry.for_user(user_id)
+
+    if price is not None:
+        price = float(price)
+    if stop_price is not None:
+        stop_price = float(stop_price)
+    if leverage is not None:
+        leverage = int(leverage)
+
+    result = eng.place_pending_order(
+        symbol=symbol, side=side, order_type=order_type, size=size,
+        price=price, stop_price=stop_price, leverage=leverage,
+        tp_price=float(tp_price) if tp_price else None,
+        sl_price=float(sl_price) if sl_price else None,
+        hidden=hidden, post_only=post_only, reduce_only=reduce_only,
+        time_in_force=time_in_force,
+    )
+
+    # Persist to DB
+    order_rec = FuturesOrder(
+        user_id=user_id, symbol=symbol, side=side, order_type=order_type,
+        size=size, price=price, stop_price=stop_price,
+        leverage=leverage or eng._leverage, margin_mode=eng.get_symbol_margin(symbol),
+        client_oid=result.get("order_id"), status="pending",
+        time_in_force=time_in_force, hidden=hidden, post_only=post_only,
+        reduce_only=reduce_only, tp_price=float(tp_price) if tp_price else None,
+        sl_price=float(sl_price) if sl_price else None,
+    )
+    db.add(order_rec)
+    db.commit()
+    db.refresh(order_rec)
+    result["db_id"] = order_rec.id
+
+    log_event(db, user_id, "futures.place_order", request, payload=result)
+    return result
+
+
+@router.delete("/order/{order_id}")
+def cancel_futures_order(
+    order_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Cancel a pending futures order."""
+    eng = futures_engine_registry.for_user(user_id)
+    result = eng.cancel_pending_order(order_id)
+
+    # Update DB
+    from sqlalchemy import update as sql_update
+    db.execute(
+        sql_update(FuturesOrder)
+        .where(FuturesOrder.client_oid == order_id, FuturesOrder.user_id == user_id)
+        .values(status="cancelled", cancelled_at=datetime.utcnow())
+    )
+    db.commit()
+
+    log_event(db, user_id, "futures.cancel_order", request, payload={"order_id": order_id})
+    return result
+
+
+@router.get("/orders")
+def get_futures_orders(
+    symbol: str = None,
+    status: str = "pending",
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Get pending or filled futures orders."""
+    eng = futures_engine_registry.for_user(user_id)
+    # Combine engine pending + DB records
+    engine_orders = eng.get_pending_orders(symbol)
+
+    query = select(FuturesOrder).where(FuturesOrder.user_id == user_id)
+    if status:
+        query = query.where(FuturesOrder.status == status)
+    if symbol:
+        query = query.where(FuturesOrder.symbol == symbol)
+    query = query.order_by(desc(FuturesOrder.created_at)).limit(100)
+
+    db_orders = [
+        {
+            "order_id": o.client_oid or str(o.id),
+            "db_id": o.id,
+            "symbol": o.symbol,
+            "side": o.side,
+            "order_type": o.order_type,
+            "size": o.size,
+            "price": o.price,
+            "stop_price": o.stop_price,
+            "leverage": o.leverage,
+            "margin_mode": o.margin_mode,
+            "status": o.status,
+            "filled_size": o.filled_size,
+            "filled_price": o.filled_price,
+            "tp_price": o.tp_price,
+            "sl_price": o.sl_price,
+            "created_at": str(o.created_at),
+        }
+        for o in db.execute(query).scalars().all()
+    ]
+
+    return {"orders": engine_orders if status == "pending" else db_orders}
+
+
+@router.get("/orders/history")
+def get_futures_order_history(
+    symbol: str = None,
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Get filled/cancelled order history."""
+    query = (
+        select(FuturesOrder)
+        .where(
+            FuturesOrder.user_id == user_id,
+            FuturesOrder.status.in_(["filled", "cancelled", "partially_filled"]),
+        )
+        .order_by(desc(FuturesOrder.created_at))
+        .limit(limit)
+    )
+    if symbol:
+        query = query.where(FuturesOrder.symbol == symbol)
+
+    orders = [
+        {
+            "order_id": o.client_oid or str(o.id),
+            "symbol": o.symbol, "side": o.side, "order_type": o.order_type,
+            "size": o.size, "price": o.price, "filled_size": o.filled_size,
+            "filled_price": o.filled_price, "fee": o.fee, "status": o.status,
+            "created_at": str(o.created_at), "filled_at": str(o.filled_at) if o.filled_at else None,
+        }
+        for o in db.execute(query).scalars().all()
+    ]
+    return {"orders": orders}
+
+
+# ── Leverage & Margin Mode ───────────────────────────────────────────────
+
+@router.post("/leverage")
+def set_futures_leverage(
+    req: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Set leverage for a symbol."""
+    symbol   = req.get("symbol", "XBTUSDTM")
+    leverage = int(req.get("leverage", 10))
+    eng = futures_engine_registry.for_user(user_id)
+    result = eng.set_symbol_leverage(symbol, leverage)
+    log_event(db, user_id, "futures.set_leverage", request, payload=result)
+    return result
+
+
+@router.post("/margin-mode")
+def set_futures_margin_mode(
+    req: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Set margin mode (cross/isolated) for a symbol."""
+    symbol = req.get("symbol", "XBTUSDTM")
+    mode   = req.get("mode", "cross")
+    eng = futures_engine_registry.for_user(user_id)
+    result = eng.set_symbol_margin(symbol, mode)
+    log_event(db, user_id, "futures.set_margin_mode", request, payload=result)
+    return result
+
+
+@router.get("/leverage/{symbol}")
+def get_futures_leverage(
+    symbol: str,
+    user_id: str = Depends(get_user_id),
+):
+    """Get current leverage for a symbol."""
+    eng = futures_engine_registry.for_user(user_id)
+    return {
+        "symbol": symbol,
+        "leverage": eng.get_symbol_leverage(symbol),
+        "margin_mode": eng.get_symbol_margin(symbol),
+    }
+
+
+# ── Account Overview ─────────────────────────────────────────────────────
+
+@router.get("/account")
+def futures_account(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Full futures account overview (paper balance + live KuCoin data)."""
+    eng = futures_engine_registry.for_user(user_id)
+
+    # Paper account state
+    open_positions = eng.get_open_positions() if eng.is_running else []
+    total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_positions)
+    total_margin = sum(p.get("stake", 0) for p in open_positions)
+
+    paper_account = {
+        "mode": eng._mode or "paper",
+        "balance": round(eng.balance, 4),
+        "equity": round(eng.balance + total_unrealized, 4),
+        "unrealized_pnl": round(total_unrealized, 4),
+        "used_margin": round(total_margin, 4),
+        "available_balance": round(eng.balance, 4),
+        "position_count": len(open_positions),
+        "currency": "USDT",
+    }
+
+    return paper_account
+
+
+# ── Position TP/SL Management ────────────────────────────────────────────
+
+@router.post("/position/tp-sl")
+def set_position_tp_sl(
+    req: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Set or update TP/SL on an open futures position."""
+    pair     = req.get("pair", "BTC/USDT")
+    tp_price = req.get("tp_price")
+    sl_price = req.get("sl_price")
+
+    eng = futures_engine_registry.for_user(user_id)
+    updated = False
+    with eng._lock:
+        for key, pos in eng.positions.items():
+            if pos.pair == pair:
+                if tp_price is not None:
+                    pos.tp = float(tp_price)
+                if sl_price is not None:
+                    pos.sl = float(sl_price)
+                updated = True
+                break
+
+    if not updated:
+        return {"error": f"No open position for {pair}"}
+
+    # Also update DB
+    trade = db.execute(
+        select(Trade).where(
+            Trade.user_id == user_id, Trade.pair == pair,
+            Trade.market_type == "futures", Trade.status == "open",
+        ).order_by(desc(Trade.entry_time)).limit(1)
+    ).scalar_one_or_none()
+    if trade and sl_price is not None:
+        trade.stoploss_price = float(sl_price)
+        db.commit()
+
+    log_event(db, user_id, "futures.set_tp_sl", request, payload={"pair": pair, "tp": tp_price, "sl": sl_price})
+    return {"updated": True, "pair": pair, "tp_price": tp_price, "sl_price": sl_price}
+
+
+# ── Bot Management ───────────────────────────────────────────────────────
+
+@router.get("/bots")
+def list_futures_bots(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """List all futures bot instances for this user."""
+    instances = db.execute(
+        select(StrategyInstance)
+        .where(StrategyInstance.user_id == user_id, StrategyInstance.market_type == "futures")
+        .order_by(desc(StrategyInstance.created_at))
+    ).scalars().all()
+
+    return {
+        "bots": [
+            {
+                "id": i.id,
+                "strategy_name": i.strategy_name,
+                "strategy_id": i.strategy_id,
+                "mode": i.mode,
+                "pairs": i.pairs,
+                "leverage": i.leverage,
+                "timeframe": i.timeframe,
+                "wallet": i.wallet,
+                "is_running": i.is_running,
+                "total_trades": i.total_trades,
+                "total_pnl": i.total_pnl,
+                "stoploss": i.stoploss,
+                "takeprofit": i.takeprofit,
+                "created_at": str(i.created_at),
+            }
+            for i in instances
+        ]
+    }
+
+
+@router.post("/bots")
+def create_futures_bot(
+    req: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Create and start a new futures bot instance."""
+    strategy_id   = req.get("strategy_id")
+    strategy_name = req.get("strategy_name", "SimpleTargetStrategy")
+    mode          = req.get("mode", "paper")
+    pairs         = req.get("pairs", ["BTC/USDT"])
+    leverage      = int(req.get("leverage", 10))
+    timeframe     = req.get("timeframe", "15m")
+    wallet        = float(req.get("wallet", 1000))
+    stoploss      = float(req.get("stoploss", -0.03))
+    takeprofit    = float(req.get("takeprofit", 0.015))
+    drawdown_tolerance = float(req.get("drawdown_tolerance", 50))
+
+    if strategy_id:
+        from backend.models.strategy import Strategy
+        from sqlalchemy import or_
+        strat = db.execute(
+            select(Strategy).where(
+                Strategy.id == strategy_id,
+                or_(Strategy.user_id == user_id, Strategy.is_template == True),
+            )
+        ).scalar_one_or_none()
+        if strat:
+            strategy_name = strat.name
+
+    engine_key = f"{user_id}:futures:{strategy_name}:{int(_time.time())}"
+    instance = StrategyInstance(
+        user_id=user_id, strategy_id=strategy_id, strategy_name=strategy_name,
+        market_type="futures", mode=mode, pairs=",".join(pairs),
+        leverage=leverage, timeframe=timeframe, wallet=wallet,
+        stoploss=stoploss, takeprofit=takeprofit, risk_pct=drawdown_tolerance,
+        is_running=True, engine_key=engine_key,
+    )
+    db.add(instance)
+    db.commit()
+    db.refresh(instance)
+
+    # Start the engine
+    eng = futures_engine_registry.for_user(user_id)
+    result = eng.start_futures(
+        strategy_name=strategy_name, pairs=pairs, leverage=leverage,
+        mode=mode, timeframe=timeframe, stoploss=stoploss,
+        wallet=wallet, take_profit_pct=takeprofit * 100,
+        strategy_id=strategy_id,
+    )
+
+    log_event(db, user_id, "futures.create_bot", request, payload={
+        "instance_id": instance.id, "strategy": strategy_name, "leverage": leverage,
+    })
+    return {"bot_id": instance.id, "engine_key": engine_key, **result}
+
+
+@router.delete("/bots/{bot_id}")
+def stop_futures_bot(
+    bot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Stop and deactivate a futures bot instance."""
+    instance = db.execute(
+        select(StrategyInstance).where(
+            StrategyInstance.id == bot_id, StrategyInstance.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if not instance:
+        return {"error": "Bot not found"}
+
+    instance.is_running = False
+    db.commit()
+
+    eng = futures_engine_registry.for_user(user_id)
+    eng.stop()
+
+    log_event(db, user_id, "futures.stop_bot", request, payload={"bot_id": bot_id})
+    return {"stopped": True, "bot_id": bot_id}
+
+
+@router.get("/bots/{bot_id}/performance")
+def futures_bot_performance(
+    bot_id: int,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Get performance metrics for a specific bot."""
+    instance = db.execute(
+        select(StrategyInstance).where(
+            StrategyInstance.id == bot_id, StrategyInstance.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if not instance:
+        return {"error": "Bot not found"}
+
+    trades = db.execute(
+        select(Trade).where(
+            Trade.user_id == user_id, Trade.market_type == "futures",
+            Trade.status == "closed",
+        ).order_by(desc(Trade.exit_time)).limit(100)
+    ).scalars().all()
+
+    total_pnl = sum(t.profit_abs or 0 for t in trades)
+    wins = sum(1 for t in trades if (t.profit_abs or 0) > 0)
+    win_rate = round(wins / len(trades) * 100, 1) if trades else 0
+
+    return {
+        "bot_id": bot_id,
+        "strategy_name": instance.strategy_name,
+        "total_trades": len(trades),
+        "total_pnl": round(total_pnl, 4),
+        "win_rate": win_rate,
+        "is_running": instance.is_running,
     }

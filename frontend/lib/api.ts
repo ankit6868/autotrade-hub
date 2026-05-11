@@ -180,6 +180,7 @@ export const api = {
       return request<{ trades: any[] }>(`/api/futures/history${qs}`);
     },
     balance: () => request<any>('/api/futures/balance'),
+    account: () => request<any>('/api/futures/account'),
     backtest: {
       run: (data: Record<string, unknown>) =>
         request<any>('/api/futures/backtest/run', { method: 'POST', body: JSON.stringify(data) }),
@@ -193,6 +194,36 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ pair, direction, stake_pct: stakePct, ...(leverage ? { leverage } : {}) }),
       }),
+    orderbook: (symbol: string) => request<any>(`/api/futures/orderbook/${symbol}`),
+    recentTrades: (symbol: string) => request<any>(`/api/futures/trades/${symbol}`),
+    contracts: () => request<any>('/api/futures/contracts'),
+    placeOrder: (data: Record<string, unknown>) =>
+      request<any>('/api/futures/order', { method: 'POST', body: JSON.stringify(data) }),
+    cancelOrder: (orderId: string) =>
+      request<any>(`/api/futures/order/${orderId}`, { method: 'DELETE' }),
+    orders: (params?: { symbol?: string; status?: string }) => {
+      const qs = params ? '?' + new URLSearchParams(params as Record<string, string>).toString() : '';
+      return request<any>(`/api/futures/orders${qs}`);
+    },
+    ordersHistory: (params?: { symbol?: string; limit?: number }) => {
+      const qs = params ? '?' + new URLSearchParams(params as Record<string, string>).toString() : '';
+      return request<any>(`/api/futures/orders/history${qs}`);
+    },
+    setLeverage: (data: { symbol: string; leverage: number }) =>
+      request<any>('/api/futures/leverage', { method: 'POST', body: JSON.stringify(data) }),
+    setMarginMode: (data: { symbol: string; mode: string }) =>
+      request<any>('/api/futures/margin-mode', { method: 'POST', body: JSON.stringify(data) }),
+    getLeverage: (symbol: string) => request<any>(`/api/futures/leverage/${symbol}`),
+    setTpSl: (data: { pair: string; tp_price?: number; sl_price?: number }) =>
+      request<any>('/api/futures/position/tp-sl', { method: 'POST', body: JSON.stringify(data) }),
+    bots: {
+      list: () => request<any>('/api/futures/bots'),
+      create: (data: Record<string, unknown>) =>
+        request<any>('/api/futures/bots', { method: 'POST', body: JSON.stringify(data) }),
+      stop: (botId: number) =>
+        request<any>(`/api/futures/bots/${botId}`, { method: 'DELETE' }),
+      performance: (botId: number) => request<any>(`/api/futures/bots/${botId}/performance`),
+    },
   },
 
   copy: {

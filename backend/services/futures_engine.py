@@ -67,6 +67,37 @@ class FuturesPosition(Position):
         self.pnl_abs  = self.size * (self.pnl_pct / 100)
 
 
+class PendingOrder:
+    """A pending limit/stop order waiting to be filled."""
+    __slots__ = (
+        "order_id", "symbol", "side", "order_type", "size", "price",
+        "stop_price", "leverage", "margin_mode", "tp_price", "sl_price",
+        "hidden", "post_only", "reduce_only", "time_in_force",
+        "created_at", "db_id",
+    )
+
+    def __init__(self, **kwargs):
+        for k in self.__slots__:
+            setattr(self, k, kwargs.get(k))
+        if self.created_at is None:
+            self.created_at = datetime.now(timezone.utc)
+
+    def should_fill(self, current_price: float) -> bool:
+        if self.order_type == "limit":
+            if self.side == "buy" and current_price <= self.price:
+                return True
+            if self.side == "sell" and current_price >= self.price:
+                return True
+        elif self.order_type in ("stop", "stop_limit"):
+            if self.stop_price is None:
+                return False
+            if self.side == "buy" and current_price >= self.stop_price:
+                return True
+            if self.side == "sell" and current_price <= self.stop_price:
+                return True
+        return False
+
+
 class FuturesEngine(NativeTradingEngine):
     """
     Futures trading engine — paper or live, with leverage.
@@ -78,8 +109,13 @@ class FuturesEngine(NativeTradingEngine):
 
     def __init__(self, user_id: str):
         super().__init__(user_id)
-        self._leverage     = 1
-        self._market_type  = "futures"
+        self._leverage      = 1
+        self._market_type   = "futures"
+        self._margin_mode   = "cross"
+        self._pending_orders: dict[str, PendingOrder] = {}
+        self._per_symbol_leverage: dict[str, int] = {}
+        self._per_symbol_margin: dict[str, str] = {}
+        self._order_counter = 0
 
     # ── Start ───────────────────────────────────────────────────────────
 
@@ -161,6 +197,10 @@ class FuturesEngine(NativeTradingEngine):
             live_price = self._get_live_price(pair)
             if live_price is None:
                 continue
+
+            # Check pending limit/stop orders for this pair
+            if self._pending_orders:
+                self._check_pending_orders(pair, live_price)
 
             now = datetime.now(timezone.utc)
 
@@ -370,15 +410,137 @@ class FuturesEngine(NativeTradingEngine):
         except Exception as e:
             log.error("[%s] futures exit order failed: %s", self.user_id, e)
 
+    # ── Manual order management ──────────────────────────────────────────
+
+    def place_pending_order(
+        self,
+        symbol: str,
+        side: str,
+        order_type: str,
+        size: float,
+        price: float | None = None,
+        stop_price: float | None = None,
+        leverage: int | None = None,
+        tp_price: float | None = None,
+        sl_price: float | None = None,
+        hidden: bool = False,
+        post_only: bool = False,
+        reduce_only: bool = False,
+        time_in_force: str = "GTC",
+    ) -> dict:
+        with self._lock:
+            self._order_counter += 1
+            oid = f"pord-{self.user_id}-{self._order_counter}-{int(time.time())}"
+            lev = leverage or self.get_symbol_leverage(symbol)
+            order = PendingOrder(
+                order_id=oid, symbol=symbol, side=side,
+                order_type=order_type, size=size, price=price,
+                stop_price=stop_price, leverage=lev,
+                margin_mode=self.get_symbol_margin(symbol),
+                tp_price=tp_price, sl_price=sl_price,
+                hidden=hidden, post_only=post_only,
+                reduce_only=reduce_only, time_in_force=time_in_force,
+            )
+            self._pending_orders[oid] = order
+        return {"order_id": oid, "status": "pending", "symbol": symbol, "side": side, "type": order_type}
+
+    def cancel_pending_order(self, order_id: str) -> dict:
+        with self._lock:
+            order = self._pending_orders.pop(order_id, None)
+        if order is None:
+            return {"error": f"Order {order_id} not found"}
+        return {"cancelled": True, "order_id": order_id}
+
+    def get_pending_orders(self, symbol: str | None = None) -> list[dict]:
+        with self._lock:
+            orders = list(self._pending_orders.values())
+        if symbol:
+            orders = [o for o in orders if o.symbol == symbol]
+        return [
+            {
+                "order_id": o.order_id, "symbol": o.symbol, "side": o.side,
+                "order_type": o.order_type, "size": o.size, "price": o.price,
+                "stop_price": o.stop_price, "leverage": o.leverage,
+                "margin_mode": o.margin_mode, "tp_price": o.tp_price,
+                "sl_price": o.sl_price, "status": "pending",
+                "created_at": str(o.created_at),
+            }
+            for o in orders
+        ]
+
+    def set_symbol_leverage(self, symbol: str, leverage: int) -> dict:
+        lev = max(1, min(125, leverage))
+        with self._lock:
+            self._per_symbol_leverage[symbol] = lev
+            self._leverage = lev
+        return {"symbol": symbol, "leverage": lev}
+
+    def get_symbol_leverage(self, symbol: str) -> int:
+        return self._per_symbol_leverage.get(symbol, self._leverage)
+
+    def set_symbol_margin(self, symbol: str, mode: str) -> dict:
+        mode = mode.lower()
+        if mode not in ("cross", "isolated"):
+            return {"error": "mode must be 'cross' or 'isolated'"}
+        with self._lock:
+            self._per_symbol_margin[symbol] = mode
+            self._margin_mode = mode
+        return {"symbol": symbol, "margin_mode": mode}
+
+    def get_symbol_margin(self, symbol: str) -> str:
+        return self._per_symbol_margin.get(symbol, self._margin_mode)
+
+    def _check_pending_orders(self, pair: str, current_price: float):
+        """Check and fill pending orders that match the current price (paper mode)."""
+        symbol_variants = [
+            pair.replace("/", "").replace("USDT", "USDTM"),
+            pair.replace("/", "-"),
+            pair,
+        ]
+        orders_to_fill = []
+        with self._lock:
+            for oid, order in list(self._pending_orders.items()):
+                if order.symbol not in symbol_variants:
+                    continue
+                if order.should_fill(current_price):
+                    orders_to_fill.append((oid, order))
+
+        for oid, order in orders_to_fill:
+            with self._lock:
+                self._pending_orders.pop(oid, None)
+            direction = "long" if order.side == "buy" else "short"
+            fill_price = order.price if order.price else current_price
+            now = datetime.now(timezone.utc)
+            sl = order.sl_price or (fill_price * (1 - abs(self._stoploss)) if direction == "long" else fill_price * (1 + abs(self._stoploss)))
+            tp = order.tp_price or (fill_price * (1 + self._take_profit) if direction == "long" else fill_price * (1 - self._take_profit))
+            lev = order.leverage or self._leverage
+            with self._lock:
+                pos = FuturesPosition(
+                    pair=pair, direction=direction,
+                    entry=fill_price, sl=sl, tp=tp,
+                    size=order.size, leverage=lev,
+                    opened_at=now, trade_id=f"{pair}#filled#{oid}",
+                )
+                pos.db_id = _persist_open_trade(
+                    self.user_id, pos, self._mode, self._strategy_id,
+                    leverage=lev, market_type="futures",
+                )
+                trade_key = f"{pair}#filled#{oid}"
+                self.positions[trade_key] = pos
+                self.balance -= order.size
+                self.last_action = f"FILLED order {oid} → {direction} {pair} @ {fill_price:.4f} {lev}x"
+                log.info("[%s] %s", self.user_id, self.last_action)
+
     # ── Status override — adds leverage + liquidation info ───────────────
 
     @property
     def status(self) -> dict:
         # super().status is a @property on NativeTradingEngine — access without ()
         base = dict(super().status)
-        base["market_type"] = "futures"
-        base["leverage"]    = self._leverage
-        # Enrich positions with liquidation price
+        base["market_type"]   = "futures"
+        base["leverage"]      = self._leverage
+        base["margin_mode"]   = self._margin_mode
+        base["pending_orders"] = len(self._pending_orders)
         for pos_info in base.get("positions", []):
             for k, p in self.positions.items():
                 if p.pair == pos_info["pair"]:

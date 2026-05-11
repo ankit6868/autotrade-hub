@@ -100,3 +100,101 @@ export interface FreeModel {
   name: string;
   context_length: number;
 }
+
+// ── Futures Trading Terminal Types ──────────────────────────────────────
+
+export interface OrderBookLevel {
+  price: string;
+  size: string;
+}
+
+export interface OrderBookData {
+  symbol: string;
+  asks: [string, string][];
+  bids: [string, string][];
+  ts?: number;
+}
+
+export interface FuturesRecentTrade {
+  sequence: number;
+  price: string;
+  size: number;
+  side: string;
+  ts: number;
+}
+
+export interface FuturesPosition {
+  id: string | number;
+  pair: string;
+  side: string;
+  entry_price: number;
+  current_price: number;
+  amount: number;
+  leverage: number;
+  liquidation_price: number | null;
+  stoploss_price: number | null;
+  tp_price?: number | null;
+  entry_time: string;
+  mode: string;
+  market_type: string;
+  unrealized_pnl: number;
+}
+
+export interface FuturesOrder {
+  order_id: string;
+  db_id?: number;
+  symbol: string;
+  side: string;
+  order_type: string;
+  size: number;
+  price: number | null;
+  stop_price: number | null;
+  leverage: number;
+  margin_mode: string;
+  status: string;
+  filled_size?: number;
+  filled_price?: number;
+  tp_price?: number | null;
+  sl_price?: number | null;
+  created_at: string;
+  filled_at?: string | null;
+}
+
+export interface FuturesAccount {
+  mode: string;
+  balance: number;
+  equity: number;
+  unrealized_pnl: number;
+  used_margin: number;
+  available_balance: number;
+  position_count: number;
+  currency: string;
+}
+
+export interface FuturesContract {
+  symbol: string;
+  baseCurrency: string;
+  multiplier: number;
+  tickSize: number;
+  lotSize: number;
+  maxLeverage: number;
+  isInverse: boolean;
+  status: string;
+}
+
+export interface FuturesBot {
+  id: number;
+  strategy_name: string;
+  strategy_id: number | null;
+  mode: string;
+  pairs: string;
+  leverage: number;
+  timeframe: string;
+  wallet: number;
+  is_running: boolean;
+  total_trades: number;
+  total_pnl: number;
+  stoploss: number;
+  takeprofit: number;
+  created_at: string;
+}

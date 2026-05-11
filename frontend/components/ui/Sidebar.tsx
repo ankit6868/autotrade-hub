@@ -14,7 +14,8 @@ const nav = [
   { href: '/strategy/templates', label: 'Templates',          icon: '📋',  section: null },
   { href: '/opportunities',      label: 'Opportunities',      icon: '🎯',  section: null },
   // ── Futures Trading ───────────────────────────────────────────────
-  { href: '/futures-paper',      label: 'Futures Paper',      icon: '📊',  section: 'FUTURES' },
+  { href: '/futures-trade',      label: 'Futures Terminal',   icon: '💹',  section: 'FUTURES' },
+  { href: '/futures-paper',      label: 'Futures Paper',      icon: '📊',  section: null },
   { href: '/futures-live',       label: 'Futures Live',       icon: '⚡',  section: null },
   { href: '/futures-backtest',   label: 'Futures Backtest',   icon: '🔬',  section: null },
   // ── Advanced ──────────────────────────────────────────────────────

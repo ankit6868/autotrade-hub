@@ -106,6 +106,47 @@ class StrategyInstance(Base):
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class FuturesOrder(Base):
+    """Pending/active futures orders — limit, stop, conditional, trailing stop."""
+    __tablename__ = "futures_orders"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Text, nullable=False, index=True)
+    symbol = Column(Text, nullable=False)
+    side = Column(Text, nullable=False)
+    order_type = Column(Text, nullable=False, default="limit")
+    size = Column(Float, nullable=False)
+    price = Column(Float, nullable=True)
+    stop_price = Column(Float, nullable=True)
+    leverage = Column(Integer, default=1)
+    margin_mode = Column(Text, default="cross")
+    client_oid = Column(Text, nullable=True)
+    exchange_order_id = Column(Text, nullable=True)
+    status = Column(Text, default="pending")
+    time_in_force = Column(Text, default="GTC")
+    hidden = Column(Boolean, default=False)
+    post_only = Column(Boolean, default=False)
+    reduce_only = Column(Boolean, default=False)
+    close_order = Column(Boolean, default=False)
+    tp_price = Column(Float, nullable=True)
+    sl_price = Column(Float, nullable=True)
+    filled_size = Column(Float, default=0)
+    filled_price = Column(Float, nullable=True)
+    fee = Column(Float, default=0)
+    created_at = Column(DateTime, server_default=func.now())
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    filled_at = Column(DateTime, nullable=True)
+    cancelled_at = Column(DateTime, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("side IN ('buy', 'sell')"),
+        CheckConstraint("order_type IN ('limit', 'market', 'stop', 'stop_limit', 'trailing_stop', 'twap')"),
+        CheckConstraint("status IN ('pending', 'active', 'filled', 'partially_filled', 'cancelled', 'triggered')"),
+        CheckConstraint("margin_mode IN ('cross', 'isolated')"),
+        Index("ix_futures_orders_user_status", "user_id", "status"),
+    )
+
+
 class CopySignal(Base):
     """Trade signal broadcast by a master trader."""
     __tablename__ = "copy_signals"
