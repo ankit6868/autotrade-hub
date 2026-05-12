@@ -65,15 +65,15 @@ export default function ManualOrderPanel({
 
   const priceNum  = parseFloat(price) || 0;
   const baseCoin  = pair.split('/')[0];
-  // When costMode is on: user types USDT cost, derive BTC amount
   const effectiveRef = parseFloat(price) > 0 ? parseFloat(price) : (lastPrice || 1);
   const amountNum = costMode
     ? (parseFloat(costUsdt) || 0) / effectiveRef
     : (parseFloat(amount) || 0);
-  const cost       = costMode ? (parseFloat(costUsdt) || 0) : priceNum * amountNum;
-  const marginCost = cost / leverage;
+  const costUsdt_ = costMode ? (parseFloat(costUsdt) || 0) : amountNum * effectiveRef;
+  const marginCost = costUsdt_ / leverage;
 
-  const maxLongAmount = priceNum > 0 ? (availableBalance * leverage) / priceNum : 0;
+  const refPrice = priceNum > 0 ? priceNum : (lastPrice || 0);
+  const maxLongAmount = refPrice > 0 ? (availableBalance * leverage) / refPrice : 0;
   const maxShortAmount = maxLongAmount;
 
   async function placeOrder(side: 'buy' | 'sell') {
@@ -82,18 +82,23 @@ export default function ManualOrderPanel({
     try {
       if (orderTab === 'market') {
         const direction = side === 'buy' ? 'long' : 'short';
-        const stakePct = availableBalance > 0 ? (amountNum / availableBalance) * 100 : 5;
-        const r = await api.futures.manualEntry(pair, direction, stakePct, leverage);
+        const stakePct = availableBalance > 0
+          ? (costUsdt_ / availableBalance) * 100
+          : 5;
+        if (stakePct <= 0) { setError('Enter an amount'); setSubmitting(false); return; }
+        const r = await api.futures.manualEntry(pair, direction, Math.min(stakePct, 100), leverage);
         if (r.error) setError(r.error);
         else onOrderPlaced();
       } else {
+        if (priceNum <= 0) { setError('Enter a price for limit orders'); setSubmitting(false); return; }
+        if (amountNum <= 0) { setError('Enter an amount'); setSubmitting(false); return; }
         const futSymbol = symbol.replace('/', '').replace('USDT', 'USDTM');
         const r = await api.futures.placeOrder({
           symbol: futSymbol,
           side,
           order_type: orderTab === 'conditional' ? 'stop' : 'limit',
           size: amountNum,
-          price: priceNum || undefined,
+          price: priceNum,
           stop_price: orderTab === 'conditional' ? parseFloat(stopPrice) || undefined : undefined,
           leverage,
           tp_price: tpPrice ? parseFloat(tpPrice) : undefined,
