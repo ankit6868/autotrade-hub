@@ -175,7 +175,7 @@ class FuturesEngine(NativeTradingEngine):
         self._strategy     = strategy_name
         self._strategy_id  = strategy_id
         self._pairs        = pairs
-        self._leverage     = max(1, min(125, int(leverage)))
+        self._leverage     = max(1, min(20, int(leverage)))
         self._timeframe    = timeframe
         self._stoploss     = stoploss
         self._take_profit  = take_profit_pct / 100.0
@@ -523,7 +523,7 @@ class FuturesEngine(NativeTradingEngine):
         ]
 
     def set_symbol_leverage(self, symbol: str, leverage: int) -> dict:
-        lev = max(1, min(125, leverage))
+        lev = max(1, min(20, leverage))
         with self._lock:
             self._per_symbol_leverage[symbol] = lev
             self._leverage = lev

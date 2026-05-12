@@ -700,7 +700,7 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
                 <span className="text-xs font-bold text-emerald-400">{leverage}x</span>
               </div>
               <div className="flex gap-1.5">
-                {[1, 2, 3, 5, 10, 20, 50, 75].map(l => (
+                {[1, 2, 3, 5, 10, 15, 20].map(l => (
                   <button
                     key={l}
                     onClick={() => setLeverage(l)}
