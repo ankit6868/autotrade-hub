@@ -165,34 +165,107 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
       {/* Running Bots */}
       {runningBots.filter(b => b.is_running).length > 0 && (
         <div className="px-3 py-2 border-b border-white/[0.06]">
-          <p className="text-[10px] text-slate-500 font-medium mb-1.5">Active Bots ({runningBots.filter(b => b.is_running).length})</p>
+          <div className="flex items-center justify-between mb-1.5">
+            <p className="text-[10px] text-emerald-400 font-bold">Active Bots ({runningBots.filter(b => b.is_running).length})</p>
+            <button onClick={refreshBots} className="text-[9px] text-slate-500 hover:text-white">Refresh</button>
+          </div>
           {runningBots.filter(b => b.is_running).map(bot => (
-            <div key={bot.id} className="p-2 rounded-lg bg-[#1e222d] border border-white/[0.04] mb-1.5">
+            <div key={bot.id} className="p-2.5 rounded-lg bg-[#1e222d] border border-emerald-500/10 mb-1.5">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                  <span className="text-white text-[11px] font-medium">{bot.strategy_name}</span>
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.5)]" />
+                  <span className="text-white text-[11px] font-bold">{bot.strategy_name}</span>
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
+                    bot.mode === 'live' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-indigo-500/20 text-indigo-400'
+                  }`}>{bot.mode === 'live' ? 'LIVE' : 'PAPER'}</span>
                 </div>
                 <button
                   onClick={async () => {
                     await api.futures.bots.stop(bot.id);
-                    setRunningBots(prev => prev.map(b => b.id === bot.id ? { ...b, is_running: false } : b));
+                    refreshBots();
                   }}
                   className="text-red-400 hover:text-red-300 text-[10px] font-medium px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20"
                 >
                   Stop
                 </button>
               </div>
-              <div className="flex items-center gap-3 mt-1 text-[10px] text-slate-500">
+
+              {/* Bot stats grid */}
+              <div className="grid grid-cols-3 gap-2 mt-2 text-[10px]">
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">Pair</p>
+                  <p className="text-white font-medium">{bot.pairs}</p>
+                </div>
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">Leverage</p>
+                  <p className="text-white font-medium">{bot.leverage}x</p>
+                </div>
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">Risk</p>
+                  <p className="text-white font-medium">{bot.risk_pct || 5}%</p>
+                </div>
+              </div>
+
+              {/* P&L + Positions */}
+              <div className="grid grid-cols-3 gap-2 mt-1.5 text-[10px]">
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">Trades</p>
+                  <p className="text-white font-medium">{bot.total_trades || 0}</p>
+                </div>
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">Open</p>
+                  <p className={`font-medium ${bot.open_positions > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{bot.open_positions || 0}</p>
+                </div>
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">P&L</p>
+                  <p className={`font-bold ${(bot.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(bot.total_pnl || 0) >= 0 ? '+' : ''}{(bot.total_pnl || 0).toFixed(2)}
+                  </p>
+                </div>
+              </div>
+
+              {/* Signal / Last action */}
+              <div className="mt-2 p-1.5 rounded bg-[#131722] border border-white/[0.03]">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[9px] text-slate-500">Signal:</span>
+                  {bot.last_action ? (
+                    <span className={`text-[9px] font-medium ${
+                      bot.last_action.toLowerCase().includes('long') || bot.last_action.toLowerCase().includes('buy')
+                        ? 'text-emerald-400'
+                        : bot.last_action.toLowerCase().includes('short') || bot.last_action.toLowerCase().includes('sell')
+                          ? 'text-red-400'
+                          : 'text-slate-400'
+                    }`}>{bot.last_action}</span>
+                  ) : (
+                    <span className="text-[9px] text-slate-500 italic">Waiting for signal... ({bot.ticks || 0} ticks scanned)</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Stopped Bots (recent) */}
+      {runningBots.filter(b => !b.is_running).length > 0 && (
+        <div className="px-3 py-2 border-b border-white/[0.06]">
+          <p className="text-[10px] text-slate-500 font-medium mb-1.5">Recent Bots</p>
+          {runningBots.filter(b => !b.is_running).slice(0, 3).map(bot => (
+            <div key={bot.id} className="p-2 rounded-lg bg-[#1e222d]/50 border border-white/[0.03] mb-1">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                  <span className="text-slate-400 text-[11px] font-medium">{bot.strategy_name}</span>
+                </div>
+                <span className={`text-[10px] font-bold ${(bot.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {(bot.total_pnl || 0) >= 0 ? '+' : ''}{(bot.total_pnl || 0).toFixed(2)} USDT
+                </span>
+              </div>
+              <div className="flex items-center gap-3 mt-0.5 text-[9px] text-slate-600">
                 <span>{bot.pairs}</span>
                 <span>{bot.leverage}x</span>
-                <span>{bot.mode}</span>
-                {bot.open_positions > 0 && <span className="text-emerald-400">{bot.open_positions} open</span>}
-                {bot.ticks > 0 && <span>{bot.ticks} ticks</span>}
+                <span>{bot.total_trades || 0} trades</span>
               </div>
-              {bot.last_action && (
-                <p className="text-[9px] text-slate-600 mt-1 truncate">{bot.last_action}</p>
-              )}
             </div>
           ))}
         </div>
@@ -574,6 +647,40 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
               </div>
             </div>
 
+            {/* Wallet % Risk Control — always visible */}
+            <div>
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-xs font-bold text-white">Risk per Trade</span>
+                <span className="text-xs text-emerald-400 font-bold">{maxPositionPct}% of wallet</span>
+              </div>
+              <p className="text-[10px] text-slate-500 mb-2">How much of your wallet balance each trade will use</p>
+              <div className="flex gap-1.5">
+                {[2, 5, 10, 15, 25].map(pct => (
+                  <button
+                    key={pct}
+                    onClick={() => setMaxPositionPct(pct)}
+                    className={`flex-1 py-1.5 rounded text-[11px] font-bold border transition-colors ${
+                      maxPositionPct === pct
+                        ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
+                        : 'text-slate-400 bg-[#1e222d] border-white/[0.06] hover:border-emerald-500/30'
+                    }`}
+                  >
+                    {pct}%
+                  </button>
+                ))}
+              </div>
+              <div className="mt-2 p-2 rounded bg-[#1e222d] border border-white/[0.04]">
+                <div className="flex justify-between text-[10px]">
+                  <span className="text-slate-500">Max per trade</span>
+                  <span className="text-white font-medium">{((parseFloat(investment) || (liveBalance || 1000)) * maxPositionPct / 100).toFixed(2)} USDT</span>
+                </div>
+                <div className="flex justify-between text-[10px] mt-0.5">
+                  <span className="text-slate-500">With {leverage}x leverage</span>
+                  <span className="text-emerald-400 font-medium">{((parseFloat(investment) || (liveBalance || 1000)) * maxPositionPct / 100 * leverage).toFixed(2)} USDT position</span>
+                </div>
+              </div>
+            </div>
+
             {/* Advanced Settings */}
             <div>
               <button
@@ -585,29 +692,6 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
 
               {showAdvanced && (
                 <div className="mt-3 space-y-3">
-                  {/* Wallet % risk per trade */}
-                  <div>
-                    <div className="flex items-center justify-between mb-1">
-                      <span className="text-[11px] text-slate-400">Risk per Trade (% of wallet)</span>
-                      <span className="text-[11px] text-white font-medium">{maxPositionPct}%</span>
-                    </div>
-                    <div className="flex gap-1">
-                      {[2, 5, 10, 15, 25].map(pct => (
-                        <button
-                          key={pct}
-                          onClick={() => setMaxPositionPct(pct)}
-                          className={`flex-1 py-1 rounded text-[10px] font-medium border transition-colors ${
-                            maxPositionPct === pct
-                              ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40'
-                              : 'text-slate-400 bg-[#1e222d] border-white/[0.06] hover:border-emerald-500/30'
-                          }`}
-                        >
-                          {pct}%
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
                   <div className="flex items-center justify-between">
                     <span className="text-[11px] text-slate-400">Drawdown Tolerance</span>
                     <span className="text-[11px] text-white">{drawdownTolerance}% &gt;</span>
