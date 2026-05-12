@@ -1149,17 +1149,22 @@ def get_futures_leverage(
 
 @router.get("/account")
 def futures_account(
+    mode: str = None,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Futures Lead Trading account overview — always fetches from KuCoin when keys are configured.
-    KuCoin Lead Trading uses the same futures account (/api/v1/account-overview).
-    Falls back to paper engine state only when no API keys are set."""
+    """Futures account overview.
+    mode=paper → always return paper engine balance.
+    mode=live or None → try KuCoin, fallback to paper."""
     from backend.utils.encryption import decrypt, DecryptError
 
     eng = futures_engine_registry.for_user(user_id)
 
-    # Always try to fetch live data from KuCoin Futures Lead Trading account
+    # Paper mode: skip KuCoin, return paper engine balance directly
+    if mode == "paper":
+        return _paper_account(eng)
+
+    # Live mode: try to fetch live data from KuCoin Futures account
     cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
     if cfg:
         try:
@@ -1213,12 +1218,17 @@ def futures_account(
             log.warning("Failed to fetch KuCoin lead trading account for %s: %s", user_id, exc)
 
     # Fallback: paper account from engine state (no KuCoin keys configured)
+    return _paper_account(eng)
+
+
+def _paper_account(eng):
+    """Return paper engine balance as account overview."""
     open_positions = eng.get_open_positions() if eng.is_running else []
     total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_positions)
     total_margin = sum(p.get("stake", 0) for p in open_positions)
 
     return {
-        "mode": eng._mode or "paper",
+        "mode": "paper",
         "source": "paper_engine",
         "balance": round(eng.balance, 4),
         "margin_balance": round(eng.balance, 4),

@@ -28,10 +28,10 @@ export default function FuturesTerminal() {
 
   const refreshAccount = useCallback(async () => {
     try {
-      const data = await api.futures.account();
+      const data = await api.futures.account(mode);
       setAccount(data);
     } catch { /* silent */ }
-  }, []);
+  }, [mode]);
 
   const fetchLeverage = useCallback(async () => {
     try {

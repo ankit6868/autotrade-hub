@@ -180,7 +180,8 @@ export const api = {
       return request<{ trades: any[] }>(`/api/futures/history${qs}`);
     },
     balance: () => request<any>('/api/futures/balance'),
-    account: () => request<any>('/api/futures/account'),
+    account: (mode?: 'paper' | 'live') =>
+      request<any>(`/api/futures/account${mode ? `?mode=${mode}` : ''}`),
     backtest: {
       run: (data: Record<string, unknown>) =>
         request<any>('/api/futures/backtest/run', { method: 'POST', body: JSON.stringify(data) }),

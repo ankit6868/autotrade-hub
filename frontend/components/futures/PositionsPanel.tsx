@@ -25,7 +25,7 @@ export default function PositionsPanel({ mode, onRefresh }: Props) {
         api.futures.open(mode),
         api.futures.orders({ status: 'pending' }).catch(() => ({ orders: [] })),
         api.futures.history({ mode, limit: '50' }),
-        api.futures.account().catch(() => null),
+        api.futures.account(mode).catch(() => null),
         api.futures.bots.list().catch(() => ({ bots: [] })),
       ]);
       setPositions(pos.trades || []);
