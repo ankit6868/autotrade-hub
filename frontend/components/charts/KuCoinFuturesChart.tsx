@@ -98,30 +98,43 @@ function calcMACD(closes: number[], fast = 12, slow = 26, sig = 9) {
   return { macd, signal, hist };
 }
 
-// ── Shared chart options (no watermark, no attribution) ──────────────────────
+function hideAttribution(container: HTMLElement) {
+  const els = container.querySelectorAll('a[href*="tradingview"], div[class*="apply-common"]');
+  els.forEach(el => (el as HTMLElement).style.display = 'none');
+}
+
 function chartOpts(bg = '#0d1117') {
   return {
     layout: {
       background: { type: ColorType.Solid as const, color: bg },
       textColor: '#64748b',
+      fontFamily: "'Inter', -apple-system, system-ui, sans-serif",
+      fontSize: 11,
     },
     grid: {
       vertLines: { color: 'rgba(255,255,255,0.03)' },
       horzLines: { color: 'rgba(255,255,255,0.03)' },
     },
-    crosshair:   { mode: CrosshairMode.Normal },
-    watermark:   { visible: false },             // ← removes the TV logo
+    crosshair: {
+      mode: CrosshairMode.Normal,
+      vertLine: { color: 'rgba(100,180,255,0.3)', width: 1 as const, style: 2, labelBackgroundColor: '#1e293b' },
+      horzLine: { color: 'rgba(100,180,255,0.3)', width: 1 as const, style: 2, labelBackgroundColor: '#1e293b' },
+    },
+    watermark: { visible: false },
     handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
-    handleScale:  { mouseWheel: true, pinch: true, axisPressedMouseMove: false },
+    handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: { time: true, price: true } },
     rightPriceScale: {
       borderColor: 'rgba(255,255,255,0.06)',
       scaleMargins: { top: 0.05, bottom: 0.1 },
+      entireTextOnly: true,
     },
     timeScale: {
       borderColor: 'rgba(255,255,255,0.06)',
       timeVisible: true,
       secondsVisible: false,
-      rightOffset: 5,
+      rightOffset: 8,
+      barSpacing: 8,
+      minBarSpacing: 2,
     },
   };
 }
@@ -133,7 +146,6 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
   const rsiRef     = useRef<HTMLDivElement>(null);
   const macdRef    = useRef<HTMLDivElement>(null);
 
-  // Chart + series refs
   const chartMain  = useRef<IChartApi | null>(null);
   const chartRSI   = useRef<IChartApi | null>(null);
   const chartMACD  = useRef<IChartApi | null>(null);
@@ -150,14 +162,15 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
 
   const [tf, setTf]             = useState(defaultInterval);
   const [loading, setLoading]   = useState(true);
-  const [lastBar, setLastBar]   = useState<{ c: number; pct: number } | null>(null);
+  const [lastBar, setLastBar]   = useState<{ o: number; h: number; l: number; c: number; v: number; pct: number } | null>(null);
   const [showBB, setShowBB]     = useState(true);
   const [showRSI, setShowRSI]   = useState(true);
   const [showMACD, setShowMACD] = useState(true);
   const [error, setError]       = useState('');
   const [isMobile, setIsMobile] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [candleCount, setCandleCount] = useState(300);
 
-  // Detect mobile
   useEffect(() => {
     const check = () => setIsMobile(window.innerWidth < 768);
     check();
@@ -165,12 +178,18 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
     return () => window.removeEventListener('resize', check);
   }, []);
 
+  // Hide TV attribution after charts render
+  const hideAllAttribution = useCallback(() => {
+    if (wrapperRef.current) {
+      hideAttribution(wrapperRef.current);
+    }
+  }, []);
+
   // ── Build charts once ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!mainRef.current) return;
     const BG = '#0d1117';
 
-    // Main chart
     const mc = createChart(mainRef.current, {
       ...chartOpts(BG),
       autoSize: true,
@@ -196,7 +215,6 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
     serBBUp.current  = mc.addLineSeries({ ...lineBase, color: 'rgba(100,180,255,0.45)' });
     serBBLow.current = mc.addLineSeries({ ...lineBase, color: 'rgba(100,180,255,0.45)' });
 
-    // RSI chart
     if (rsiRef.current) {
       const rc = createChart(rsiRef.current, {
         ...chartOpts(BG),
@@ -212,7 +230,6 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
       });
     }
 
-    // MACD chart
     if (macdRef.current) {
       const mc2 = createChart(macdRef.current, {
         ...chartOpts(BG),
@@ -230,7 +247,6 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
       mc2.priceScale('macd_h').applyOptions({ scaleMargins: { top: 0.7, bottom: 0 } });
     }
 
-    // Sync visible range across all panes
     const syncRange = (src: IChartApi, others: IChartApi[]) => {
       src.timeScale().subscribeVisibleLogicalRangeChange(r => {
         if (r) others.forEach(o => o.timeScale().setVisibleLogicalRange(r));
@@ -240,6 +256,10 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
     syncRange(mc, others);
     if (chartRSI.current)  syncRange(chartRSI.current,  [mc, ...(chartMACD.current ? [chartMACD.current] : [])]);
     if (chartMACD.current) syncRange(chartMACD.current, [mc, ...(chartRSI.current  ? [chartRSI.current]  : [])]);
+
+    // Hide attribution logos after a short delay to let the library render
+    setTimeout(hideAllAttribution, 100);
+    setTimeout(hideAllAttribution, 500);
 
     return () => {
       mc.remove(); chartRSI.current?.remove(); chartMACD.current?.remove();
@@ -253,7 +273,7 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
     if (!serCandle.current) return;
     setLoading(true); setError('');
     try {
-      const data   = await api.market.ohlcv(pair, tf, 300);
+      const data   = await api.market.ohlcv(pair, tf, candleCount);
       const raw    = (data.candles ?? []).sort((a: {time:number}, b: {time:number}) => a.time - b.time);
       if (!raw.length) { setError('No data'); setLoading(false); return; }
 
@@ -264,7 +284,6 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
       const closes = raw.map((c: {close:number}) => c.close);
       const vols   = raw.map((c: {volume:number}) => c.volume);
 
-      // Candlesticks
       serCandle.current!.setData(
         raw.map((_: unknown, i: number) => ({
           time: times[i],
@@ -272,7 +291,6 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
         }) as CandlestickData)
       );
 
-      // Volume
       serVol.current?.setData(
         raw.map((_: unknown, i: number) => ({
           time: times[i], value: vols[i],
@@ -280,11 +298,9 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
         }) as HistogramData)
       );
 
-      // Helper: filter nulls into series format
       const toLine = (vals: (number | null)[]) =>
         vals.map((v, i) => v !== null ? { time: times[i], value: v } : null).filter(Boolean) as { time: Time; value: number }[];
 
-      // BB
       const bb = calcBB(closes);
       if (showBB) {
         serBBMid.current?.setData(toLine(bb.mid));
@@ -294,12 +310,10 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
         [serBBMid, serBBUp, serBBLow].forEach(s => s.current?.setData([]));
       }
 
-      // RSI
       if (showRSI && serRSI.current) {
         serRSI.current.setData(toLine(calcRSI(closes)));
       } else serRSI.current?.setData([]);
 
-      // MACD
       if (showMACD && serMACDL.current) {
         const { macd, signal, hist } = calcMACD(closes);
         serMACDL.current.setData(toLine(macd));
@@ -319,46 +333,124 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
       const last = raw[raw.length - 1];
       const prev = raw[raw.length - 2];
       if (last && prev) {
-        setLastBar({ c: last.close, pct: (last.close - prev.close) / prev.close * 100 });
+        setLastBar({
+          o: last.open, h: last.high, l: last.low, c: last.close,
+          v: last.volume,
+          pct: (last.close - prev.close) / prev.close * 100,
+        });
       }
+
+      // Hide attribution after data load
+      setTimeout(hideAllAttribution, 50);
     } catch { setError('Failed to load chart data'); }
     setLoading(false);
-  }, [pair, tf, showBB, showRSI, showMACD]);
+  }, [pair, tf, candleCount, showBB, showRSI, showMACD, hideAllAttribution]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // Auto-refresh every 30s
   useEffect(() => {
     const t = window.setInterval(loadData, 30_000);
     return () => window.clearInterval(t);
   }, [loadData]);
 
+  // ── Zoom controls ──────────────────────────────────────────────────────────
+  const zoomIn = () => {
+    const ts = chartMain.current?.timeScale();
+    if (!ts) return;
+    const range = ts.getVisibleLogicalRange();
+    if (range) {
+      const mid = (range.from + range.to) / 2;
+      const span = (range.to - range.from) * 0.4;
+      ts.setVisibleLogicalRange({ from: mid - span, to: mid + span });
+    }
+  };
+
+  const zoomOut = () => {
+    const ts = chartMain.current?.timeScale();
+    if (!ts) return;
+    const range = ts.getVisibleLogicalRange();
+    if (range) {
+      const mid = (range.from + range.to) / 2;
+      const span = (range.to - range.from) * 0.75;
+      ts.setVisibleLogicalRange({ from: mid - span, to: mid + span });
+    }
+  };
+
+  const fitAll = () => {
+    chartMain.current?.timeScale().fitContent();
+  };
+
+  const toggleFullscreen = () => {
+    if (!wrapperRef.current) return;
+    if (!document.fullscreenElement) {
+      wrapperRef.current.requestFullscreen().then(() => setIsFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen().then(() => setIsFullscreen(false)).catch(() => {});
+    }
+  };
+
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener('fullscreenchange', handler);
+    return () => document.removeEventListener('fullscreenchange', handler);
+  }, []);
+
   // ── Layout ────────────────────────────────────────────────────────────────
-  const rsiH  = showRSI  ? (isMobile ? 60 : 75)  : 0;
-  const macdH = showMACD ? (isMobile ? 65 : 85)  : 0;
+  const rsiH  = showRSI  ? (isMobile ? 60 : 80)  : 0;
+  const macdH = showMACD ? (isMobile ? 65 : 90)  : 0;
+
+  const fmtPrice = (v: number) => v >= 1 ? v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    : v.toPrecision(5);
+  const fmtVol = (v: number) => v >= 1e9 ? (v / 1e9).toFixed(2) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : v.toFixed(0);
 
   return (
-    <div ref={wrapperRef} className="flex flex-col w-full h-full bg-[#0d1117] overflow-hidden">
+    <div ref={wrapperRef} className={`flex flex-col w-full h-full bg-[#0d1117] overflow-hidden ${isFullscreen ? 'fixed inset-0 z-50' : ''}`}>
+
+      {/* ── Global style to hide TradingView attribution ── */}
+      <style jsx global>{`
+        .tv-lightweight-charts a[href*="tradingview"],
+        div[class*="apply-common-tooltip"],
+        a[target="_blank"][href*="tradingview.com"] {
+          display: none !important;
+          visibility: hidden !important;
+          opacity: 0 !important;
+          pointer-events: none !important;
+          width: 0 !important;
+          height: 0 !important;
+          overflow: hidden !important;
+        }
+      `}</style>
 
       {/* ── Toolbar ── */}
       <div className="flex items-center flex-wrap gap-x-2 gap-y-1 px-2 py-1.5 border-b border-white/[0.05] bg-[#0d1117] shrink-0">
 
-        {/* Pair label */}
+        {/* Pair + OHLCV info */}
         <div className="flex items-center gap-2 min-w-0">
-          <span className="text-white font-bold text-[11px] whitespace-nowrap hidden sm:inline">
+          <span className="text-white font-bold text-[11px] whitespace-nowrap">
             {pair}
-            <span className="text-slate-500 font-normal ml-1">{tf} · KuCoin</span>
+            <span className="text-slate-500 font-normal ml-1">{tf}</span>
+            <span className="text-slate-600 font-normal ml-1">· KuCoin Futures</span>
           </span>
           {lastBar && (
-            <span className={`text-[11px] font-semibold whitespace-nowrap ${lastBar.pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {lastBar.c.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              {'  '}{lastBar.pct >= 0 ? '+' : ''}{lastBar.pct.toFixed(2)}%
-            </span>
+            <div className="flex items-center gap-2 text-[10px] whitespace-nowrap">
+              <span className={`font-semibold ${lastBar.pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {fmtPrice(lastBar.c)}
+              </span>
+              <span className={`${lastBar.pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {lastBar.pct >= 0 ? '+' : ''}{lastBar.pct.toFixed(2)}%
+              </span>
+              <span className="text-slate-500 hidden md:inline">
+                O <span className="text-slate-400">{fmtPrice(lastBar.o)}</span>{' '}
+                H <span className="text-slate-400">{fmtPrice(lastBar.h)}</span>{' '}
+                L <span className="text-slate-400">{fmtPrice(lastBar.l)}</span>{' '}
+                V <span className="text-slate-400">{fmtVol(lastBar.v)}</span>
+              </span>
+            </div>
           )}
         </div>
 
         {/* Timeframe row */}
-        <div className="flex items-center bg-[#161b27] rounded overflow-hidden shrink-0">
+        <div className="flex items-center bg-[#161b27] rounded overflow-hidden shrink-0 ml-auto sm:ml-0">
           {TIMEFRAMES.map(t => (
             <button
               key={t.value}
@@ -370,6 +462,23 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
               }`}
             >
               {t.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Candle count selector */}
+        <div className="flex items-center bg-[#161b27] rounded overflow-hidden shrink-0 hidden sm:flex">
+          {[100, 200, 300, 500].map(n => (
+            <button
+              key={n}
+              onClick={() => setCandleCount(n)}
+              className={`px-1.5 py-1 text-[10px] font-medium transition-colors ${
+                candleCount === n
+                  ? 'bg-slate-600/30 text-slate-200'
+                  : 'text-slate-500 hover:text-slate-300'
+              }`}
+            >
+              {n}
             </button>
           ))}
         </div>
@@ -393,16 +502,24 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
           ))}
         </div>
 
-        {/* Refresh / loading */}
-        <button
-          onClick={loadData}
-          className="ml-auto text-slate-500 hover:text-white text-[12px] w-6 h-6 flex items-center justify-center rounded hover:bg-white/5 transition-colors"
-          title="Refresh"
-        >
-          {loading ? (
-            <span className="animate-spin inline-block text-[10px]">⟳</span>
-          ) : '⟳'}
-        </button>
+        {/* Zoom + Fullscreen + Refresh */}
+        <div className="flex items-center gap-0.5 shrink-0 ml-auto">
+          <button onClick={zoomIn} className="text-slate-500 hover:text-white text-[14px] w-6 h-6 flex items-center justify-center rounded hover:bg-white/5 transition-colors" title="Zoom In">+</button>
+          <button onClick={zoomOut} className="text-slate-500 hover:text-white text-[14px] w-6 h-6 flex items-center justify-center rounded hover:bg-white/5 transition-colors" title="Zoom Out">−</button>
+          <button onClick={fitAll} className="text-slate-500 hover:text-white text-[11px] w-6 h-6 flex items-center justify-center rounded hover:bg-white/5 transition-colors" title="Fit All">⊞</button>
+          <button onClick={toggleFullscreen} className="text-slate-500 hover:text-white text-[11px] w-6 h-6 flex items-center justify-center rounded hover:bg-white/5 transition-colors" title="Fullscreen">
+            {isFullscreen ? '⊟' : '⛶'}
+          </button>
+          <button
+            onClick={loadData}
+            className="text-slate-500 hover:text-white text-[12px] w-6 h-6 flex items-center justify-center rounded hover:bg-white/5 transition-colors"
+            title="Refresh"
+          >
+            {loading ? (
+              <span className="animate-spin inline-block text-[10px]">⟳</span>
+            ) : '⟳'}
+          </button>
+        </div>
       </div>
 
       {/* Error bar */}
@@ -410,7 +527,7 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
         <div className="text-red-400 text-[10px] text-center py-0.5 bg-red-500/10 shrink-0">{error}</div>
       )}
 
-      {/* ── Chart panes — flex column, each fills its allocated space ── */}
+      {/* ── Chart panes ── */}
       <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
 
         {/* Main candle chart */}
@@ -418,20 +535,18 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
 
         {/* RSI pane */}
         {showRSI && (
-          <div
-            ref={rsiRef}
-            style={{ height: rsiH }}
-            className="w-full shrink-0 border-t border-white/[0.04]"
-          />
+          <div className="shrink-0 border-t border-white/[0.04] relative">
+            <span className="absolute left-2 top-0.5 text-[9px] text-purple-400/60 font-medium z-10 pointer-events-none">RSI(14)</span>
+            <div ref={rsiRef} style={{ height: rsiH }} className="w-full" />
+          </div>
         )}
 
         {/* MACD pane */}
         {showMACD && (
-          <div
-            ref={macdRef}
-            style={{ height: macdH }}
-            className="w-full shrink-0 border-t border-white/[0.04]"
-          />
+          <div className="shrink-0 border-t border-white/[0.04] relative">
+            <span className="absolute left-2 top-0.5 text-[9px] text-blue-400/60 font-medium z-10 pointer-events-none">MACD(12,26,9)</span>
+            <div ref={macdRef} style={{ height: macdH }} className="w-full" />
+          </div>
         )}
       </div>
     </div>
