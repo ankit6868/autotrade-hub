@@ -1315,7 +1315,7 @@ def futures_bot_performance(
         "risk_pct": instance.risk_pct,
         "trades": [
             {
-                "pair": t.pair, "direction": t.direction,
+                "pair": t.pair, "direction": getattr(t, "side", "long"),
                 "entry_price": t.entry_price, "exit_price": t.exit_price,
                 "profit_abs": round(t.profit_abs or 0, 4),
                 "profit_pct": round(t.profit_pct or 0, 2),
