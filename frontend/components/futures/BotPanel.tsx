@@ -884,9 +884,12 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
   const [data, setData] = useState<any>(null);
   const [tab, setTab] = useState<'signals' | 'positions' | 'trades'>('signals');
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   const refresh = useCallback(() => {
-    api.futures.bots.performance(botId).then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
+    api.futures.bots.performance(botId)
+      .then(d => { if (d && !d.error) { setData(d); setError(''); } else { setError(d?.error || 'Failed to load'); } setLoading(false); })
+      .catch(e => { setError(String(e?.message || e)); setLoading(false); });
   }, [botId]);
 
   useEffect(() => {
@@ -895,8 +898,30 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
     return () => clearInterval(t);
   }, [refresh]);
 
-  if (loading || !data) {
+  if (loading) {
     return <div className="flex items-center justify-center h-full text-slate-500 text-xs">Loading bot data...</div>;
+  }
+
+  if (error && !data) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-3 px-4">
+        <p className="text-red-400 text-xs text-center">Failed to load bot details</p>
+        <p className="text-slate-500 text-[10px] text-center">{error.length > 100 ? 'Server error — backend may be redeploying' : error}</p>
+        <div className="flex gap-2">
+          <button onClick={onBack} className="px-3 py-1.5 rounded text-xs text-slate-300 border border-white/[0.1] hover:bg-white/[0.05]">Back</button>
+          <button onClick={refresh} className="px-3 py-1.5 rounded text-xs text-emerald-400 border border-emerald-500/30 hover:bg-emerald-500/10">Retry</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-2">
+        <p className="text-slate-500 text-xs">No data available</p>
+        <button onClick={onBack} className="px-3 py-1.5 rounded text-xs text-slate-300 border border-white/[0.1] hover:bg-white/[0.05]">Back</button>
+      </div>
+    );
   }
 
   const actionLog = data.action_log || [];
