@@ -80,15 +80,19 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
   const [viewingBotId, setViewingBotId] = useState<number | null>(null);
   const [leadStatus, setLeadStatus] = useState<{ connected: boolean; balance?: number; equity?: number; reason?: string } | null>(null);
   const [runningBots, setRunningBots] = useState<any[]>([]);
+  const [mainEngine, setMainEngine] = useState<any>(null);
 
   const refreshBots = useCallback(() => {
     api.futures.bots.list().then(d => setRunningBots(d.bots || [])).catch(() => {});
+    api.futures.status().then(d => setMainEngine(d?.running ? d : null)).catch(() => setMainEngine(null));
   }, []);
 
   useEffect(() => {
     api.strategy.list().then(d => setStrategies(d.strategies || [])).catch(() => {});
     api.futures.leadTradingStatus().then(d => setLeadStatus(d)).catch(() => {});
     refreshBots();
+    const t = setInterval(refreshBots, 5000);
+    return () => clearInterval(t);
   }, [refreshBots]);
 
   const userStrategyCards: StrategyCard[] = strategies
@@ -186,13 +190,81 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
       </div>
 
       {/* Running Bots — scrollable so 6+ bots don't overflow */}
-      {runningBots.filter(b => b.is_running).length > 0 && (
+      {(runningBots.filter(b => b.is_running).length > 0 || mainEngine) && (
         <div className="px-3 py-2 border-b border-white/[0.06] flex flex-col max-h-[320px]">
           <div className="flex items-center justify-between mb-1.5 shrink-0">
-            <p className="text-[10px] text-emerald-400 font-bold">Active Bots ({runningBots.filter(b => b.is_running).length})</p>
+            <p className="text-[10px] text-emerald-400 font-bold">Active Bots ({runningBots.filter(b => b.is_running).length + (mainEngine ? 1 : 0)})</p>
             <button onClick={refreshBots} className="text-[9px] text-slate-500 hover:text-white">Refresh</button>
           </div>
           <div className="overflow-y-auto flex-1 pr-0.5 space-y-1.5">
+          {/* Main futures engine (started from Futures Paper/Live pages) */}
+          {mainEngine && (
+            <div className="p-2.5 rounded-lg bg-[#1e222d] border border-cyan-500/20 hover:border-cyan-500/40 transition-colors">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="w-2 h-2 rounded-full animate-pulse bg-cyan-400 shadow-[0_0_6px_rgba(34,211,238,0.5)]" />
+                  <span className="text-white text-[11px] font-bold">{mainEngine.strategy || 'Futures Engine'}</span>
+                  <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
+                    mainEngine.mode === 'live' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-indigo-500/20 text-indigo-400'
+                  }`}>{mainEngine.mode === 'live' ? 'LIVE' : 'PAPER'}</span>
+                  <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-cyan-500/15 text-cyan-400">MAIN</span>
+                </div>
+                <button
+                  onClick={async () => {
+                    await api.futures.stop();
+                    refreshBots();
+                  }}
+                  className="text-red-400 hover:text-red-300 text-[10px] font-medium px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20"
+                >
+                  Stop
+                </button>
+              </div>
+              <div className="grid grid-cols-3 gap-2 mt-2 text-[10px]">
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">Pairs</p>
+                  <p className="text-white font-medium">{(mainEngine.pairs || []).join(', ') || '—'}</p>
+                </div>
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">Leverage</p>
+                  <p className="text-white font-medium">{mainEngine.leverage || 1}x</p>
+                </div>
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">Balance</p>
+                  <p className="text-white font-medium">{(mainEngine.balance || 0).toFixed(1)}</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-3 gap-2 mt-1.5 text-[10px]">
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">Trades</p>
+                  <p className="text-white font-medium">{mainEngine.total_trades || 0}</p>
+                </div>
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">Open</p>
+                  <p className={`font-medium ${(mainEngine.open_trades || 0) > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{mainEngine.open_trades || 0}</p>
+                </div>
+                <div className="text-center p-1.5 rounded bg-[#131722]">
+                  <p className="text-slate-500">P&L</p>
+                  <p className={`font-bold ${(mainEngine.realized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(mainEngine.realized_pnl || 0) >= 0 ? '+' : ''}{(mainEngine.realized_pnl || 0).toFixed(2)}
+                  </p>
+                </div>
+              </div>
+              {mainEngine.last_action && (
+                <div className="mt-2 p-1.5 rounded bg-[#131722] border border-white/[0.03]">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[9px] text-slate-500">Signal:</span>
+                    <span className={`text-[9px] font-medium ${
+                      mainEngine.last_action.toLowerCase().includes('long') || mainEngine.last_action.toLowerCase().includes('buy')
+                        ? 'text-emerald-400'
+                        : mainEngine.last_action.toLowerCase().includes('short') || mainEngine.last_action.toLowerCase().includes('sell')
+                          ? 'text-red-400'
+                          : 'text-slate-400'
+                    }`}>{mainEngine.last_action}</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
           {runningBots.filter(b => b.is_running).map(bot => (
             <div key={bot.id} onClick={() => setViewingBotId(bot.id)} className={`p-2.5 rounded-lg bg-[#1e222d] border cursor-pointer transition-colors ${
               bot.winding_down ? 'border-amber-500/20 hover:border-amber-500/40' : 'border-emerald-500/10 hover:border-emerald-500/30'
