@@ -121,38 +121,36 @@ export default function ManualOrderPanel({
     <div className="flex flex-col h-full overflow-hidden">
       {/* Lead Trading / Paper Account badge — always visible */}
       <div className={`flex items-center justify-between px-3 py-2 text-xs font-bold border-b ${
-        leadStatus?.connected
-          ? 'bg-emerald-500/20 border-emerald-500/30'
-          : mode === 'live'
-            ? 'bg-amber-500/20 border-amber-500/30'
-            : 'bg-indigo-500/20 border-indigo-500/30'
+        mode === 'paper'
+          ? 'bg-indigo-500/20 border-indigo-500/30'
+          : leadStatus?.connected
+            ? 'bg-emerald-500/20 border-emerald-500/30'
+            : 'bg-amber-500/20 border-amber-500/30'
       }`}>
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full shrink-0 ${
-            leadStatus?.connected
-              ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]'
-              : mode === 'live' ? 'bg-amber-400' : 'bg-indigo-400'
+            mode === 'paper'
+              ? 'bg-indigo-400'
+              : leadStatus?.connected
+                ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]'
+                : 'bg-amber-400'
           }`} />
           <span className={
-            leadStatus?.connected ? 'text-emerald-300'
-              : mode === 'live' ? 'text-amber-300' : 'text-indigo-300'
+            mode === 'paper' ? 'text-indigo-300'
+              : leadStatus?.connected ? 'text-emerald-300' : 'text-amber-300'
           }>
-            {leadStatus?.connected
-              ? 'PL Lead Trading Account'
-              : mode === 'live'
-                ? 'Lead Trading: Not Connected'
-                : `Paper Trading Account${leadStatus !== null && !leadStatus.connected ? ' • Lead: Not Connected' : ''}`}
+            {mode === 'paper'
+              ? 'Paper Trading Account'
+              : leadStatus?.connected
+                ? 'Lead Trading Account'
+                : 'Lead Trading: Not Connected'}
           </span>
         </div>
-        {leadStatus?.connected && leadStatus.balance != null && (
+        {mode === 'paper' ? (
+          <span className="text-[11px] text-indigo-300 font-medium">{availableBalance.toFixed(2)} USDT</span>
+        ) : leadStatus?.connected && leadStatus.balance != null ? (
           <span className="text-[11px] text-emerald-300 font-medium">{leadStatus.balance.toFixed(2)} USDT</span>
-        )}
-        {mode === 'paper' && !leadStatus?.connected && (
-          <span className="text-[10px] text-indigo-400/80 font-normal">Simulated</span>
-        )}
-        {mode === 'paper' && leadStatus?.connected && (
-          <span className="text-[10px] text-indigo-300 font-normal">Paper Mode</span>
-        )}
+        ) : null}
       </div>
 
       {/* Cross/Isolated + Leverage row */}
