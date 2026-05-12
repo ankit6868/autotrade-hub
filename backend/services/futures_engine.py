@@ -385,7 +385,8 @@ class FuturesEngine(NativeTradingEngine):
             return
         try:
             from .native_trading_engine import _kucoin_post_signed
-            symbol = pair.replace("/", "").replace("USDT", "USDTM")
+            from .kucoin_futures_client import normalize_futures_symbol
+            symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
             side   = "buy" if pos.direction == "long" else "sell"
             position_side = "LONG" if pos.direction == "long" else "SHORT"
             contract_size  = pos.size * self._leverage
@@ -415,7 +416,8 @@ class FuturesEngine(NativeTradingEngine):
             return
         try:
             from .native_trading_engine import _kucoin_post_signed
-            symbol = pair.replace("/", "").replace("USDT", "USDTM")
+            from .kucoin_futures_client import normalize_futures_symbol
+            symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
             side   = "sell" if pos.direction == "long" else "buy"
             position_side = "LONG" if pos.direction == "long" else "SHORT"
             contract_size = pos.size * self._leverage

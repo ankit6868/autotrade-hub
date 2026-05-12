@@ -21,6 +21,15 @@ from typing import Any, Optional
 
 KUCOIN_FUTURES_BASE = "https://api-futures.kucoin.com"
 
+# KuCoin Futures uses non-standard symbols for some coins
+_SYMBOL_MAP = {"BTCUSDTM": "XBTUSDTM"}
+_SYMBOL_MAP_REV = {v: k for k, v in _SYMBOL_MAP.items()}
+
+
+def normalize_futures_symbol(symbol: str) -> str:
+    """Convert common symbol names to KuCoin Futures format (e.g. BTCUSDTM → XBTUSDTM)."""
+    return _SYMBOL_MAP.get(symbol, symbol)
+
 
 def _sign_request(
     api_secret: str, passphrase: str, api_key: str,
@@ -84,11 +93,11 @@ class KuCoinFuturesClient:
 
     async def get_order_book(self, symbol: str, depth: int = 20) -> dict:
         endpoint = "/api/v1/level2/depth20" if depth <= 20 else "/api/v1/level2/depth100"
-        data = await self._public_get(endpoint, {"symbol": symbol})
+        data = await self._public_get(endpoint, {"symbol": normalize_futures_symbol(symbol)})
         return data.get("data", {})
 
     async def get_recent_trades(self, symbol: str) -> list[dict]:
-        data = await self._public_get("/api/v1/trade/history", {"symbol": symbol})
+        data = await self._public_get("/api/v1/trade/history", {"symbol": normalize_futures_symbol(symbol)})
         return data.get("data", [])
 
     async def get_contracts(self) -> list[dict]:
@@ -96,15 +105,15 @@ class KuCoinFuturesClient:
         return data.get("data", [])
 
     async def get_contract_detail(self, symbol: str) -> dict:
-        data = await self._public_get(f"/api/v1/contracts/{symbol}")
+        data = await self._public_get(f"/api/v1/contracts/{normalize_futures_symbol(symbol)}")
         return data.get("data", {})
 
     async def get_ticker(self, symbol: str) -> dict:
-        data = await self._public_get("/api/v1/ticker", {"symbol": symbol})
+        data = await self._public_get("/api/v1/ticker", {"symbol": normalize_futures_symbol(symbol)})
         return data.get("data", {})
 
     async def get_klines(self, symbol: str, granularity: int = 15, start: int | None = None, end: int | None = None) -> list:
-        params: dict = {"symbol": symbol, "granularity": granularity}
+        params: dict = {"symbol": normalize_futures_symbol(symbol), "granularity": granularity}
         if start:
             params["from"] = start
         if end:
@@ -123,7 +132,7 @@ class KuCoinFuturesClient:
         return data.get("data", [])
 
     async def get_position(self, symbol: str) -> dict:
-        data = await self._request("GET", "/api/v1/position", {"symbol": symbol})
+        data = await self._request("GET", "/api/v1/position", {"symbol": normalize_futures_symbol(symbol)})
         return data.get("data", {})
 
     # ── Lead Trading order endpoints (/api/v1/copy-trade/futures/*) ───

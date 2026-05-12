@@ -508,6 +508,7 @@ def futures_manual_entry(
     """
     from backend.services.native_trading_engine import _kucoin_get, _kucoin_post_signed, _persist_open_trade
     from backend.services.futures_engine import FuturesPosition, _calc_liquidation_price, KUCOIN_FUTURES_BASE
+    from backend.services.kucoin_futures_client import normalize_futures_symbol
     from datetime import datetime, timezone as _tz
 
     pair          = req.get("pair", "BTC/USDT")
@@ -559,7 +560,7 @@ def futures_manual_entry(
     exchange_order_id = None
     if mode == "live" and eng._api_key:
         try:
-            kc_symbol     = pair.replace("/", "").replace("USDT", "USDTM")
+            kc_symbol     = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
             side          = "buy" if direction == "long" else "sell"
             position_side = "LONG" if direction == "long" else "SHORT"
             contract_size = stake * leverage
@@ -630,6 +631,7 @@ def futures_force_close(
     In live mode, places close orders via KuCoin Lead Trading API."""
     from backend.services.native_trading_engine import _kucoin_get, _kucoin_post_signed, _persist_closed_trade
     from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+    from backend.services.kucoin_futures_client import normalize_futures_symbol
     from sqlalchemy import update as sql_update
     from datetime import timezone as _tz
 
@@ -660,7 +662,7 @@ def futures_force_close(
 
     # ── Live mode: place close orders on KuCoin Lead Trading ─────────────
     if mode == "live" and eng._api_key and closed_positions:
-        kc_symbol = pair.replace("/", "").replace("USDT", "USDTM")
+        kc_symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
         for pos in closed_positions:
             try:
                 side          = "sell" if pos.direction == "long" else "buy"
@@ -1185,6 +1187,7 @@ def set_position_tp_sl(
     In live mode, places TP/SL stop orders via Lead Trading API."""
     from backend.services.native_trading_engine import _kucoin_post_signed
     from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+    from backend.services.kucoin_futures_client import normalize_futures_symbol
     import time as _t
 
     pair     = req.get("pair", "BTC/USDT")
@@ -1212,7 +1215,7 @@ def set_position_tp_sl(
 
     # ── Live mode: place TP/SL orders on KuCoin Lead Trading ─────────────
     if mode == "live" and eng._api_key and matched_pos:
-        kc_symbol     = pair.replace("/", "").replace("USDT", "USDTM")
+        kc_symbol     = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
         direction     = matched_pos.direction
         position_side = "LONG" if direction == "long" else "SHORT"
         close_side    = "sell" if direction == "long" else "buy"
@@ -1352,11 +1355,25 @@ def list_futures_bots(
     # Check actual engine status for running bots
     bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
 
+    # Count trades from DB per strategy for fallback
+    from sqlalchemy import func
+    db_trade_counts = {}
+    for i in instances:
+        count = db.execute(
+            select(func.count(Trade.id)).where(
+                Trade.user_id == user_id,
+                Trade.market_type == "futures",
+                Trade.strategy_id == i.strategy_id,
+            )
+        ).scalar() or 0
+        db_trade_counts[i.id] = count
+
     bots = []
     for i in instances:
         eng = bot_engines.get(i.engine_key) if i.engine_key else None
         engine_running = eng.is_running if eng else False
         engine_status = eng.status if eng else None
+        db_count = db_trade_counts.get(i.id, 0)
         bots.append({
             "id": i.id,
             "strategy_name": i.strategy_name,
@@ -1368,7 +1385,11 @@ def list_futures_bots(
             "wallet": i.wallet,
             "is_running": i.is_running and engine_running,
             "engine_running": engine_running,
-            "total_trades": (engine_status or {}).get("closed_count", i.total_trades or 0),
+            "total_trades": (
+                ((engine_status or {}).get("closed_count", 0) + (engine_status or {}).get("open_count", 0))
+                or db_count or i.total_trades or 0
+            ),
+            "closed_trades": (engine_status or {}).get("closed_count", i.total_trades or 0),
             "total_pnl": (engine_status or {}).get("total_pnl", i.total_pnl or 0),
             "open_positions": (engine_status or {}).get("open_count", 0),
             "ticks": (engine_status or {}).get("ticks", 0),
