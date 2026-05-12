@@ -128,7 +128,7 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
   const macdSigSeries = useRef<ISeriesApi<'Line'> | null>(null);
   const macdHistSeries= useRef<ISeriesApi<'Histogram'> | null>(null);
 
-  const [interval, setInterval]   = useState(defaultInterval);
+  const [interval, setChartInterval]   = useState(defaultInterval);
   const [loading, setLoading]     = useState(true);
   const [lastBar, setLastBar]     = useState<{ close: number; change: number; pct: number } | null>(null);
   const [showBB, setShowBB]       = useState(true);
@@ -342,10 +342,10 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // Auto-refresh every 30s
+  // Auto-refresh every 30s — use window.setInterval to avoid collision with state setter
   useEffect(() => {
-    const t = setInterval(loadData, 30_000);
-    return () => clearInterval(t);
+    const t = window.setInterval(loadData, 30_000);
+    return () => window.clearInterval(t);
   }, [loadData]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
@@ -374,7 +374,7 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
           {TIMEFRAMES.map(tf => (
             <button
               key={tf.value}
-              onClick={() => setInterval(tf.value)}
+              onClick={() => setChartInterval(tf.value)}
               className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
                 interval === tf.value
                   ? 'bg-emerald-500/30 text-emerald-300'
