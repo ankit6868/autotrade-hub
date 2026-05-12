@@ -22,6 +22,9 @@ from backend.utils.audit import log_event
 
 router = APIRouter(prefix="/api/futures", tags=["futures"])
 
+# Lead Futures Trading: max leverage allowed by KuCoin lead trading account
+LEAD_MAX_LEVERAGE = 20
+
 # Simple in-memory cache for order book / trades (avoid hammering KuCoin)
 _cache: dict[str, tuple[float, any]] = {}
 CACHE_TTL = 1.5  # seconds
@@ -45,7 +48,7 @@ def run_futures_backtest(
     pairs            = req.get("pairs", ["BTC/USDT"])
     timeframe        = req.get("timeframe", "15m")
     timerange        = req.get("timerange", "20240101-20240401")
-    leverage         = int(req.get("leverage", 10))
+    leverage         = min(LEAD_MAX_LEVERAGE, int(req.get("leverage", 10)))
     starting_balance = float(req.get("starting_balance", 1000))
     stoploss_pct     = float(req.get("stoploss_pct", 3.0))
     take_profit_pct  = float(req.get("take_profit_pct", 1.5))
@@ -254,7 +257,7 @@ def start_futures(
     strategy_id   = req.get("strategy_id")
     mode          = req.get("mode", "paper")
     pairs         = req.get("pairs", ["BTC/USDT"])
-    leverage      = int(req.get("leverage", 10))
+    leverage      = min(LEAD_MAX_LEVERAGE, int(req.get("leverage", 10)))
     timeframe     = req.get("timeframe", "15m")
     stoploss      = float(req.get("stoploss", -0.03))
     wallet        = float(req.get("wallet", 1000.0))
@@ -518,7 +521,8 @@ def futures_manual_entry(
 
     eng = futures_engine_registry.for_user(user_id)
 
-    leverage = int(req_leverage) if req_leverage else (eng._leverage if (eng._leverage and eng._leverage > 1) else 10)
+    raw_lev  = int(req_leverage) if req_leverage else (eng._leverage if (eng._leverage and eng._leverage > 1) else 10)
+    leverage = min(LEAD_MAX_LEVERAGE, raw_lev)
     mode     = eng._mode     if eng._mode     else "paper"
     balance  = eng.balance   if eng.balance   else 1000.0
     sl_pct   = abs(eng._stoploss or 0.015)
@@ -565,7 +569,8 @@ def futures_manual_entry(
             position_side = "LONG" if direction == "long" else "SHORT"
             contract_size = stake * leverage
             contracts     = max(1, int(contract_size / entry_price * 1000))
-            client_oid    = f"atf-manual-{int(time.time()*1000)}"
+            client_oid    = f"atf-manual-{int(_time.time()*1000)}"
+            margin_mode   = eng.get_symbol_margin(kc_symbol).upper() or "ISOLATED"
             body = {
                 "clientOid":   client_oid,
                 "side":         side,
@@ -573,7 +578,7 @@ def futures_manual_entry(
                 "type":         "market",
                 "size":         contracts,
                 "leverage":     leverage,
-                "marginMode":   "ISOLATED",
+                "marginMode":   margin_mode,
                 "positionSide": position_side,
             }
             resp = _kucoin_post_signed(
@@ -670,13 +675,13 @@ def futures_force_close(
                 contract_size = pos.size * getattr(pos, "leverage", eng._leverage or 10)
                 contracts     = max(1, int(contract_size / pos.entry * 1000))
                 body = {
-                    "clientOid":   f"atf-close-{int(time.time()*1000)}",
+                    "clientOid":   f"atf-close-{int(_time.time()*1000)}",
                     "side":         side,
                     "symbol":       kc_symbol,
                     "type":         "market",
                     "size":         contracts,
-                    "leverage":     getattr(pos, "leverage", eng._leverage or 10),
-                    "marginMode":   "ISOLATED",
+                    "leverage":     min(LEAD_MAX_LEVERAGE, getattr(pos, "leverage", eng._leverage or 10)),
+                    "marginMode":   eng.get_symbol_margin(kc_symbol).upper() or "ISOLATED",
                     "positionSide": position_side,
                     "reduceOnly":   True,
                 }
@@ -873,7 +878,7 @@ def place_futures_order(
     if leverage is not None:
         leverage = int(leverage)
 
-    lev = leverage or eng._leverage or 10
+    lev = min(LEAD_MAX_LEVERAGE, leverage or eng._leverage or 10)
     mode = eng._mode or "paper"
 
     # Determine position side
@@ -888,6 +893,7 @@ def place_futures_order(
     if mode == "live" and eng._api_key:
         try:
             client_oid = f"atf-ord-{int(_t.time()*1000)}"
+            margin_mode = eng.get_symbol_margin(symbol).upper() or "ISOLATED"
             body: dict = {
                 "clientOid":   client_oid,
                 "side":         side,
@@ -895,7 +901,7 @@ def place_futures_order(
                 "type":         order_type if order_type in ("market", "limit") else "limit",
                 "size":         int(size),
                 "leverage":     lev,
-                "marginMode":   "ISOLATED",
+                "marginMode":   margin_mode,
                 "positionSide": position_side,
             }
             if price is not None and order_type == "limit":
@@ -992,7 +998,7 @@ def cancel_futures_order(
         if db_order and db_order.exchange_order_id:
             try:
                 from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
-                ts = str(int(time.time() * 1000))
+                ts = str(int(_time.time() * 1000))
                 endpoint = f"/api/v1/copy-trade/futures/orders/{db_order.exchange_order_id}"
                 headers = _sign_request(
                     eng._api_sec, eng._api_pass, eng._api_key,
@@ -1292,7 +1298,8 @@ def set_position_tp_sl(
         direction     = matched_pos.direction
         position_side = "LONG" if direction == "long" else "SHORT"
         close_side    = "sell" if direction == "long" else "buy"
-        lev           = getattr(matched_pos, "leverage", eng._leverage or 10)
+        lev           = min(LEAD_MAX_LEVERAGE, getattr(matched_pos, "leverage", eng._leverage or 10))
+        margin_mode   = eng.get_symbol_margin(kc_symbol).upper() or "ISOLATED"
         contract_size = matched_pos.size * lev
         contracts     = max(1, int(contract_size / matched_pos.entry * 1000))
 
@@ -1302,7 +1309,7 @@ def set_position_tp_sl(
                 tp_body = {
                     "clientOid":   f"atf-tp-{int(_t.time()*1000)}",
                     "symbol":       kc_symbol,
-                    "marginMode":   "ISOLATED",
+                    "marginMode":   margin_mode,
                     "leverage":     lev,
                     "positionSide": position_side,
                     "side":         close_side,
@@ -1330,7 +1337,7 @@ def set_position_tp_sl(
                 sl_body = {
                     "clientOid":   f"atf-sl-{int(_t.time()*1000)}",
                     "symbol":       kc_symbol,
-                    "marginMode":   "ISOLATED",
+                    "marginMode":   margin_mode,
                     "leverage":     lev,
                     "positionSide": position_side,
                     "side":         close_side,
@@ -1607,7 +1614,7 @@ def create_futures_bot(
     strategy_name = req.get("strategy_name", "SimpleTargetStrategy")
     mode          = req.get("mode", "paper")
     pairs         = req.get("pairs", ["BTC/USDT"])
-    leverage      = int(req.get("leverage", 10))
+    leverage      = min(LEAD_MAX_LEVERAGE, int(req.get("leverage", 10)))
     timeframe     = req.get("timeframe", "15m")
     wallet        = float(req.get("wallet", 1000))
     stoploss      = float(req.get("stoploss", -0.03))

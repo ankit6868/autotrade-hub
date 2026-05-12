@@ -413,6 +413,7 @@ class FuturesEngine(NativeTradingEngine):
             position_side = "LONG" if pos.direction == "long" else "SHORT"
             contract_size  = pos.size * self._leverage
             contracts      = max(1, int(contract_size / pos.entry * 1000))
+            margin_mode = self.get_symbol_margin(symbol).upper() or "ISOLATED"
             body = {
                 "clientOid":    f"atf-{int(time.time()*1000)}",
                 "side":          side,
@@ -420,7 +421,7 @@ class FuturesEngine(NativeTradingEngine):
                 "type":          "market",
                 "size":          contracts,
                 "leverage":      self._leverage,
-                "marginMode":    "ISOLATED",
+                "marginMode":    margin_mode,
                 "positionSide":  position_side,
             }
             resp = _kucoin_post_signed(
@@ -444,6 +445,7 @@ class FuturesEngine(NativeTradingEngine):
             position_side = "LONG" if pos.direction == "long" else "SHORT"
             contract_size = pos.size * self._leverage
             contracts     = max(1, int(contract_size / pos.entry * 1000))
+            margin_mode = self.get_symbol_margin(symbol).upper() or "ISOLATED"
             body = {
                 "clientOid":    f"atf-exit-{int(time.time()*1000)}",
                 "side":          side,
@@ -451,7 +453,7 @@ class FuturesEngine(NativeTradingEngine):
                 "type":          "market",
                 "size":          contracts,
                 "leverage":      self._leverage,
-                "marginMode":    "ISOLATED",
+                "marginMode":    margin_mode,
                 "positionSide":  position_side,
                 "reduceOnly":    True,
             }
