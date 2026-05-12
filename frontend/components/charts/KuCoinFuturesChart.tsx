@@ -9,27 +9,25 @@ import {
 import { api } from '@/lib/api';
 
 interface Props {
-  pair: string;          // e.g. "BTC/USDT"
-  defaultInterval?: string; // e.g. "15m"
+  pair: string;
+  defaultInterval?: string;
 }
 
 const TIMEFRAMES = [
-  { label: '1m',  value: '1m',   limit: 300 },
-  { label: '5m',  value: '5m',   limit: 300 },
-  { label: '15m', value: '15m',  limit: 300 },
-  { label: '30m', value: '30m',  limit: 300 },
-  { label: '1h',  value: '1h',   limit: 300 },
-  { label: '4h',  value: '4h',   limit: 300 },
-  { label: '1d',  value: '1d',   limit: 300 },
+  { label: '1m',  value: '1m'  },
+  { label: '5m',  value: '5m'  },
+  { label: '15m', value: '15m' },
+  { label: '30m', value: '30m' },
+  { label: '1h',  value: '1h'  },
+  { label: '4h',  value: '4h'  },
+  { label: '1d',  value: '1d'  },
 ];
 
-// ── Indicator helpers ────────────────────────────────────────────────────────
-
+// ── Indicator math ────────────────────────────────────────────────────────────
 function calcSMA(data: number[], period: number): (number | null)[] {
   return data.map((_, i) => {
     if (i < period - 1) return null;
-    const sum = data.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0);
-    return sum / period;
+    return data.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0) / period;
   });
 }
 
@@ -39,11 +37,9 @@ function calcEMA(data: number[], period: number): (number | null)[] {
   let ema: number | null = null;
   for (let i = 0; i < data.length; i++) {
     if (i < period - 1) continue;
-    if (ema === null) {
-      ema = data.slice(0, period).reduce((a, b) => a + b, 0) / period;
-    } else {
-      ema = data[i] * k + ema * (1 - k);
-    }
+    ema = ema === null
+      ? data.slice(0, period).reduce((a, b) => a + b, 0) / period
+      : data[i] * k + ema * (1 - k);
     result[i] = ema;
   }
   return result;
@@ -56,9 +52,8 @@ function calcBB(closes: number[], period = 20, mult = 2) {
   for (let i = 0; i < closes.length; i++) {
     if (mid[i] === null) { upper.push(null); lower.push(null); continue; }
     const slice = closes.slice(Math.max(0, i - period + 1), i + 1);
-    const mean = mid[i]!;
-    const variance = slice.reduce((acc, v) => acc + (v - mean) ** 2, 0) / slice.length;
-    const std = Math.sqrt(variance);
+    const mean  = mid[i]!;
+    const std   = Math.sqrt(slice.reduce((a, v) => a + (v - mean) ** 2, 0) / slice.length);
     upper.push(mean + mult * std);
     lower.push(mean - mult * std);
   }
@@ -68,384 +63,377 @@ function calcBB(closes: number[], period = 20, mult = 2) {
 function calcRSI(closes: number[], period = 14): (number | null)[] {
   const result: (number | null)[] = new Array(closes.length).fill(null);
   if (closes.length < period + 1) return result;
-  let gains = 0, losses = 0;
+  let avgGain = 0, avgLoss = 0;
   for (let i = 1; i <= period; i++) {
-    const diff = closes[i] - closes[i - 1];
-    if (diff > 0) gains += diff; else losses -= diff;
+    const d = closes[i] - closes[i - 1];
+    if (d > 0) avgGain += d; else avgLoss -= d;
   }
-  let avgGain = gains / period;
-  let avgLoss = losses / period;
-  result[period] = 100 - 100 / (1 + (avgLoss === 0 ? Infinity : avgGain / avgLoss));
+  avgGain /= period; avgLoss /= period;
+  result[period] = 100 - 100 / (1 + (avgLoss === 0 ? 1e9 : avgGain / avgLoss));
   for (let i = period + 1; i < closes.length; i++) {
-    const diff = closes[i] - closes[i - 1];
-    avgGain = (avgGain * (period - 1) + Math.max(diff, 0)) / period;
-    avgLoss = (avgLoss * (period - 1) + Math.max(-diff, 0)) / period;
-    result[i] = 100 - 100 / (1 + (avgLoss === 0 ? Infinity : avgGain / avgLoss));
+    const d = closes[i] - closes[i - 1];
+    avgGain = (avgGain * (period - 1) + Math.max(d, 0)) / period;
+    avgLoss = (avgLoss * (period - 1) + Math.max(-d, 0)) / period;
+    result[i] = 100 - 100 / (1 + (avgLoss === 0 ? 1e9 : avgGain / avgLoss));
   }
   return result;
 }
 
-function calcMACD(closes: number[], fast = 12, slow = 26, signal = 9) {
-  const emaFast = calcEMA(closes, fast);
-  const emaSlow = calcEMA(closes, slow);
-  const macdLine = closes.map((_, i) =>
-    emaFast[i] !== null && emaSlow[i] !== null ? emaFast[i]! - emaSlow[i]! : null
+function calcMACD(closes: number[], fast = 12, slow = 26, sig = 9) {
+  const emaF = calcEMA(closes, fast);
+  const emaS = calcEMA(closes, slow);
+  const macd = closes.map((_, i) =>
+    emaF[i] !== null && emaS[i] !== null ? emaF[i]! - emaS[i]! : null
   );
-  const validMacd = macdLine.filter(v => v !== null) as number[];
-  const rawSignal = calcEMA(validMacd, signal);
-  // Re-align signal with macdLine
-  const signalLine: (number | null)[] = new Array(closes.length).fill(null);
-  let sigIdx = 0;
-  for (let i = 0; i < macdLine.length; i++) {
-    if (macdLine[i] !== null) {
-      signalLine[i] = rawSignal[sigIdx++] ?? null;
-    }
+  const validMacd = macd.filter((v): v is number => v !== null);
+  const rawSig    = calcEMA(validMacd, sig);
+  const signal: (number | null)[] = new Array(closes.length).fill(null);
+  let si = 0;
+  for (let i = 0; i < macd.length; i++) {
+    if (macd[i] !== null) signal[i] = rawSig[si++] ?? null;
   }
-  const histogram = closes.map((_, i) =>
-    macdLine[i] !== null && signalLine[i] !== null ? macdLine[i]! - signalLine[i]! : null
+  const hist = closes.map((_, i) =>
+    macd[i] !== null && signal[i] !== null ? macd[i]! - signal[i]! : null
   );
-  return { macdLine, signalLine, histogram };
+  return { macd, signal, hist };
 }
 
-// ── Component ────────────────────────────────────────────────────────────────
-
-export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Props) {
-  const wrapperRef    = useRef<HTMLDivElement>(null);
-  const mainRef       = useRef<HTMLDivElement>(null);
-  const rsiRef        = useRef<HTMLDivElement>(null);
-  const macdRef       = useRef<HTMLDivElement>(null);
-
-  const mainChart     = useRef<IChartApi | null>(null);
-  const rsiChart      = useRef<IChartApi | null>(null);
-  const macdChart     = useRef<IChartApi | null>(null);
-  const candleSeries  = useRef<ISeriesApi<'Candlestick'> | null>(null);
-  const volSeries     = useRef<ISeriesApi<'Histogram'> | null>(null);
-  const bbMidSeries   = useRef<ISeriesApi<'Line'> | null>(null);
-  const bbUpSeries    = useRef<ISeriesApi<'Line'> | null>(null);
-  const bbLowSeries   = useRef<ISeriesApi<'Line'> | null>(null);
-  const rsiSeries     = useRef<ISeriesApi<'Line'> | null>(null);
-  const macdLineSeries= useRef<ISeriesApi<'Line'> | null>(null);
-  const macdSigSeries = useRef<ISeriesApi<'Line'> | null>(null);
-  const macdHistSeries= useRef<ISeriesApi<'Histogram'> | null>(null);
-
-  const [interval, setChartInterval]   = useState(defaultInterval);
-  const [loading, setLoading]     = useState(true);
-  const [lastBar, setLastBar]     = useState<{ close: number; change: number; pct: number } | null>(null);
-  const [showBB, setShowBB]       = useState(true);
-  const [showRSI, setShowRSI]     = useState(true);
-  const [showMACD, setShowMACD]   = useState(true);
-  const [error, setError]         = useState('');
-
-  const CHART_BG = '#0d1117';
-  const TEXT_COLOR = '#64748b';
-  const GRID_COLOR = 'rgba(255,255,255,0.03)';
-
-  const commonOpts = useCallback(() => ({
-    layout:      { background: { type: ColorType.Solid as const, color: CHART_BG }, textColor: TEXT_COLOR },
-    grid:        { vertLines: { color: GRID_COLOR }, horzLines: { color: GRID_COLOR } },
+// ── Shared chart options (no watermark, no attribution) ──────────────────────
+function chartOpts(bg = '#0d1117') {
+  return {
+    layout: {
+      background: { type: ColorType.Solid as const, color: bg },
+      textColor: '#64748b',
+    },
+    grid: {
+      vertLines: { color: 'rgba(255,255,255,0.03)' },
+      horzLines: { color: 'rgba(255,255,255,0.03)' },
+    },
     crosshair:   { mode: CrosshairMode.Normal },
-    rightPriceScale: { borderColor: 'rgba(255,255,255,0.06)', scaleMargins: { top: 0.05, bottom: 0.1 } },
-    timeScale:   { borderColor: 'rgba(255,255,255,0.06)', timeVisible: true, secondsVisible: false },
-    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true },
-    handleScale:  { mouseWheel: true, pinch: true },
-  }), []);
+    watermark:   { visible: false },             // ← removes the TV logo
+    handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: false },
+    handleScale:  { mouseWheel: true, pinch: true, axisPressedMouseMove: false },
+    rightPriceScale: {
+      borderColor: 'rgba(255,255,255,0.06)',
+      scaleMargins: { top: 0.05, bottom: 0.1 },
+    },
+    timeScale: {
+      borderColor: 'rgba(255,255,255,0.06)',
+      timeVisible: true,
+      secondsVisible: false,
+      rightOffset: 5,
+    },
+  };
+}
+
+// ── Component ─────────────────────────────────────────────────────────────────
+export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Props) {
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const mainRef    = useRef<HTMLDivElement>(null);
+  const rsiRef     = useRef<HTMLDivElement>(null);
+  const macdRef    = useRef<HTMLDivElement>(null);
+
+  // Chart + series refs
+  const chartMain  = useRef<IChartApi | null>(null);
+  const chartRSI   = useRef<IChartApi | null>(null);
+  const chartMACD  = useRef<IChartApi | null>(null);
+
+  const serCandle  = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const serVol     = useRef<ISeriesApi<'Histogram'>   | null>(null);
+  const serBBMid   = useRef<ISeriesApi<'Line'>        | null>(null);
+  const serBBUp    = useRef<ISeriesApi<'Line'>        | null>(null);
+  const serBBLow   = useRef<ISeriesApi<'Line'>        | null>(null);
+  const serRSI     = useRef<ISeriesApi<'Line'>        | null>(null);
+  const serMACDL   = useRef<ISeriesApi<'Line'>        | null>(null);
+  const serMACDS   = useRef<ISeriesApi<'Line'>        | null>(null);
+  const serMACDH   = useRef<ISeriesApi<'Histogram'>   | null>(null);
+
+  const [tf, setTf]             = useState(defaultInterval);
+  const [loading, setLoading]   = useState(true);
+  const [lastBar, setLastBar]   = useState<{ c: number; pct: number } | null>(null);
+  const [showBB, setShowBB]     = useState(true);
+  const [showRSI, setShowRSI]   = useState(true);
+  const [showMACD, setShowMACD] = useState(true);
+  const [error, setError]       = useState('');
+  const [isMobile, setIsMobile] = useState(false);
+
+  // Detect mobile
+  useEffect(() => {
+    const check = () => setIsMobile(window.innerWidth < 768);
+    check();
+    window.addEventListener('resize', check);
+    return () => window.removeEventListener('resize', check);
+  }, []);
 
   // ── Build charts once ──────────────────────────────────────────────────────
   useEffect(() => {
     if (!mainRef.current) return;
+    const BG = '#0d1117';
 
+    // Main chart
     const mc = createChart(mainRef.current, {
-      ...commonOpts(),
-      width: mainRef.current.clientWidth,
-      height: mainRef.current.clientHeight || 380,
+      ...chartOpts(BG),
+      autoSize: true,
     });
-    mainChart.current = mc;
+    chartMain.current = mc;
 
-    candleSeries.current = mc.addCandlestickSeries({
+    serCandle.current = mc.addCandlestickSeries({
       upColor: '#26a69a', downColor: '#ef5350',
       borderUpColor: '#26a69a', borderDownColor: '#ef5350',
       wickUpColor: '#26a69a', wickDownColor: '#ef5350',
     });
 
-    // Volume on price scale 'vol'
-    volSeries.current = mc.addHistogramSeries({
+    serVol.current = mc.addHistogramSeries({
       priceFormat: { type: 'volume' },
       priceScaleId: 'vol',
+      lastValueVisible: false,
+      priceLineVisible: false,
     });
-    mc.priceScale('vol').applyOptions({ scaleMargins: { top: 0.8, bottom: 0 } });
+    mc.priceScale('vol').applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
 
-    // BB overlays
-    const lineOpts = { lineWidth: 1 as const, priceLineVisible: false, lastValueVisible: false, crossHairMarkerVisible: false };
-    bbMidSeries.current  = mc.addLineSeries({ ...lineOpts, color: 'rgba(255,165,0,0.7)' });
-    bbUpSeries.current   = mc.addLineSeries({ ...lineOpts, color: 'rgba(100,180,255,0.5)' });
-    bbLowSeries.current  = mc.addLineSeries({ ...lineOpts, color: 'rgba(100,180,255,0.5)' });
+    const lineBase = { lineWidth: 1 as const, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false };
+    serBBMid.current = mc.addLineSeries({ ...lineBase, color: 'rgba(255,165,0,0.65)' });
+    serBBUp.current  = mc.addLineSeries({ ...lineBase, color: 'rgba(100,180,255,0.45)' });
+    serBBLow.current = mc.addLineSeries({ ...lineBase, color: 'rgba(100,180,255,0.45)' });
 
     // RSI chart
     if (rsiRef.current) {
       const rc = createChart(rsiRef.current, {
-        ...commonOpts(),
-        width: rsiRef.current.clientWidth,
-        height: rsiRef.current.clientHeight || 80,
-        rightPriceScale: { ...commonOpts().rightPriceScale, scaleMargins: { top: 0.1, bottom: 0.1 } },
+        ...chartOpts(BG),
+        autoSize: true,
+        rightPriceScale: { ...chartOpts().rightPriceScale, scaleMargins: { top: 0.1, bottom: 0.1 } },
       });
-      rsiChart.current = rc;
+      chartRSI.current = rc;
       rc.timeScale().applyOptions({ visible: false });
-      rsiSeries.current = rc.addLineSeries({ color: '#b39ddb', lineWidth: 1, priceLineVisible: false, lastValueVisible: true });
+      serRSI.current = rc.addLineSeries({
+        color: '#b39ddb', lineWidth: 1,
+        priceLineVisible: false, lastValueVisible: true,
+        crosshairMarkerVisible: true, crosshairMarkerRadius: 3,
+      });
     }
 
     // MACD chart
     if (macdRef.current) {
       const mc2 = createChart(macdRef.current, {
-        ...commonOpts(),
-        width: macdRef.current.clientWidth,
-        height: macdRef.current.clientHeight || 80,
-        rightPriceScale: { ...commonOpts().rightPriceScale, scaleMargins: { top: 0.1, bottom: 0.1 } },
+        ...chartOpts(BG),
+        autoSize: true,
+        rightPriceScale: { ...chartOpts().rightPriceScale, scaleMargins: { top: 0.05, bottom: 0.05 } },
       });
-      macdChart.current = mc2;
+      chartMACD.current = mc2;
       mc2.timeScale().applyOptions({ visible: true });
-      macdLineSeries.current = mc2.addLineSeries({ color: '#42a5f5', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-      macdSigSeries.current  = mc2.addLineSeries({ color: '#ef9a9a', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
-      macdHistSeries.current = mc2.addHistogramSeries({
-        priceScaleId: 'macd_hist',
-        priceFormat: { type: 'price', precision: 4 },
+      serMACDL.current = mc2.addLineSeries({ color: '#42a5f5', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+      serMACDS.current = mc2.addLineSeries({ color: '#ef9a9a', lineWidth: 1, priceLineVisible: false, lastValueVisible: false });
+      serMACDH.current = mc2.addHistogramSeries({
+        priceScaleId: 'macd_h',
+        lastValueVisible: false, priceLineVisible: false,
       });
-      mc2.priceScale('macd_hist').applyOptions({ scaleMargins: { top: 0.7, bottom: 0 } });
+      mc2.priceScale('macd_h').applyOptions({ scaleMargins: { top: 0.7, bottom: 0 } });
     }
 
-    // Sync time scales between charts
-    const syncCrossHair = (src: IChartApi, targets: IChartApi[]) => {
-      src.timeScale().subscribeVisibleLogicalRangeChange(range => {
-        if (!range) return;
-        targets.forEach(t => t.timeScale().setVisibleLogicalRange(range));
+    // Sync visible range across all panes
+    const syncRange = (src: IChartApi, others: IChartApi[]) => {
+      src.timeScale().subscribeVisibleLogicalRangeChange(r => {
+        if (r) others.forEach(o => o.timeScale().setVisibleLogicalRange(r));
       });
     };
-    if (rsiChart.current && macdChart.current) {
-      syncCrossHair(mc, [rsiChart.current, macdChart.current]);
-      syncCrossHair(rsiChart.current, [mc, macdChart.current]);
-      syncCrossHair(macdChart.current, [mc, rsiChart.current]);
-    }
-
-    // Resize observer
-    const ro = new ResizeObserver(() => {
-      if (mainRef.current) mc.applyOptions({ width: mainRef.current.clientWidth });
-      if (rsiRef.current && rsiChart.current) rsiChart.current.applyOptions({ width: rsiRef.current.clientWidth });
-      if (macdRef.current && macdChart.current) macdChart.current.applyOptions({ width: macdRef.current.clientWidth });
-    });
-    if (wrapperRef.current) ro.observe(wrapperRef.current);
+    const others = [chartRSI.current, chartMACD.current].filter(Boolean) as IChartApi[];
+    syncRange(mc, others);
+    if (chartRSI.current)  syncRange(chartRSI.current,  [mc, ...(chartMACD.current ? [chartMACD.current] : [])]);
+    if (chartMACD.current) syncRange(chartMACD.current, [mc, ...(chartRSI.current  ? [chartRSI.current]  : [])]);
 
     return () => {
-      ro.disconnect();
-      mc.remove();
-      rsiChart.current?.remove();
-      macdChart.current?.remove();
-      mainChart.current = rsiChart.current = macdChart.current = null;
+      mc.remove(); chartRSI.current?.remove(); chartMACD.current?.remove();
+      chartMain.current = chartRSI.current = chartMACD.current = null;
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── Fetch and render data ──────────────────────────────────────────────────
+  // ── Load & render data ─────────────────────────────────────────────────────
   const loadData = useCallback(async () => {
-    if (!candleSeries.current) return;
-    setLoading(true);
-    setError('');
+    if (!serCandle.current) return;
+    setLoading(true); setError('');
     try {
-      const data = await api.market.ohlcv(pair, interval, 300);
-      const candles = data.candles ?? [];
-      if (!candles.length) { setError('No data'); setLoading(false); return; }
+      const data   = await api.market.ohlcv(pair, tf, 300);
+      const raw    = (data.candles ?? []).sort((a: {time:number}, b: {time:number}) => a.time - b.time);
+      if (!raw.length) { setError('No data'); setLoading(false); return; }
 
-      const sorted = [...candles].sort((a, b) => a.time - b.time);
-      const times  = sorted.map(c => c.time as Time);
-      const opens  = sorted.map(c => c.open);
-      const highs  = sorted.map(c => c.high);
-      const lows   = sorted.map(c => c.low);
-      const closes = sorted.map(c => c.close);
-      const vols   = sorted.map(c => c.volume);
+      const times  = raw.map((c: {time:number}) => c.time as Time);
+      const opens  = raw.map((c: {open:number}) => c.open);
+      const highs  = raw.map((c: {high:number}) => c.high);
+      const lows   = raw.map((c: {low:number}) => c.low);
+      const closes = raw.map((c: {close:number}) => c.close);
+      const vols   = raw.map((c: {volume:number}) => c.volume);
 
-      // Candlestick data
-      const cdData: CandlestickData[] = sorted.map((c, i) => ({
-        time: times[i],
-        open: opens[i], high: highs[i], low: lows[i], close: closes[i],
-      }));
-      candleSeries.current!.setData(cdData);
+      // Candlesticks
+      serCandle.current!.setData(
+        raw.map((_: unknown, i: number) => ({
+          time: times[i],
+          open: opens[i], high: highs[i], low: lows[i], close: closes[i],
+        }) as CandlestickData)
+      );
 
       // Volume
-      const volData: HistogramData[] = sorted.map((c, i) => ({
-        time: times[i],
-        value: vols[i],
-        color: closes[i] >= opens[i] ? 'rgba(38,166,154,0.35)' : 'rgba(239,83,80,0.35)',
-      }));
-      volSeries.current?.setData(volData);
+      serVol.current?.setData(
+        raw.map((_: unknown, i: number) => ({
+          time: times[i], value: vols[i],
+          color: closes[i] >= opens[i] ? 'rgba(38,166,154,0.35)' : 'rgba(239,83,80,0.35)',
+        }) as HistogramData)
+      );
 
-      // Bollinger Bands
+      // Helper: filter nulls into series format
+      const toLine = (vals: (number | null)[]) =>
+        vals.map((v, i) => v !== null ? { time: times[i], value: v } : null).filter(Boolean) as { time: Time; value: number }[];
+
+      // BB
       const bb = calcBB(closes);
       if (showBB) {
-        const toBBLine = (vals: (number | null)[]) => vals
-          .map((v, i) => v !== null ? { time: times[i], value: v } : null)
-          .filter(Boolean) as { time: Time; value: number }[];
-        bbMidSeries.current?.setData(toBBLine(bb.mid));
-        bbUpSeries.current?.setData(toBBLine(bb.upper));
-        bbLowSeries.current?.setData(toBBLine(bb.lower));
+        serBBMid.current?.setData(toLine(bb.mid));
+        serBBUp.current?.setData(toLine(bb.upper));
+        serBBLow.current?.setData(toLine(bb.lower));
       } else {
-        bbMidSeries.current?.setData([]);
-        bbUpSeries.current?.setData([]);
-        bbLowSeries.current?.setData([]);
+        [serBBMid, serBBUp, serBBLow].forEach(s => s.current?.setData([]));
       }
 
       // RSI
-      if (showRSI && rsiSeries.current) {
-        const rsi = calcRSI(closes);
-        const rsiData = rsi
-          .map((v, i) => v !== null ? { time: times[i], value: v } : null)
-          .filter(Boolean) as { time: Time; value: number }[];
-        rsiSeries.current.setData(rsiData);
-      } else {
-        rsiSeries.current?.setData([]);
-      }
+      if (showRSI && serRSI.current) {
+        serRSI.current.setData(toLine(calcRSI(closes)));
+      } else serRSI.current?.setData([]);
 
       // MACD
-      if (showMACD && macdLineSeries.current) {
-        const macd = calcMACD(closes);
-        const toLine = (vals: (number | null)[]) => vals
-          .map((v, i) => v !== null ? { time: times[i], value: v } : null)
-          .filter(Boolean) as { time: Time; value: number }[];
-        const toHist = (vals: (number | null)[]) => vals
-          .map((v, i) => v !== null ? {
-            time: times[i], value: v,
-            color: v >= 0 ? 'rgba(38,166,154,0.6)' : 'rgba(239,83,80,0.6)',
-          } : null)
-          .filter(Boolean) as (HistogramData & { color: string })[];
-
-        macdLineSeries.current.setData(toLine(macd.macdLine));
-        macdSigSeries.current?.setData(toLine(macd.signalLine));
-        macdHistSeries.current?.setData(toHist(macd.histogram));
+      if (showMACD && serMACDL.current) {
+        const { macd, signal, hist } = calcMACD(closes);
+        serMACDL.current.setData(toLine(macd));
+        serMACDS.current?.setData(toLine(signal));
+        serMACDH.current?.setData(
+          hist.map((v, i) => v !== null
+            ? { time: times[i], value: v, color: v >= 0 ? 'rgba(38,166,154,0.7)' : 'rgba(239,83,80,0.7)' }
+            : null
+          ).filter(Boolean) as (HistogramData & { color: string })[]
+        );
       } else {
-        macdLineSeries.current?.setData([]);
-        macdSigSeries.current?.setData([]);
-        macdHistSeries.current?.setData([]);
+        [serMACDL, serMACDS, serMACDH].forEach(s => s.current?.setData([]));
       }
 
-      // Fit content
-      mainChart.current?.timeScale().fitContent();
+      chartMain.current?.timeScale().fitContent();
 
-      // Update last bar stats
-      const last = sorted[sorted.length - 1];
-      const prev = sorted[sorted.length - 2];
+      const last = raw[raw.length - 1];
+      const prev = raw[raw.length - 2];
       if (last && prev) {
-        const change = last.close - prev.close;
-        setLastBar({ close: last.close, change, pct: (change / prev.close) * 100 });
+        setLastBar({ c: last.close, pct: (last.close - prev.close) / prev.close * 100 });
       }
-    } catch (e) {
-      setError('Failed to load chart data');
-    }
+    } catch { setError('Failed to load chart data'); }
     setLoading(false);
-  }, [pair, interval, showBB, showRSI, showMACD]);
+  }, [pair, tf, showBB, showRSI, showMACD]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  // Auto-refresh every 30s — use window.setInterval to avoid collision with state setter
+  // Auto-refresh every 30s
   useEffect(() => {
     const t = window.setInterval(loadData, 30_000);
     return () => window.clearInterval(t);
   }, [loadData]);
 
-  // ── Render ─────────────────────────────────────────────────────────────────
-  const rsiHeight  = showRSI  ? 70  : 0;
-  const macdHeight = showMACD ? 80  : 0;
+  // ── Layout ────────────────────────────────────────────────────────────────
+  const rsiH  = showRSI  ? (isMobile ? 60 : 75)  : 0;
+  const macdH = showMACD ? (isMobile ? 65 : 85)  : 0;
 
   return (
-    <div ref={wrapperRef} className="flex flex-col h-full bg-[#0d1117] select-none">
-      {/* Toolbar */}
-      <div className="flex items-center gap-1 px-2 py-1 border-b border-white/[0.06] bg-[#0d1117] shrink-0 flex-wrap">
-        {/* Pair + price */}
-        <div className="flex items-center gap-2 mr-2">
-          <span className="text-white text-[11px] font-bold">
-            {pair} <span className="text-slate-500 font-normal">· {interval} · KuCoin</span>
+    <div ref={wrapperRef} className="flex flex-col w-full h-full bg-[#0d1117] overflow-hidden">
+
+      {/* ── Toolbar ── */}
+      <div className="flex items-center flex-wrap gap-x-2 gap-y-1 px-2 py-1.5 border-b border-white/[0.05] bg-[#0d1117] shrink-0">
+
+        {/* Pair label */}
+        <div className="flex items-center gap-2 min-w-0">
+          <span className="text-white font-bold text-[11px] whitespace-nowrap hidden sm:inline">
+            {pair}
+            <span className="text-slate-500 font-normal ml-1">{tf} · KuCoin</span>
           </span>
           {lastBar && (
-            <span className={`text-[11px] font-medium ${lastBar.pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {lastBar.close.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-              {' '}{lastBar.pct >= 0 ? '+' : ''}{lastBar.pct.toFixed(2)}%
+            <span className={`text-[11px] font-semibold whitespace-nowrap ${lastBar.pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {lastBar.c.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+              {'  '}{lastBar.pct >= 0 ? '+' : ''}{lastBar.pct.toFixed(2)}%
             </span>
           )}
         </div>
 
-        {/* Timeframe buttons */}
-        <div className="flex items-center gap-0.5 bg-[#1a2236] rounded p-0.5">
-          {TIMEFRAMES.map(tf => (
+        {/* Timeframe row */}
+        <div className="flex items-center bg-[#161b27] rounded overflow-hidden shrink-0">
+          {TIMEFRAMES.map(t => (
             <button
-              key={tf.value}
-              onClick={() => setChartInterval(tf.value)}
-              className={`px-2 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                interval === tf.value
-                  ? 'bg-emerald-500/30 text-emerald-300'
-                  : 'text-slate-400 hover:text-white'
+              key={t.value}
+              onClick={() => setTf(t.value)}
+              className={`px-2 sm:px-2.5 py-1 text-[10px] sm:text-[11px] font-medium transition-colors ${
+                tf === t.value
+                  ? 'bg-emerald-500/25 text-emerald-300'
+                  : 'text-slate-400 hover:text-white hover:bg-white/5'
               }`}
             >
-              {tf.label}
+              {t.label}
             </button>
           ))}
         </div>
 
         {/* Indicator toggles */}
-        <div className="flex items-center gap-1 ml-1">
+        <div className="flex items-center gap-1 shrink-0">
           {[
-            { key: 'BB', state: showBB, toggle: () => setShowBB(v => !v), color: 'text-orange-400' },
-            { key: 'RSI', state: showRSI, toggle: () => setShowRSI(v => !v), color: 'text-purple-400' },
-            { key: 'MACD', state: showMACD, toggle: () => setShowMACD(v => !v), color: 'text-blue-400' },
+            { k: 'BB',   on: showBB,   set: setShowBB,   cls: 'text-orange-400 border-orange-400/50 bg-orange-400/10' },
+            { k: 'RSI',  on: showRSI,  set: setShowRSI,  cls: 'text-purple-400 border-purple-400/50 bg-purple-400/10' },
+            { k: 'MACD', on: showMACD, set: setShowMACD, cls: 'text-blue-400   border-blue-400/50   bg-blue-400/10'   },
           ].map(ind => (
             <button
-              key={ind.key}
-              onClick={ind.toggle}
-              className={`px-1.5 py-0.5 rounded text-[9px] font-bold border transition-colors ${
-                ind.state
-                  ? `border-current ${ind.color} bg-current/10`
-                  : 'border-white/10 text-slate-600'
+              key={ind.k}
+              onClick={() => ind.set(v => !v)}
+              className={`px-1.5 py-0.5 rounded text-[9px] sm:text-[10px] font-bold border transition-all ${
+                ind.on ? ind.cls : 'border-white/10 text-slate-600 hover:text-slate-400'
               }`}
             >
-              {ind.key}
+              {ind.k}
             </button>
           ))}
         </div>
 
-        {/* Refresh */}
+        {/* Refresh / loading */}
         <button
           onClick={loadData}
+          className="ml-auto text-slate-500 hover:text-white text-[12px] w-6 h-6 flex items-center justify-center rounded hover:bg-white/5 transition-colors"
           title="Refresh"
-          className="ml-auto text-slate-500 hover:text-white text-[10px] px-1"
         >
-          {loading ? '⏳' : '↻'}
+          {loading ? (
+            <span className="animate-spin inline-block text-[10px]">⟳</span>
+          ) : '⟳'}
         </button>
       </div>
 
-      {/* Error */}
+      {/* Error bar */}
       {error && (
-        <div className="text-red-400 text-[10px] text-center py-1">{error}</div>
+        <div className="text-red-400 text-[10px] text-center py-0.5 bg-red-500/10 shrink-0">{error}</div>
       )}
 
-      {/* Main candlestick chart */}
-      <div
-        ref={mainRef}
-        style={{ flex: `1 1 0`, minHeight: 0 }}
-        className="w-full"
-      />
+      {/* ── Chart panes — flex column, each fills its allocated space ── */}
+      <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
 
-      {/* RSI pane */}
-      {showRSI && (
-        <div
-          ref={rsiRef}
-          style={{ height: `${rsiHeight}px` }}
-          className="w-full border-t border-white/[0.04] shrink-0"
-        />
-      )}
+        {/* Main candle chart */}
+        <div ref={mainRef} className="flex-1 min-h-0 w-full" />
 
-      {/* MACD pane */}
-      {showMACD && (
-        <div
-          ref={macdRef}
-          style={{ height: `${macdHeight}px` }}
-          className="w-full border-t border-white/[0.04] shrink-0"
-        />
-      )}
+        {/* RSI pane */}
+        {showRSI && (
+          <div
+            ref={rsiRef}
+            style={{ height: rsiH }}
+            className="w-full shrink-0 border-t border-white/[0.04]"
+          />
+        )}
+
+        {/* MACD pane */}
+        {showMACD && (
+          <div
+            ref={macdRef}
+            style={{ height: macdH }}
+            className="w-full shrink-0 border-t border-white/[0.04]"
+          />
+        )}
+      </div>
     </div>
   );
 }
