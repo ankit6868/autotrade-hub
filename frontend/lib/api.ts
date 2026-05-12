@@ -221,8 +221,8 @@ export const api = {
       list: () => request<any>('/api/futures/bots'),
       create: (data: Record<string, unknown>) =>
         request<any>('/api/futures/bots', { method: 'POST', body: JSON.stringify(data) }),
-      stop: (botId: number) =>
-        request<any>(`/api/futures/bots/${botId}`, { method: 'DELETE' }),
+      stop: (botId: number, force?: boolean) =>
+        request<any>(`/api/futures/bots/${botId}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
       performance: (botId: number) => request<any>(`/api/futures/bots/${botId}/performance`),
     },
   },

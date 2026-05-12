@@ -117,9 +117,13 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
         botId={viewingBotId}
         onBack={() => { setViewingBotId(null); refreshBots(); }}
         onStop={async () => {
-          await api.futures.bots.stop(viewingBotId);
-          setViewingBotId(null);
-          refreshBots();
+          const res = await api.futures.bots.stop(viewingBotId);
+          if (res.winding_down) {
+            refreshBots();
+          } else {
+            setViewingBotId(null);
+            refreshBots();
+          }
         }}
       />
     );
@@ -185,23 +189,31 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
             <button onClick={refreshBots} className="text-[9px] text-slate-500 hover:text-white">Refresh</button>
           </div>
           {runningBots.filter(b => b.is_running).map(bot => (
-            <div key={bot.id} onClick={() => setViewingBotId(bot.id)} className="p-2.5 rounded-lg bg-[#1e222d] border border-emerald-500/10 mb-1.5 cursor-pointer hover:border-emerald-500/30 transition-colors">
+            <div key={bot.id} onClick={() => setViewingBotId(bot.id)} className={`p-2.5 rounded-lg bg-[#1e222d] border mb-1.5 cursor-pointer transition-colors ${
+              bot.winding_down ? 'border-amber-500/20 hover:border-amber-500/40' : 'border-emerald-500/10 hover:border-emerald-500/30'
+            }`}>
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.5)]" />
+                  <span className={`w-2 h-2 rounded-full animate-pulse ${
+                    bot.winding_down ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]' : 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]'
+                  }`} />
                   <span className="text-white text-[11px] font-bold">{bot.strategy_name}</span>
+                  {bot.winding_down && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-amber-500/20 text-amber-400">CLOSING</span>
+                  )}
                   <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
                     bot.mode === 'live' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-indigo-500/20 text-indigo-400'
                   }`}>{bot.mode === 'live' ? 'LIVE' : 'PAPER'}</span>
                 </div>
                 <button
-                  onClick={async () => {
-                    await api.futures.bots.stop(bot.id);
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    await api.futures.bots.stop(bot.id, bot.winding_down);
                     refreshBots();
                   }}
                   className="text-red-400 hover:text-red-300 text-[10px] font-medium px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20"
                 >
-                  Stop
+                  {bot.winding_down ? 'Force Stop' : 'Stop'}
                 </button>
               </div>
 
@@ -944,8 +956,10 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
         <button onClick={onBack} className="text-slate-400 hover:text-white text-sm">&lt;</button>
         <span className="text-sm font-bold text-white">{data.strategy_name}</span>
         <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ml-1 ${
-          data.is_running ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-500/20 text-slate-400'
-        }`}>{data.is_running ? 'RUNNING' : 'STOPPED'}</span>
+          data.winding_down ? 'bg-amber-500/20 text-amber-400'
+            : data.is_running ? 'bg-emerald-500/20 text-emerald-400'
+            : 'bg-slate-500/20 text-slate-400'
+        }`}>{data.winding_down ? 'CLOSING POSITIONS' : data.is_running ? 'RUNNING' : 'STOPPED'}</span>
         {data.is_running && (
           <button onClick={(e) => { e.stopPropagation(); onStop(); }}
             className="ml-auto text-red-400 hover:text-red-300 text-[10px] font-medium px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20">
@@ -955,7 +969,7 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
       </div>
 
       {/* Summary stats */}
-      <div className="grid grid-cols-4 gap-1.5 px-3 py-2 border-b border-white/[0.06]">
+      <div className="grid grid-cols-5 gap-1.5 px-3 py-2 border-b border-white/[0.06]">
         <div className="text-center p-1.5 rounded bg-[#131722]">
           <p className="text-[9px] text-slate-500">P&L</p>
           <p className={`text-[11px] font-bold ${(data.realized_pnl || data.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
@@ -969,6 +983,10 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
         <div className="text-center p-1.5 rounded bg-[#131722]">
           <p className="text-[9px] text-slate-500">Trades</p>
           <p className="text-[11px] font-bold text-white">{data.total_trades || 0}</p>
+        </div>
+        <div className="text-center p-1.5 rounded bg-[#131722]">
+          <p className="text-[9px] text-slate-500">Signals</p>
+          <p className="text-[11px] font-bold text-amber-400">{data.signal_count || 0}</p>
         </div>
         <div className="text-center p-1.5 rounded bg-[#131722]">
           <p className="text-[9px] text-slate-500">Ticks</p>
@@ -1000,6 +1018,23 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
       <div className="flex-1 overflow-y-auto">
         {tab === 'signals' && (
           <div className="px-3 py-2 space-y-1">
+            {/* Signal criteria from strategy */}
+            {data.signal_criteria && data.signal_criteria.length > 0 && (
+              <div className="p-2.5 rounded-lg bg-[#0d1117] border border-indigo-500/10 mb-2">
+                <p className="text-[10px] text-indigo-400 font-bold mb-1.5">Signal Criteria</p>
+                {data.signal_criteria.map((c: any, i: number) => (
+                  <div key={i} className="mb-1 last:mb-0">
+                    <span className={`text-[9px] font-bold px-1 py-0.5 rounded mr-1.5 ${
+                      c.name === 'LONG' ? 'bg-emerald-500/15 text-emerald-400'
+                        : c.name === 'SHORT' ? 'bg-red-500/15 text-red-400'
+                        : c.name === 'Risk' ? 'bg-amber-500/15 text-amber-400'
+                        : 'bg-indigo-500/15 text-indigo-400'
+                    }`}>{c.name}</span>
+                    <span className="text-[9px] text-slate-400">{(c.conditions || []).join(' + ')}</span>
+                  </div>
+                ))}
+              </div>
+            )}
             {actionLog.length === 0 && (
               <p className="text-slate-500 text-xs text-center py-4">No signals yet — bot is scanning...</p>
             )}

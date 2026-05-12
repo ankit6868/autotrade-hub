@@ -176,10 +176,14 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll }: {
               <tr key={i} className="border-t border-white/[0.04] hover:bg-white/[0.02]">
                 <td className="px-2 py-2">
                   <div className="flex items-center gap-1.5">
-                    <span className={`w-1 h-4 rounded-sm ${p.side === 'long' ? 'bg-emerald-500' : 'bg-red-500'}`} />
                     <div>
-                      <div className="text-white font-medium">{p.pair} Perp</div>
-                      <div className="text-[10px] text-slate-500">
+                      <div className="flex items-center gap-1.5">
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
+                          (p.side || p.direction) === 'long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                        }`}>{((p.side || p.direction) === 'long' ? 'LONG' : 'SHORT')}</span>
+                        <span className="text-white font-medium">{p.pair} Perp</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500 mt-0.5">
                         {p.mode === 'isolated' ? 'Isolated' : 'Cross'} {lev}x
                       </div>
                     </div>
@@ -413,9 +417,11 @@ function BotsTab({ bots }: { bots: any[] }) {
             </td>
             <td className="px-2 py-2">
               <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${
-                b.is_running ? 'bg-emerald-500/10 text-emerald-400' : 'bg-slate-500/10 text-slate-400'
+                b.winding_down ? 'bg-amber-500/10 text-amber-400'
+                  : b.is_running ? 'bg-emerald-500/10 text-emerald-400'
+                  : 'bg-slate-500/10 text-slate-400'
               }`}>
-                {b.is_running ? 'Running' : 'Stopped'}
+                {b.winding_down ? 'Closing' : b.is_running ? 'Running' : 'Stopped'}
               </span>
             </td>
           </tr>

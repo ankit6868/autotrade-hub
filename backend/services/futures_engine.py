@@ -119,6 +119,19 @@ class FuturesEngine(NativeTradingEngine):
         self._per_symbol_margin: dict[str, str] = {}
         self._order_counter = 0
         self.action_log: list[dict] = []
+        self.signal_count: int = 0
+        self._winding_down: bool = False
+
+    def wind_down(self):
+        """Stop opening new positions but keep managing existing ones until all are closed."""
+        self._winding_down = True
+        self._log_action("wind_down", "Bot entering wind-down mode — managing open positions to exit, no new entries")
+        log.info("[%s] Engine entering wind-down mode with %d open positions",
+                 self.user_id, len(self.positions))
+
+    @property
+    def is_winding_down(self) -> bool:
+        return self._winding_down
 
     def _log_action(self, action_type: str, detail: str, **extra):
         entry = {
@@ -284,6 +297,14 @@ class FuturesEngine(NativeTradingEngine):
                         except Exception:
                             pass
 
+                # Wind-down: no new entries, auto-stop when all positions closed
+                if self._winding_down:
+                    if len(self.positions) == 0:
+                        self._log_action("wind_down_complete", "All positions closed — stopping engine")
+                        log.info("[%s] Wind-down complete, all positions closed", self.user_id)
+                        self._stop_evt.set()
+                    continue
+
                 # Position limit guards
                 if len(self.positions) >= self._max_open:
                     continue
@@ -315,6 +336,7 @@ class FuturesEngine(NativeTradingEngine):
             if sig is None:
                 continue
 
+            self.signal_count += 1
             entry_s, sl_s, tp_s, direction = sig
             entry = live_price
             sl_dist = abs(entry_s - sl_s)
@@ -574,6 +596,8 @@ class FuturesEngine(NativeTradingEngine):
         base["margin_mode"]   = self._margin_mode
         base["pending_orders"] = len(self._pending_orders)
         base["action_log"]    = list(self.action_log)
+        base["signal_count"]  = self.signal_count
+        base["winding_down"]  = self._winding_down
         for pos_info in base.get("positions", []):
             for k, p in self.positions.items():
                 if p.pair == pos_info["pair"]:

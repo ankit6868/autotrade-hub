@@ -1152,26 +1152,89 @@ def futures_account(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Full futures account overview (paper balance + live KuCoin data)."""
+    """Futures Lead Trading account overview — always fetches from KuCoin when keys are configured.
+    KuCoin Lead Trading uses the same futures account (/api/v1/account-overview).
+    Falls back to paper engine state only when no API keys are set."""
+    from backend.utils.encryption import decrypt, DecryptError
+
     eng = futures_engine_registry.for_user(user_id)
 
-    # Paper account state
+    # Always try to fetch live data from KuCoin Futures Lead Trading account
+    cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+    if cfg:
+        try:
+            kk = decrypt(cfg.kucoin_key_enc or "", user_id)
+            ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
+            kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+            if kk and ks:
+                from backend.services.native_trading_engine import _kucoin_get_signed
+                from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+
+                # Fetch account overview from KuCoin Futures
+                # Lead Trading shares the same futures account — this is the real balance
+                data = _kucoin_get_signed(
+                    "/api/v1/account-overview", kk, ks, kp,
+                    params={"currency": "USDT"},
+                    base_url=KUCOIN_FUTURES_BASE,
+                )
+                if str(data.get("code")) == "200000":
+                    acct = data.get("data", {})
+                    account_equity = float(acct.get("accountEquity", 0))
+                    margin_balance = float(acct.get("marginBalance", 0))
+                    available_balance = float(acct.get("availableBalance", 0))
+                    unrealised_pnl = float(acct.get("unrealisedPNL", 0))
+                    position_margin = float(acct.get("positionMargin", 0))
+                    order_margin = float(acct.get("orderMargin", 0))
+                    frozen_funds = float(acct.get("frozenFunds", 0))
+                    risk_ratio = float(acct.get("riskRatio", 0))
+                    max_withdraw = float(acct.get("maxWithdrawAmount", 0))
+
+                    return {
+                        "mode": "live",
+                        "source": "kucoin_lead_trading",
+                        "balance": account_equity,
+                        "margin_balance": margin_balance,
+                        "equity": account_equity,
+                        "available_balance": available_balance,
+                        "available_margin": float(acct.get("availableMargin", available_balance)),
+                        "unrealized_pnl": unrealised_pnl,
+                        "used_margin": position_margin,
+                        "order_margin": order_margin,
+                        "margin_mode": "Cross",
+                        "frozen_funds": frozen_funds,
+                        "risk_ratio": risk_ratio,
+                        "max_withdraw": max_withdraw,
+                        "currency": acct.get("currency", "USDT"),
+                    }
+                else:
+                    log.warning("KuCoin account-overview error: %s %s",
+                                data.get("code"), data.get("msg"))
+        except (DecryptError, Exception) as exc:
+            log.warning("Failed to fetch KuCoin lead trading account for %s: %s", user_id, exc)
+
+    # Fallback: paper account from engine state (no KuCoin keys configured)
     open_positions = eng.get_open_positions() if eng.is_running else []
     total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_positions)
     total_margin = sum(p.get("stake", 0) for p in open_positions)
 
-    paper_account = {
+    return {
         "mode": eng._mode or "paper",
+        "source": "paper_engine",
         "balance": round(eng.balance, 4),
+        "margin_balance": round(eng.balance, 4),
         "equity": round(eng.balance + total_unrealized, 4),
+        "available_balance": round(eng.balance, 4),
+        "available_margin": round(eng.balance - total_margin, 4),
         "unrealized_pnl": round(total_unrealized, 4),
         "used_margin": round(total_margin, 4),
-        "available_balance": round(eng.balance, 4),
+        "order_margin": 0,
+        "margin_mode": "Isolated",
+        "frozen_funds": 0,
+        "risk_ratio": round(total_margin / max(eng.balance, 0.01) * 100, 2) if total_margin > 0 else 0,
+        "max_withdraw": round(eng.balance, 4),
         "position_count": len(open_positions),
         "currency": "USDT",
     }
-
-    return paper_account
 
 
 # ── Position TP/SL Management ────────────────────────────────────────────
@@ -1340,6 +1403,85 @@ def lead_trading_status(
         return {"connected": False, "reason": str(e)}
 
 
+# Built-in signal criteria extracted from strategy signal function docstrings
+_BUILTIN_SIGNAL_CRITERIA: dict[str, list[dict]] = {
+    "SimpleTargetStrategy": [
+        {"name": "LONG", "conditions": ["RSI < 55 AND price near/below EMA20", "OR RSI < 38 (strong oversold)"]},
+        {"name": "SHORT", "conditions": ["RSI > 65 AND price above EMA20", "OR RSI > 72 (strong overbought)"]},
+        {"name": "Risk", "conditions": ["SL: 1.5%", "TP: 3.0%", "R:R = 2:1"]},
+    ],
+    "BidirectionalStrategy": [
+        {"name": "LONG", "conditions": ["EMA9 > EMA21 (uptrend, 2+ bars)", "RSI < 60"]},
+        {"name": "SHORT", "conditions": ["EMA9 < EMA21 (downtrend, 2+ bars)", "RSI > 40"]},
+        {"name": "Risk", "conditions": ["SL: 1.5%", "TP: 3.0%", "R:R = 2:1"]},
+    ],
+    "SMCStrategy": [
+        {"name": "HTF Bias", "conditions": ["EMA50 direction — bullish if close > EMA50"]},
+        {"name": "BOS", "conditions": ["Price breaks 20-bar swing high (LONG) or low (SHORT)"]},
+        {"name": "FVG", "conditions": ["3-candle Fair Value Gap within last 30 bars"]},
+        {"name": "OB Zone", "conditions": ["Last opposing candle before the move (Order Block)"]},
+        {"name": "LONG", "conditions": ["Bullish BOS + Bullish FVG + price in OB zone + close > EMA50"]},
+        {"name": "SHORT", "conditions": ["Bearish BOS + Bearish FVG + price in OB zone + close < EMA50"]},
+        {"name": "Risk", "conditions": ["SL: below swing low (LONG) / above swing high (SHORT)", "TP: 2R from entry"]},
+    ],
+    "SMCStrategyTV": [
+        {"name": "HTF Bias", "conditions": ["EMA50 direction — bullish if close > EMA50"]},
+        {"name": "BOS", "conditions": ["Price breaks 20-bar swing high (LONG) or low (SHORT)"]},
+        {"name": "FVG", "conditions": ["3-candle Fair Value Gap within last 30 bars"]},
+        {"name": "OB Zone", "conditions": ["Last opposing candle before the move (Order Block)"]},
+        {"name": "LONG", "conditions": ["Bullish BOS + Bullish FVG + price in OB zone + close > EMA50"]},
+        {"name": "SHORT", "conditions": ["Bearish BOS + Bearish FVG + price in OB zone + close < EMA50"]},
+        {"name": "Risk", "conditions": ["SL: below swing low (LONG) / above swing high (SHORT)", "TP: 2R from entry"]},
+    ],
+    "MissCandleLongStrategy": [
+        {"name": "LONG", "conditions": ["Close crosses above upper Bollinger Band", "RSI momentum confirmation"]},
+        {"name": "Risk", "conditions": ["SL: 1.5%", "TP: 1.5%"]},
+    ],
+    "MissCandleShortStrategy": [
+        {"name": "SHORT", "conditions": ["Close crosses below lower Bollinger Band", "RSI momentum confirmation"]},
+        {"name": "Risk", "conditions": ["SL: 1.5%", "TP: 1.5%"]},
+    ],
+    "MacdCrossoverStrategy": [
+        {"name": "LONG", "conditions": ["MACD line crosses above Signal line"]},
+        {"name": "SHORT", "conditions": ["MACD line crosses below Signal line"]},
+        {"name": "Risk", "conditions": ["SL: 1.5%", "TP: 3.0%"]},
+    ],
+    "RsiBollingerStrategy": [
+        {"name": "LONG", "conditions": ["RSI < 30 (oversold)", "Price touches lower Bollinger Band"]},
+        {"name": "SHORT", "conditions": ["RSI > 70 (overbought)", "Price touches upper Bollinger Band"]},
+        {"name": "Risk", "conditions": ["SL: 1.5%", "TP: 1.5%"]},
+    ],
+    "EmaScalpingStrategy": [
+        {"name": "LONG", "conditions": ["EMA9 crosses above EMA21", "Volume confirmation"]},
+        {"name": "SHORT", "conditions": ["EMA9 crosses below EMA21", "Volume confirmation"]},
+        {"name": "Risk", "conditions": ["SL: 0.5%", "TP: 1.0%"]},
+    ],
+}
+
+
+def _extract_signal_criteria(strategy_name: str, strategy_id: int | None, db, user_id: str) -> list[dict]:
+    """Extract signal firing criteria from strategy. Uses built-in map or strategy description."""
+    # Check built-in strategies first
+    for key, criteria in _BUILTIN_SIGNAL_CRITERIA.items():
+        if key.lower() in (strategy_name or "").lower() or (strategy_name or "").lower() in key.lower():
+            return criteria
+
+    # For user strategies, extract from description
+    if strategy_id:
+        from backend.models.strategy import Strategy
+        from sqlalchemy import or_
+        strat = db.execute(
+            select(Strategy).where(
+                Strategy.id == strategy_id,
+                or_(Strategy.user_id == user_id, Strategy.is_template == True),
+            )
+        ).scalar_one_or_none()
+        if strat and strat.description:
+            return [{"name": "Strategy", "conditions": [strat.description[:200]]}]
+
+    return []
+
+
 @router.get("/bots")
 def list_futures_bots(
     db: Session = Depends(get_db),
@@ -1353,6 +1495,45 @@ def list_futures_bots(
     ).scalars().all()
 
     # Check actual engine status for running bots
+    bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
+
+    # Auto-resume: restart engines for bots marked running in DB but with no live thread
+    _kk = _ks = _kp = ""
+    _creds_loaded = False
+    for i in instances:
+        if not i.is_running or not i.engine_key:
+            continue
+        eng = bot_engines.get(i.engine_key)
+        if eng and eng.is_running:
+            continue
+        # Engine is dead — resume it
+        if not _creds_loaded:
+            from backend.utils.encryption import decrypt, DecryptError
+            cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+            if cfg:
+                try:
+                    _kk = decrypt(cfg.kucoin_key_enc or "", user_id)
+                    _ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
+                    _kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+                except Exception:
+                    pass
+            _creds_loaded = True
+        pairs = [p.strip() for p in (i.pairs or "BTC/USDT").split(",")]
+        eng = futures_engine_registry.for_bot(user_id, i.engine_key)
+        try:
+            eng.start_futures(
+                strategy_name=i.strategy_name, pairs=pairs, leverage=i.leverage or 10,
+                mode=i.mode or "paper", timeframe=i.timeframe or "15m",
+                stoploss=i.stoploss or -0.03, wallet=i.wallet or 1000,
+                take_profit_pct=(i.takeprofit or 0.015) * 100,
+                max_position_pct=(i.risk_pct or 5.0),
+                strategy_id=i.strategy_id,
+                kucoin_key=_kk, kucoin_secret=_ks, kucoin_passphrase=_kp,
+            )
+            log.info("Auto-resumed bot %s for user %s", i.engine_key, user_id)
+        except Exception as exc:
+            log.warning("Failed to auto-resume bot %s: %s", i.engine_key, exc)
+    # Refresh engine list after potential resumes
     bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
 
     # Count trades from DB per strategy for fallback
@@ -1374,6 +1555,8 @@ def list_futures_bots(
         engine_running = eng.is_running if eng else False
         engine_status = eng.status if eng else None
         db_count = db_trade_counts.get(i.id, 0)
+        eng_total = (engine_status or {}).get("total_trades", 0) + (engine_status or {}).get("open_trades", 0)
+        winding = (engine_status or {}).get("winding_down", False)
         bots.append({
             "id": i.id,
             "strategy_name": i.strategy_name,
@@ -1383,16 +1566,15 @@ def list_futures_bots(
             "leverage": i.leverage,
             "timeframe": i.timeframe,
             "wallet": i.wallet,
-            "is_running": i.is_running and engine_running,
+            "is_running": (i.is_running and engine_running) or winding,
+            "winding_down": winding,
             "engine_running": engine_running,
-            "total_trades": (
-                ((engine_status or {}).get("closed_count", 0) + (engine_status or {}).get("open_count", 0))
-                or db_count or i.total_trades or 0
-            ),
-            "closed_trades": (engine_status or {}).get("closed_count", i.total_trades or 0),
-            "total_pnl": (engine_status or {}).get("total_pnl", i.total_pnl or 0),
-            "open_positions": (engine_status or {}).get("open_count", 0),
+            "total_trades": eng_total or db_count or i.total_trades or 0,
+            "closed_trades": (engine_status or {}).get("total_trades", i.total_trades or 0),
+            "total_pnl": (engine_status or {}).get("realized_pnl", i.total_pnl or 0),
+            "open_positions": (engine_status or {}).get("open_trades", 0),
             "ticks": (engine_status or {}).get("ticks", 0),
+            "signals": (engine_status or {}).get("signal_count", 0),
             "last_action": (engine_status or {}).get("last_action", ""),
             "risk_pct": i.risk_pct,
             "stoploss": i.stoploss,
@@ -1482,10 +1664,12 @@ def create_futures_bot(
 def stop_futures_bot(
     bot_id: int,
     request: Request,
+    force: bool = False,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Stop and deactivate a futures bot instance."""
+    """Stop a futures bot. If open positions exist, enters wind-down mode
+    (manages TP/SL to exit profitably, no new entries). Use ?force=true to kill immediately."""
     instance = db.execute(
         select(StrategyInstance).where(
             StrategyInstance.id == bot_id, StrategyInstance.user_id == user_id,
@@ -1494,15 +1678,35 @@ def stop_futures_bot(
     if not instance:
         return {"error": "Bot not found"}
 
+    eng = None
+    if instance.engine_key:
+        bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
+        eng = bot_engines.get(instance.engine_key)
+
+    has_open = eng and eng.is_running and len(eng.positions) > 0
+
+    if has_open and not force:
+        eng.wind_down()
+        log_event(db, user_id, "futures.wind_down_bot", request, payload={
+            "bot_id": bot_id, "open_positions": len(eng.positions),
+        })
+        return {
+            "stopped": False,
+            "winding_down": True,
+            "open_positions": len(eng.positions),
+            "message": f"Bot has {len(eng.positions)} open position(s) — entering wind-down mode. "
+                       "Engine will manage TP/SL exits and stop automatically when all positions close.",
+        }
+
+    # Immediate stop (no open positions or force=true)
     instance.is_running = False
     db.commit()
 
-    # Stop the isolated bot engine
     if instance.engine_key:
         futures_engine_registry.stop_bot(user_id, instance.engine_key)
     else:
-        eng = futures_engine_registry.for_user(user_id)
-        eng.stop()
+        eng_default = futures_engine_registry.for_user(user_id)
+        eng_default.stop()
 
     log_event(db, user_id, "futures.stop_bot", request, payload={"bot_id": bot_id})
     return {"stopped": True, "bot_id": bot_id}
@@ -1523,11 +1727,18 @@ def futures_bot_performance(
     if not instance:
         return {"error": "Bot not found"}
 
+    # Only fetch trades belonging to THIS bot's strategy, created after the bot was started
+    trade_filter = [
+        Trade.user_id == user_id, Trade.market_type == "futures",
+        Trade.status == "closed",
+    ]
+    if instance.strategy_id:
+        trade_filter.append(Trade.strategy_id == instance.strategy_id)
+    if instance.created_at:
+        trade_filter.append(Trade.entry_time >= instance.created_at)
+
     trades = db.execute(
-        select(Trade).where(
-            Trade.user_id == user_id, Trade.market_type == "futures",
-            Trade.status == "closed",
-        ).order_by(desc(Trade.exit_time)).limit(100)
+        select(Trade).where(*trade_filter).order_by(desc(Trade.exit_time)).limit(100)
     ).scalars().all()
 
     total_pnl = sum(t.profit_abs or 0 for t in trades)
@@ -1535,21 +1746,27 @@ def futures_bot_performance(
     win_rate = round(wins / len(trades) * 100, 1) if trades else 0
 
     engine_data = {}
+    winding_down = False
     if instance.engine_key:
         bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
         eng = bot_engines.get(instance.engine_key)
         if eng:
             s = eng.status
+            winding_down = s.get("winding_down", False)
             engine_data = {
                 "action_log": s.get("action_log", []),
                 "open_positions_detail": s.get("open_positions_detail", []),
                 "closed_trades_detail": s.get("closed_trades_detail", []),
                 "balance": s.get("balance", 0),
                 "ticks": s.get("ticks", 0),
+                "signal_count": s.get("signal_count", 0),
                 "last_action": s.get("last_action", ""),
                 "unrealized_pnl": s.get("unrealized_pnl", 0),
                 "realized_pnl": s.get("realized_pnl", 0),
             }
+
+    # Extract signal criteria from strategy description/docstring
+    signal_criteria = _extract_signal_criteria(instance.strategy_name, instance.strategy_id, db, user_id)
 
     return {
         "bot_id": bot_id,
@@ -1558,10 +1775,12 @@ def futures_bot_performance(
         "total_pnl": round(total_pnl, 4),
         "win_rate": win_rate,
         "is_running": instance.is_running,
+        "winding_down": winding_down,
         "mode": instance.mode,
         "pairs": instance.pairs,
         "leverage": instance.leverage,
         "risk_pct": instance.risk_pct,
+        "signal_criteria": signal_criteria,
         "trades": [
             {
                 "pair": t.pair, "direction": getattr(t, "side", "long"),
