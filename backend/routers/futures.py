@@ -504,32 +504,27 @@ def futures_manual_entry(
 ):
     """
     Manually open a futures position at the current market price.
-    Uses the FuturesEngine — 100% isolated from the spot engine.
-    The position appears ONLY in futures open positions / trade log, never spot.
+    In live mode, places a real order via KuCoin Lead Trading Futures API.
     """
-    from backend.services.native_trading_engine import _kucoin_get, _persist_open_trade
-    from backend.services.futures_engine import FuturesPosition, _calc_liquidation_price
+    from backend.services.native_trading_engine import _kucoin_get, _kucoin_post_signed, _persist_open_trade
+    from backend.services.futures_engine import FuturesPosition, _calc_liquidation_price, KUCOIN_FUTURES_BASE
     from datetime import datetime, timezone as _tz
 
     pair          = req.get("pair", "BTC/USDT")
-    direction     = req.get("direction", "long").lower()   # "long" or "short"
-    stake_pct     = float(req.get("stake_pct", 5.0))       # % of balance as margin
-    req_leverage  = req.get("leverage")                    # optional override from UI
+    direction     = req.get("direction", "long").lower()
+    stake_pct     = float(req.get("stake_pct", 5.0))
+    req_leverage  = req.get("leverage")
 
     eng = futures_engine_registry.for_user(user_id)
 
-    # Default sensible values if engine hasn't been started yet
-    # NOTE: eng._leverage defaults to 1 (not None), so check > 1 to detect "not configured"
-    # UI can also pass leverage directly (for standalone manual entries without bot running)
     leverage = int(req_leverage) if req_leverage else (eng._leverage if (eng._leverage and eng._leverage > 1) else 10)
     mode     = eng._mode     if eng._mode     else "paper"
     balance  = eng.balance   if eng.balance   else 1000.0
     sl_pct   = abs(eng._stoploss or 0.015)
-    # Fix: engine stores _take_profit as decimal (0.03), not percent (3.0)
     _raw_tp = getattr(eng, "_take_profit", None) or getattr(eng, "_take_profit_pct", None)
     tp_pct   = float(_raw_tp) * 100 if (_raw_tp and float(_raw_tp) <= 1) else (float(_raw_tp) if _raw_tp else 3.0)
 
-    # Fetch current price from KuCoin
+    # Fetch current price
     try:
         sym  = pair.replace("/", "-")
         data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
@@ -548,7 +543,6 @@ def futures_manual_entry(
         sl_price = round(entry_price * (1 + sl_pct), 6)
         tp_price = round(entry_price * (1 - tp_pct / 100), 6)
 
-    # Build a FuturesPosition (liquidation is computed inside __init__)
     now = datetime.now(_tz.utc)
     pos = FuturesPosition(
         pair=pair, direction=direction,
@@ -556,17 +550,47 @@ def futures_manual_entry(
         size=stake, leverage=leverage, opened_at=now,
     )
 
-    # Guard: only allow 1 open position per pair at a time
     with eng._lock:
         existing_pairs = [p.pair for p in eng.positions.values()]
     if pair in existing_pairs:
         return {"error": f"Already have an open position for {pair}. Close it first."}
 
+    # ── Live mode: place real order via Lead Trading API ──────────────
+    exchange_order_id = None
+    if mode == "live" and eng._api_key:
+        try:
+            kc_symbol     = pair.replace("/", "").replace("USDT", "USDTM")
+            side          = "buy" if direction == "long" else "sell"
+            position_side = "LONG" if direction == "long" else "SHORT"
+            contract_size = stake * leverage
+            contracts     = max(1, int(contract_size / entry_price * 1000))
+            client_oid    = f"atf-manual-{int(time.time()*1000)}"
+            body = {
+                "clientOid":   client_oid,
+                "side":         side,
+                "symbol":       kc_symbol,
+                "type":         "market",
+                "size":         contracts,
+                "leverage":     leverage,
+                "marginMode":   "ISOLATED",
+                "positionSide": position_side,
+            }
+            resp = _kucoin_post_signed(
+                "/api/v1/copy-trade/futures/orders", body,
+                eng._api_key, eng._api_sec, eng._api_pass,
+                base_url=KUCOIN_FUTURES_BASE,
+            )
+            if str(resp.get("code")) != "200000":
+                return {"error": f"KuCoin Lead Trading order failed: {resp.get('msg', resp)}"}
+            exchange_order_id = resp.get("data", {}).get("orderId")
+            log.info("[%s] Lead Trading manual ENTRY: %s", user_id, resp)
+        except Exception as e:
+            return {"error": f"Lead Trading order failed: {e}"}
+
     pos_key = f"{pair}-{direction}-manual-{int(now.timestamp())}"
     with eng._lock:
         eng.positions[pos_key] = pos
 
-    # Persist to DB — market_type="futures" ensures it's NOT mixed with spot
     db_id = _persist_open_trade(
         user_id, pos, mode,
         strategy_id  = eng._strategy_id,
@@ -577,7 +601,7 @@ def futures_manual_entry(
 
     log_event(db, user_id, "futures.manual_entry", request, payload={
         "pair": pair, "direction": direction, "entry": entry_price,
-        "leverage": leverage, "mode": mode,
+        "leverage": leverage, "mode": mode, "exchange_order_id": exchange_order_id,
     })
     return {
         "entered": True,
@@ -589,6 +613,7 @@ def futures_manual_entry(
         "liq": pos.liquidation_price,
         "leverage": leverage,
         "mode": mode,
+        "exchange_order_id": exchange_order_id,
     }
 
 
@@ -601,14 +626,16 @@ def futures_force_close(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Close ALL open in-memory + DB futures positions for the given pair."""
-    from backend.services.native_trading_engine import _kucoin_get, _persist_closed_trade
+    """Close ALL open futures positions for the given pair.
+    In live mode, places close orders via KuCoin Lead Trading API."""
+    from backend.services.native_trading_engine import _kucoin_get, _kucoin_post_signed, _persist_closed_trade
+    from backend.services.futures_engine import KUCOIN_FUTURES_BASE
     from sqlalchemy import update as sql_update
     from datetime import timezone as _tz
 
     eng = futures_engine_registry.for_user(user_id)
 
-    # Fetch live exit price once
+    # Fetch live exit price
     try:
         sym  = pair.replace("/", "-")
         data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
@@ -618,13 +645,11 @@ def futures_force_close(
 
     now = datetime.now(_tz.utc)
     closed_positions = []
+    mode = eng._mode or "paper"
 
     # ── Close all in-memory positions for this pair ────────────────────────
     with eng._lock:
         matching_keys = [k for k, p in eng.positions.items() if p.pair == pair]
-        if not matching_keys:
-            # No in-memory positions — still close DB ones below
-            pass
         for trade_key in matching_keys:
             pos = eng.positions.pop(trade_key)
             ep  = exit_price or pos.entry
@@ -633,14 +658,42 @@ def futures_force_close(
             eng.closed_trades.append(pos)
             closed_positions.append(pos)
 
+    # ── Live mode: place close orders on KuCoin Lead Trading ─────────────
+    if mode == "live" and eng._api_key and closed_positions:
+        kc_symbol = pair.replace("/", "").replace("USDT", "USDTM")
+        for pos in closed_positions:
+            try:
+                side          = "sell" if pos.direction == "long" else "buy"
+                position_side = "LONG" if pos.direction == "long" else "SHORT"
+                contract_size = pos.size * getattr(pos, "leverage", eng._leverage or 10)
+                contracts     = max(1, int(contract_size / pos.entry * 1000))
+                body = {
+                    "clientOid":   f"atf-close-{int(time.time()*1000)}",
+                    "side":         side,
+                    "symbol":       kc_symbol,
+                    "type":         "market",
+                    "size":         contracts,
+                    "leverage":     getattr(pos, "leverage", eng._leverage or 10),
+                    "marginMode":   "ISOLATED",
+                    "positionSide": position_side,
+                    "reduceOnly":   True,
+                }
+                resp = _kucoin_post_signed(
+                    "/api/v1/copy-trade/futures/orders", body,
+                    eng._api_key, eng._api_sec, eng._api_pass,
+                    base_url=KUCOIN_FUTURES_BASE,
+                )
+                log.info("[%s] Lead Trading CLOSE order: %s", user_id, resp)
+            except Exception as e:
+                log.error("[%s] Lead Trading close failed for %s: %s", user_id, pair, e)
+
     # Persist each closed in-memory position
     total_pnl = 0.0
     for pos in closed_positions:
-        _persist_closed_trade(user_id, pos, eng._mode, eng._strategy_id, pos.db_id)
+        _persist_closed_trade(user_id, pos, mode, eng._strategy_id, pos.db_id)
         total_pnl += pos.pnl_abs
 
     # ── Also close any orphaned open DB positions for this pair ───────────
-    # (positions that exist in DB but not in engine memory — from previous sessions)
     orphan_trades = db.execute(
         select(Trade).where(
             Trade.user_id    == user_id,
@@ -656,7 +709,6 @@ def futures_force_close(
         t.exit_time   = now
         t.exit_reason = "force_closed"
         t.status      = "closed"
-        # Fix: SHORT P&L is inverted vs LONG
         side = getattr(t, "side", "long") or "long"
         if side == "short":
             t.profit_pct = round((t.entry_price - ep) / t.entry_price * 100 * (t.leverage or 1), 4)
@@ -786,7 +838,12 @@ def place_futures_order(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Place a pending futures order (limit, stop, trailing_stop, etc.)."""
+    """Place a futures order (limit, stop, etc.).
+    In live mode, sends to KuCoin Lead Trading API."""
+    from backend.services.native_trading_engine import _kucoin_post_signed
+    from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+    import time as _t
+
     symbol     = req.get("symbol", "XBTUSDTM")
     side       = req.get("side", "buy")
     order_type = req.get("order_type", "limit")
@@ -800,6 +857,7 @@ def place_futures_order(
     post_only  = req.get("post_only", False)
     reduce_only = req.get("reduce_only", False)
     time_in_force = req.get("time_in_force", "GTC")
+    position_side = req.get("position_side")
 
     if size <= 0:
         return {"error": "size must be positive"}
@@ -813,6 +871,67 @@ def place_futures_order(
     if leverage is not None:
         leverage = int(leverage)
 
+    lev = leverage or eng._leverage or 10
+    mode = eng._mode or "paper"
+
+    # Determine position side
+    if not position_side:
+        if reduce_only:
+            position_side = "SHORT" if side == "buy" else "LONG"
+        else:
+            position_side = "LONG" if side == "buy" else "SHORT"
+
+    # ── Live mode: send to Lead Trading API ──────────────────────────────
+    exchange_order_id = None
+    if mode == "live" and eng._api_key:
+        try:
+            client_oid = f"atf-ord-{int(_t.time()*1000)}"
+            body: dict = {
+                "clientOid":   client_oid,
+                "side":         side,
+                "symbol":       symbol,
+                "type":         order_type if order_type in ("market", "limit") else "limit",
+                "size":         int(size),
+                "leverage":     lev,
+                "marginMode":   "ISOLATED",
+                "positionSide": position_side,
+            }
+            if price is not None and order_type == "limit":
+                body["price"] = str(price)
+            if reduce_only:
+                body["reduceOnly"] = True
+            if time_in_force:
+                body["timeInForce"] = time_in_force
+
+            # TP/SL stop orders use a different endpoint
+            if stop_price is not None or order_type in ("stop", "stop_limit"):
+                body["stopPriceType"] = "TP"
+                if stop_price:
+                    if side == "buy":
+                        body["triggerStopUpPrice"] = str(stop_price)
+                    else:
+                        body["triggerStopDownPrice"] = str(stop_price)
+                body["reduceOnly"] = True
+                resp = _kucoin_post_signed(
+                    "/api/v1/copy-trade/futures/st-orders", body,
+                    eng._api_key, eng._api_sec, eng._api_pass,
+                    base_url=KUCOIN_FUTURES_BASE,
+                )
+            else:
+                resp = _kucoin_post_signed(
+                    "/api/v1/copy-trade/futures/orders", body,
+                    eng._api_key, eng._api_sec, eng._api_pass,
+                    base_url=KUCOIN_FUTURES_BASE,
+                )
+
+            if str(resp.get("code")) != "200000":
+                return {"error": f"KuCoin Lead Trading: {resp.get('msg', resp)}"}
+            exchange_order_id = resp.get("data", {}).get("orderId")
+            log.info("[%s] Lead Trading order placed: %s", user_id, resp)
+        except Exception as e:
+            return {"error": f"Lead Trading order failed: {e}"}
+
+    # Also track in engine (paper mode uses this for matching)
     result = eng.place_pending_order(
         symbol=symbol, side=side, order_type=order_type, size=size,
         price=price, stop_price=stop_price, leverage=leverage,
@@ -826,8 +945,9 @@ def place_futures_order(
     order_rec = FuturesOrder(
         user_id=user_id, symbol=symbol, side=side, order_type=order_type,
         size=size, price=price, stop_price=stop_price,
-        leverage=leverage or eng._leverage, margin_mode=eng.get_symbol_margin(symbol),
+        leverage=lev, margin_mode="isolated",
         client_oid=result.get("order_id"), status="pending",
+        exchange_order_id=exchange_order_id,
         time_in_force=time_in_force, hidden=hidden, post_only=post_only,
         reduce_only=reduce_only, tp_price=float(tp_price) if tp_price else None,
         sl_price=float(sl_price) if sl_price else None,
@@ -836,6 +956,7 @@ def place_futures_order(
     db.commit()
     db.refresh(order_rec)
     result["db_id"] = order_rec.id
+    result["exchange_order_id"] = exchange_order_id
 
     log_event(db, user_id, "futures.place_order", request, payload=result)
     return result
@@ -848,11 +969,43 @@ def cancel_futures_order(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Cancel a pending futures order."""
+    """Cancel a pending futures order. In live mode, cancels on KuCoin Lead Trading."""
+    from backend.services.native_trading_engine import _kucoin_post_signed
+    from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+    import urllib.request, json as _json
+
     eng = futures_engine_registry.for_user(user_id)
+    mode = eng._mode or "paper"
+
+    # ── Live mode: cancel on KuCoin Lead Trading ─────────────────────────
+    if mode == "live" and eng._api_key:
+        # Check if there's an exchange_order_id in the DB
+        db_order = db.execute(
+            select(FuturesOrder).where(
+                FuturesOrder.client_oid == order_id,
+                FuturesOrder.user_id == user_id,
+            )
+        ).scalar_one_or_none()
+
+        if db_order and db_order.exchange_order_id:
+            try:
+                from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
+                ts = str(int(time.time() * 1000))
+                endpoint = f"/api/v1/copy-trade/futures/orders/{db_order.exchange_order_id}"
+                headers = _sign_request(
+                    eng._api_sec, eng._api_pass, eng._api_key,
+                    ts, "DELETE", endpoint,
+                )
+                url = f"{_base}{endpoint}"
+                req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
+                with urllib.request.urlopen(req_obj, timeout=15) as resp:
+                    cancel_resp = _json.loads(resp.read().decode())
+                log.info("[%s] Lead Trading cancel order: %s", user_id, cancel_resp)
+            except Exception as e:
+                log.error("[%s] Lead Trading cancel failed: %s", user_id, e)
+
     result = eng.cancel_pending_order(order_id)
 
-    # Update DB
     from sqlalchemy import update as sql_update
     db.execute(
         sql_update(FuturesOrder)
@@ -1028,13 +1181,19 @@ def set_position_tp_sl(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Set or update TP/SL on an open futures position."""
+    """Set or update TP/SL on an open futures position.
+    In live mode, places TP/SL stop orders via Lead Trading API."""
+    from backend.services.native_trading_engine import _kucoin_post_signed
+    from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+    import time as _t
+
     pair     = req.get("pair", "BTC/USDT")
     tp_price = req.get("tp_price")
     sl_price = req.get("sl_price")
 
     eng = futures_engine_registry.for_user(user_id)
     updated = False
+    matched_pos = None
     with eng._lock:
         for key, pos in eng.positions.items():
             if pos.pair == pair:
@@ -1043,12 +1202,81 @@ def set_position_tp_sl(
                 if sl_price is not None:
                     pos.sl = float(sl_price)
                 updated = True
+                matched_pos = pos
                 break
 
     if not updated:
         return {"error": f"No open position for {pair}"}
 
-    # Also update DB
+    mode = eng._mode or "paper"
+
+    # ── Live mode: place TP/SL orders on KuCoin Lead Trading ─────────────
+    if mode == "live" and eng._api_key and matched_pos:
+        kc_symbol     = pair.replace("/", "").replace("USDT", "USDTM")
+        direction     = matched_pos.direction
+        position_side = "LONG" if direction == "long" else "SHORT"
+        close_side    = "sell" if direction == "long" else "buy"
+        lev           = getattr(matched_pos, "leverage", eng._leverage or 10)
+        contract_size = matched_pos.size * lev
+        contracts     = max(1, int(contract_size / matched_pos.entry * 1000))
+
+        # TP order
+        if tp_price is not None:
+            try:
+                tp_body = {
+                    "clientOid":   f"atf-tp-{int(_t.time()*1000)}",
+                    "symbol":       kc_symbol,
+                    "marginMode":   "ISOLATED",
+                    "leverage":     lev,
+                    "positionSide": position_side,
+                    "side":         close_side,
+                    "type":         "market",
+                    "size":         contracts,
+                    "stopPriceType": "TP",
+                    "reduceOnly":   True,
+                }
+                if direction == "long":
+                    tp_body["triggerStopUpPrice"] = str(float(tp_price))
+                else:
+                    tp_body["triggerStopDownPrice"] = str(float(tp_price))
+                resp = _kucoin_post_signed(
+                    "/api/v1/copy-trade/futures/st-orders", tp_body,
+                    eng._api_key, eng._api_sec, eng._api_pass,
+                    base_url=KUCOIN_FUTURES_BASE,
+                )
+                log.info("[%s] Lead Trading TP order: %s", user_id, resp)
+            except Exception as e:
+                log.error("[%s] Lead Trading TP order failed: %s", user_id, e)
+
+        # SL order
+        if sl_price is not None:
+            try:
+                sl_body = {
+                    "clientOid":   f"atf-sl-{int(_t.time()*1000)}",
+                    "symbol":       kc_symbol,
+                    "marginMode":   "ISOLATED",
+                    "leverage":     lev,
+                    "positionSide": position_side,
+                    "side":         close_side,
+                    "type":         "market",
+                    "size":         contracts,
+                    "stopPriceType": "TP",
+                    "reduceOnly":   True,
+                }
+                if direction == "long":
+                    sl_body["triggerStopDownPrice"] = str(float(sl_price))
+                else:
+                    sl_body["triggerStopUpPrice"] = str(float(sl_price))
+                resp = _kucoin_post_signed(
+                    "/api/v1/copy-trade/futures/st-orders", sl_body,
+                    eng._api_key, eng._api_sec, eng._api_pass,
+                    base_url=KUCOIN_FUTURES_BASE,
+                )
+                log.info("[%s] Lead Trading SL order: %s", user_id, resp)
+            except Exception as e:
+                log.error("[%s] Lead Trading SL order failed: %s", user_id, e)
+
+    # Update DB
     trade = db.execute(
         select(Trade).where(
             Trade.user_id == user_id, Trade.pair == pair,
