@@ -38,6 +38,8 @@ export default function ManualOrderPanel({
 
   const [price, setPrice] = useState('');
   const [amount, setAmount] = useState('');
+  const [costMode, setCostMode] = useState(false);   // true = input in USDT, derive BTC
+  const [costUsdt, setCostUsdt] = useState('');       // USDT cost input
   const [stopPrice, setStopPrice] = useState('');
   const [tpPrice, setTpPrice] = useState('');
   const [slPrice, setSlPrice] = useState('');
@@ -61,11 +63,15 @@ export default function ManualOrderPanel({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const priceNum = parseFloat(price) || 0;
-  const amountNum = parseFloat(amount) || 0;
-  const cost = priceNum * amountNum;
+  const priceNum  = parseFloat(price) || 0;
+  const baseCoin  = pair.split('/')[0];
+  // When costMode is on: user types USDT cost, derive BTC amount
+  const effectiveRef = parseFloat(price) > 0 ? parseFloat(price) : (lastPrice || 1);
+  const amountNum = costMode
+    ? (parseFloat(costUsdt) || 0) / effectiveRef
+    : (parseFloat(amount) || 0);
+  const cost       = costMode ? (parseFloat(costUsdt) || 0) : priceNum * amountNum;
   const marginCost = cost / leverage;
-  const baseCoin = pair.split('/')[0];
 
   const maxLongAmount = priceNum > 0 ? (availableBalance * leverage) / priceNum : 0;
   const maxShortAmount = maxLongAmount;
@@ -107,9 +113,15 @@ export default function ManualOrderPanel({
 
   function handleSliderChange(pct: number) {
     setSliderValue(pct);
-    if (availableBalance > 0 && priceNum > 0) {
-      const maxAmount = (availableBalance * leverage * pct / 100) / priceNum;
-      setAmount(maxAmount.toFixed(6));
+    const ref = effectiveRef > 0 ? effectiveRef : 1;
+    if (availableBalance > 0) {
+      const usdtCost = availableBalance * pct / 100;
+      if (costMode) {
+        setCostUsdt(usdtCost.toFixed(2));
+      } else if (ref > 0) {
+        const btcAmount = (usdtCost * leverage) / ref;
+        setAmount(btcAmount.toFixed(6));
+      }
     }
   }
 
@@ -299,19 +311,38 @@ export default function ManualOrderPanel({
           </div>
         )}
 
-        {/* Amount */}
+        {/* Amount / Cost toggle */}
         <div>
-          <label className="text-[10px] text-slate-500 mb-1 block">
-            Amount ({baseCoin})
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-[10px] text-slate-500">
+              {costMode ? 'Cost (USDT)' : `Amount (${baseCoin})`}
+            </label>
+            <button
+              type="button"
+              onClick={() => { setCostMode(v => !v); setAmount(''); setCostUsdt(''); }}
+              className="text-[9px] px-1.5 py-0.5 rounded border border-white/10 text-slate-400 hover:text-white hover:border-white/30 transition-colors"
+            >
+              {costMode ? `By ${baseCoin}` : 'By Cost (USDT)'}
+            </button>
+          </div>
           <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
-            <input
-              type="number"
-              value={amount}
-              onChange={e => setAmount(e.target.value)}
-              placeholder="0"
-              className="flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none min-w-0"
-            />
+            {costMode ? (
+              <input
+                type="number"
+                value={costUsdt}
+                onChange={e => setCostUsdt(e.target.value)}
+                placeholder="0.00"
+                className="flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none min-w-0"
+              />
+            ) : (
+              <input
+                type="number"
+                value={amount}
+                onChange={e => setAmount(e.target.value)}
+                placeholder="0"
+                className="flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none min-w-0"
+              />
+            )}
             <span className="text-[10px] text-slate-400 pr-2 shrink-0">{baseCoin}</span>
           </div>
 
@@ -353,6 +384,12 @@ export default function ManualOrderPanel({
             <span className="text-slate-500">Max Short</span>
             <span className="text-slate-300">{maxShortAmount.toFixed(4)} {baseCoin}</span>
           </div>
+          {costMode && amountNum > 0 && (
+            <div className="flex justify-between text-[9px]">
+              <span className="text-slate-600">≈ {baseCoin} amount</span>
+              <span className="text-slate-400">{amountNum.toFixed(6)} {baseCoin}</span>
+            </div>
+          )}
         </div>
 
         {/* TP/SL toggles */}

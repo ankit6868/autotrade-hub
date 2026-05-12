@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 interface Props {
   pair: string;
   mode: 'paper' | 'live';
+  paperBalance?: number;   // paper engine balance passed from parent
   onBotCreated: () => void;
 }
 
@@ -72,7 +73,7 @@ function formatUsers(n: number) {
   return String(n);
 }
 
-export default function BotPanel({ pair, mode, onBotCreated }: Props) {
+export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Props) {
   const [category, setCategory] = useState<Category>('all');
   const [strategies, setStrategies] = useState<any[]>([]);
   const [selectedBot, setSelectedBot] = useState<StrategyCard | null>(null);
@@ -170,26 +171,30 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
               : mode === 'live' ? 'text-amber-300' : 'text-indigo-300'
           }>
             {leadStatus?.connected
-              ? `Lead Trading Connected${leadStatus.balance != null ? ` • ${leadStatus.balance.toFixed(2)} USDT` : ''}`
+              ? mode === 'paper'
+                /* Paper mode: show paper engine balance, NOT the KuCoin 0-balance */
+                ? `Lead Trading Connected • ${(paperBalance ?? 1000).toFixed(2)} USDT`
+                : `Lead Trading Connected • ${(leadStatus.balance ?? 0).toFixed(2)} USDT`
               : mode === 'live'
                 ? 'Lead Trading: Not Connected'
-                : `Paper Mode${leadStatus === null ? '' : leadStatus.connected ? '' : ' • Lead Trading: Not Connected'}`}
+                : `Paper Mode • ${(paperBalance ?? 1000).toFixed(2)} USDT`}
           </span>
         </div>
-        {mode === 'paper' && leadStatus?.connected && (
+        {mode === 'paper' && (
           <span className="text-[10px] text-indigo-300 font-medium">Paper Mode</span>
         )}
       </div>
 
-      {/* Running Bots */}
+      {/* Running Bots — scrollable so 6+ bots don't overflow */}
       {runningBots.filter(b => b.is_running).length > 0 && (
-        <div className="px-3 py-2 border-b border-white/[0.06]">
-          <div className="flex items-center justify-between mb-1.5">
+        <div className="px-3 py-2 border-b border-white/[0.06] flex flex-col max-h-[320px]">
+          <div className="flex items-center justify-between mb-1.5 shrink-0">
             <p className="text-[10px] text-emerald-400 font-bold">Active Bots ({runningBots.filter(b => b.is_running).length})</p>
             <button onClick={refreshBots} className="text-[9px] text-slate-500 hover:text-white">Refresh</button>
           </div>
+          <div className="overflow-y-auto flex-1 pr-0.5 space-y-1.5">
           {runningBots.filter(b => b.is_running).map(bot => (
-            <div key={bot.id} onClick={() => setViewingBotId(bot.id)} className={`p-2.5 rounded-lg bg-[#1e222d] border mb-1.5 cursor-pointer transition-colors ${
+            <div key={bot.id} onClick={() => setViewingBotId(bot.id)} className={`p-2.5 rounded-lg bg-[#1e222d] border cursor-pointer transition-colors ${
               bot.winding_down ? 'border-amber-500/20 hover:border-amber-500/40' : 'border-emerald-500/10 hover:border-emerald-500/30'
             }`}>
               <div className="flex items-center justify-between">
@@ -270,6 +275,7 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
               </div>
             </div>
           ))}
+          </div>
         </div>
       )}
 

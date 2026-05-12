@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
-import TradingViewWidget from '@/components/charts/TradingViewWidget';
+import KuCoinFuturesChart from '@/components/charts/KuCoinFuturesChart';
 import PairTabs from '@/components/futures/PairTabs';
 import OrderBook from '@/components/futures/OrderBook';
 import RecentTrades from '@/components/futures/RecentTrades';
@@ -101,11 +101,10 @@ export default function FuturesTerminal() {
       <div className="flex-1 flex overflow-hidden">
         {/* Left: Chart + Positions */}
         <div className="flex-1 flex flex-col min-w-0">
-          {/* Chart area */}
+          {/* Chart area — KuCoin Futures OHLCV chart */}
           <div className="flex-1 flex min-h-0">
-            {/* TradingView chart */}
             <div className="flex-1 min-w-0">
-              <TradingViewWidget symbol={tvSymbol} interval="15" showToolbar={true} />
+              <KuCoinFuturesChart pair={pair} defaultInterval="15m" />
             </div>
           </div>
 
@@ -191,7 +190,12 @@ export default function FuturesTerminal() {
                 onOrderPlaced={refreshAccount}
               />
             ) : (
-              <BotPanel pair={pair} mode={mode} onBotCreated={refreshAccount} />
+              <BotPanel
+                pair={pair}
+                mode={mode}
+                paperBalance={account?.available_balance ?? account?.balance ?? 1000}
+                onBotCreated={refreshAccount}
+              />
             )}
           </div>
 

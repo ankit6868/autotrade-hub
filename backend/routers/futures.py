@@ -1627,10 +1627,35 @@ def create_futures_bot(
         if strat:
             strategy_name = strat.name
 
+    # ── Deduplication: stop any existing running bot for same strategy+pair+mode ──
+    pairs_csv = ",".join(sorted(p.strip() for p in pairs))
+    existing = db.execute(
+        select(StrategyInstance).where(
+            StrategyInstance.user_id == user_id,
+            StrategyInstance.strategy_name == strategy_name,
+            StrategyInstance.pairs == pairs_csv,
+            StrategyInstance.mode == mode,
+            StrategyInstance.market_type == "futures",
+            StrategyInstance.is_running == True,
+        )
+    ).scalars().all()
+    for ex in existing:
+        # Stop the old engine if running
+        if ex.engine_key:
+            bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
+            old_eng = bot_engines.get(ex.engine_key)
+            if old_eng and old_eng.is_running:
+                old_eng._stop_evt.set()
+        ex.is_running = False
+    if existing:
+        db.commit()
+        log.info("[%s] Stopped %d duplicate bot(s) for %s/%s/%s",
+                 user_id, len(existing), strategy_name, pairs_csv, mode)
+
     engine_key = f"bot-{strategy_name}-{int(_time.time())}"
     instance = StrategyInstance(
         user_id=user_id, strategy_id=strategy_id, strategy_name=strategy_name,
-        market_type="futures", mode=mode, pairs=",".join(pairs),
+        market_type="futures", mode=mode, pairs=pairs_csv,
         leverage=leverage, timeframe=timeframe, wallet=wallet,
         stoploss=stoploss, takeprofit=takeprofit, risk_pct=max_position_pct,
         is_running=True, engine_key=engine_key,
