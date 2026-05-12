@@ -19,7 +19,7 @@ export default function FuturesTerminal() {
   const [rightPanel, setRightPanel] = useState<RightPanel>('manual');
   const [middlePanel, setMiddlePanel] = useState<MiddlePanel>('orderbook');
   const [leverage, setLeverage] = useState(3);
-  const [marginMode, setMarginMode] = useState('cross');
+  const [marginMode, setMarginMode] = useState('isolated');
   const [account, setAccount] = useState<any>({ balance: 1000, available_balance: 1000 });
   const [lastPrice, setLastPrice] = useState(0);
 

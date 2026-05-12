@@ -175,7 +175,7 @@ class FuturesEngine(NativeTradingEngine):
         self._strategy     = strategy_name
         self._strategy_id  = strategy_id
         self._pairs        = pairs
-        self._leverage     = max(1, min(125, int(leverage)))
+        self._leverage     = max(1, min(20, int(leverage)))
         self._timeframe    = timeframe
         self._stoploss     = stoploss
         self._take_profit  = take_profit_pct / 100.0
@@ -413,6 +413,7 @@ class FuturesEngine(NativeTradingEngine):
             position_side = "LONG" if pos.direction == "long" else "SHORT"
             contract_size  = pos.size * self._leverage
             contracts      = max(1, int(contract_size / pos.entry * 1000))
+            margin_mode = self.get_symbol_margin(symbol).upper() or "ISOLATED"
             body = {
                 "clientOid":    f"atf-{int(time.time()*1000)}",
                 "side":          side,
@@ -420,7 +421,7 @@ class FuturesEngine(NativeTradingEngine):
                 "type":          "market",
                 "size":          contracts,
                 "leverage":      self._leverage,
-                "marginMode":    "ISOLATED",
+                "marginMode":    margin_mode,
                 "positionSide":  position_side,
             }
             resp = _kucoin_post_signed(
@@ -444,6 +445,7 @@ class FuturesEngine(NativeTradingEngine):
             position_side = "LONG" if pos.direction == "long" else "SHORT"
             contract_size = pos.size * self._leverage
             contracts     = max(1, int(contract_size / pos.entry * 1000))
+            margin_mode = self.get_symbol_margin(symbol).upper() or "ISOLATED"
             body = {
                 "clientOid":    f"atf-exit-{int(time.time()*1000)}",
                 "side":          side,
@@ -451,7 +453,7 @@ class FuturesEngine(NativeTradingEngine):
                 "type":          "market",
                 "size":          contracts,
                 "leverage":      self._leverage,
-                "marginMode":    "ISOLATED",
+                "marginMode":    margin_mode,
                 "positionSide":  position_side,
                 "reduceOnly":    True,
             }
@@ -523,7 +525,7 @@ class FuturesEngine(NativeTradingEngine):
         ]
 
     def set_symbol_leverage(self, symbol: str, leverage: int) -> dict:
-        lev = max(1, min(125, leverage))
+        lev = max(1, min(20, leverage))
         with self._lock:
             self._per_symbol_leverage[symbol] = lev
             self._leverage = lev

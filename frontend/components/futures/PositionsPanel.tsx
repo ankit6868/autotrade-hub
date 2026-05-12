@@ -16,23 +16,26 @@ export default function PositionsPanel({ mode, onRefresh }: Props) {
   const [orderHistory, setOrderHistory] = useState<any[]>([]);
   const [tradeHistory, setTradeHistory] = useState<any[]>([]);
   const [bots, setBots] = useState<any[]>([]);
+  const [mainEngine, setMainEngine] = useState<any>(null);
   const [account, setAccount] = useState<any>(null);
   const [closingPair, setClosingPair] = useState<string | null>(null);
 
   const refreshAll = useCallback(async () => {
     try {
-      const [pos, orders, history, acct, botList] = await Promise.all([
+      const [pos, orders, history, acct, botList, engineStatus] = await Promise.all([
         api.futures.open(mode),
         api.futures.orders({ status: 'pending' }).catch(() => ({ orders: [] })),
         api.futures.history({ mode, limit: '50' }),
         api.futures.account(mode).catch(() => null),
         api.futures.bots.list().catch(() => ({ bots: [] })),
+        api.futures.status().catch(() => null),
       ]);
       setPositions(pos.trades || []);
       setOpenOrders(orders.orders || []);
       setTradeHistory(history.trades || []);
       if (acct) setAccount(acct);
       setBots(botList.bots || []);
+      setMainEngine(engineStatus?.running ? engineStatus : null);
     } catch { /* silent */ }
   }, [mode]);
 
@@ -74,7 +77,7 @@ export default function PositionsPanel({ mode, onRefresh }: Props) {
     { key: 'order_history', label: 'Order History' },
     { key: 'trade_history', label: 'Trade History' },
     { key: 'position_history', label: 'Position History' },
-    { key: 'bots', label: 'Trading Algorithm', count: bots.filter(b => b.is_running).length },
+    { key: 'bots', label: 'Trading Algorithm', count: bots.filter(b => b.is_running).length + (mainEngine ? 1 : 0) },
   ];
 
   return (
@@ -125,7 +128,7 @@ export default function PositionsPanel({ mode, onRefresh }: Props) {
           <AssetsTab account={account} />
         )}
         {tab === 'bots' && (
-          <BotsTab bots={bots} />
+          <BotsTab bots={bots} mainEngine={mainEngine} />
         )}
       </div>
     </div>
@@ -387,9 +390,10 @@ function AssetsTab({ account }: { account: any }) {
   );
 }
 
-function BotsTab({ bots }: { bots: any[] }) {
-  if (bots.length === 0) {
-    return <div className="text-center text-slate-500 py-8 text-sm">No running bots</div>;
+function BotsTab({ bots, mainEngine }: { bots: any[]; mainEngine: any }) {
+  const hasContent = bots.length > 0 || mainEngine;
+  if (!hasContent) {
+    return <div className="text-center text-slate-500 py-8 text-sm">No running algorithms</div>;
   }
   return (
     <table className="w-full text-xs">
@@ -405,6 +409,26 @@ function BotsTab({ bots }: { bots: any[] }) {
         </tr>
       </thead>
       <tbody>
+        {mainEngine && (
+          <tr className="border-t border-cyan-500/20 bg-cyan-500/[0.03]">
+            <td className="px-2 py-2 text-white">
+              <span className="inline-block bg-cyan-500/20 text-cyan-300 text-[9px] font-bold px-1 rounded mr-1">MAIN</span>
+              {mainEngine.strategy || 'Engine'}
+            </td>
+            <td className="px-2 py-2 text-slate-300">{mainEngine.pairs?.join(', ') || mainEngine.pair || '—'}</td>
+            <td className="text-right px-2 py-2 text-slate-300">{mainEngine.leverage || '—'}x</td>
+            <td className="text-right px-2 py-2 text-slate-300">{mainEngine.wallet?.toFixed(2) || '—'}</td>
+            <td className="text-right px-2 py-2 text-slate-400">{mainEngine.total_trades ?? '—'}</td>
+            <td className={`text-right px-2 py-2 ${(mainEngine.total_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+              {mainEngine.total_pnl != null ? `${mainEngine.total_pnl >= 0 ? '+' : ''}${mainEngine.total_pnl.toFixed(2)}` : '—'}
+            </td>
+            <td className="px-2 py-2">
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-400">
+                Running
+              </span>
+            </td>
+          </tr>
+        )}
         {bots.map((b, i) => (
           <tr key={i} className="border-t border-white/[0.04]">
             <td className="px-2 py-2 text-white">{b.strategy_name}</td>

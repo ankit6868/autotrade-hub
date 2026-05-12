@@ -9,9 +9,9 @@ interface Props {
   onClose: () => void;
 }
 
-const QUICK_VALUES = [1, 3, 5, 10, 20, 50, 75];
+const QUICK_VALUES = [1, 3, 5, 10, 15, 20];
 
-export default function LeverageModal({ isOpen, currentLeverage, maxLeverage = 75, onConfirm, onClose }: Props) {
+export default function LeverageModal({ isOpen, currentLeverage, maxLeverage = 20, onConfirm, onClose }: Props) {
   const [leverage, setLeverage] = useState(currentLeverage);
 
   useEffect(() => {
@@ -68,8 +68,8 @@ export default function LeverageModal({ isOpen, currentLeverage, maxLeverage = 7
           />
           <div className="flex justify-between text-[10px] text-slate-500 mt-1">
             <span>1x</span>
-            <span>25x</span>
-            <span>50x</span>
+            <span>10x</span>
+            <span>15x</span>
             <span>{maxLeverage}x</span>
           </div>
         </div>

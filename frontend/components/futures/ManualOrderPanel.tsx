@@ -38,7 +38,7 @@ export default function ManualOrderPanel({
 
   const [price, setPrice] = useState('');
   const [amount, setAmount] = useState('');
-  const [costMode, setCostMode] = useState(false);   // true = input in USDT, derive BTC
+  const [costMode, setCostMode] = useState(true);    // default to cost mode (USDT)
   const [costUsdt, setCostUsdt] = useState('');       // USDT cost input
   const [stopPrice, setStopPrice] = useState('');
   const [tpPrice, setTpPrice] = useState('');
@@ -343,7 +343,7 @@ export default function ManualOrderPanel({
                 className="flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none min-w-0"
               />
             )}
-            <span className="text-[10px] text-slate-400 pr-2 shrink-0">{baseCoin}</span>
+            <span className="text-[10px] text-slate-400 pr-2 shrink-0">{costMode ? 'USDT' : baseCoin}</span>
           </div>
 
           {/* Slider with dots */}
@@ -464,6 +464,7 @@ export default function ManualOrderPanel({
       <LeverageModal
         isOpen={leverageModal}
         currentLeverage={leverage}
+        maxLeverage={20}
         onConfirm={(lev) => { onLeverageChange(lev); setLeverageModal(false); }}
         onClose={() => setLeverageModal(false)}
       />
