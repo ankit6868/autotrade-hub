@@ -336,6 +336,7 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
   const [showTpModal, setShowTpModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState<{ botId: number; engineKey: string } | null>(null);
   const [backtestData, setBacktestData] = useState<number[]>([]);
   const [backtestError, setBacktestError] = useState('');
   const [currentPrice, setCurrentPrice] = useState(0);
@@ -356,36 +357,38 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
   }, [pair]);
 
   useEffect(() => {
+    const base = currentPrice || 1.2;
+    const fallback = Array.from({ length: 50 }, (_, i) =>
+      base + Math.sin(i / 5) * 0.15 + (i / 50) * 0.1 + (Math.random() - 0.5) * 0.02
+    );
+    setBacktestData(fallback);
+
     const stratId = bot.id || strategies.find(s => s.name === bot.name)?.id;
-    const generateFallback = () => {
-      const base = currentPrice || 1.2;
-      return Array.from({ length: 50 }, (_, i) =>
-        base + Math.sin(i / 5) * 0.15 + (i / 50) * 0.1 + (Math.random() - 0.5) * 0.02
-      );
-    };
-    if (!stratId) {
-      setBacktestData(generateFallback());
-      return;
-    }
-    setBacktestError('');
-    api.futures.backtest.run({
-      strategy_id: stratId,
-      pairs: [pair],
-      timeframe: '15m',
-      timerange: '20240901-20241201',
-      leverage,
-      starting_balance: 1000,
-    }).then(r => {
-      if (r?.error) {
-        setBacktestError(r.error);
-        setBacktestData(generateFallback());
-      } else {
-        setBacktestData(r?.equity_curve?.length ? r.equity_curve : generateFallback());
-      }
-    }).catch(() => {
-      setBacktestError('Backtest unavailable — showing simulated data');
-      setBacktestData(generateFallback());
-    });
+    if (!stratId) return;
+
+    let cancelled = false;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+
+    fetch(`/api/futures/backtest/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        strategy_id: stratId, pairs: [pair], timeframe: '15m',
+        timerange: '20240901-20241201', leverage, starting_balance: 1000,
+      }),
+      signal: controller.signal,
+    })
+      .then(res => res.ok ? res.json() : null)
+      .then(r => {
+        clearTimeout(timer);
+        if (cancelled || !r) return;
+        if (r.equity_curve?.length) setBacktestData(r.equity_curve);
+        else if (r.error) setBacktestError(r.error);
+      })
+      .catch(() => { clearTimeout(timer); });
+
+    return () => { cancelled = true; controller.abort(); };
   }, [bot, pair, leverage, strategies, currentPrice]);
 
   async function createBot() {
@@ -405,13 +408,17 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
         drawdown_tolerance: drawdownTolerance,
         max_position_pct: maxPositionPct,
       });
-      if (r.error) setError(r.error);
-      else {
+      if (r?.error) {
+        setError(r.error);
+      } else {
+        setSuccess({ botId: r.bot_id, engineKey: r.engine_key });
         onCreated();
-        onBack();
       }
-    } catch (e) {
-      setError(String(e));
+    } catch (e: any) {
+      const msg = e?.message || String(e);
+      if (msg.includes('HTTP 5')) setError('Server error — please try again');
+      else if (msg.includes('HTTP 4')) setError('Request failed — check your settings');
+      else setError(msg.length > 200 ? 'Failed to create bot — please try again' : msg);
     }
     setSubmitting(false);
   }
@@ -470,7 +477,33 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
           <LeaderboardView botName={bot.label} pair={pair} />
         )}
 
-        {viewTab === 'create' && (
+        {viewTab === 'create' && success && (
+          <div className="px-3 py-6 flex flex-col items-center gap-4">
+            <div className="w-14 h-14 rounded-full bg-emerald-500/20 flex items-center justify-center">
+              <span className="text-emerald-400 text-2xl">&#10003;</span>
+            </div>
+            <div className="text-center">
+              <p className="text-white font-bold text-sm">Bot Created Successfully</p>
+              <p className="text-slate-400 text-xs mt-1">{bot.label} is now running on {pair}</p>
+              <p className="text-slate-500 text-[10px] mt-0.5">{mode === 'live' ? 'Live Mode — Trades will appear in KuCoin Lead Trading' : 'Paper Mode — Simulated trades'}</p>
+            </div>
+            <div className="w-full p-3 rounded-lg bg-[#1e222d] border border-white/[0.06] space-y-2 text-[11px]">
+              <div className="flex justify-between"><span className="text-slate-400">Strategy</span><span className="text-white">{bot.label}</span></div>
+              <div className="flex justify-between"><span className="text-slate-400">Pair</span><span className="text-white">{pair}</span></div>
+              <div className="flex justify-between"><span className="text-slate-400">Leverage</span><span className="text-white">{leverage}x</span></div>
+              <div className="flex justify-between"><span className="text-slate-400">Investment</span><span className="text-white">{parseFloat(investment) || 1000} USDT</span></div>
+              <div className="flex justify-between"><span className="text-slate-400">Risk/Trade</span><span className="text-white">{maxPositionPct}%</span></div>
+              <div className="flex justify-between"><span className="text-slate-400">Mode</span><span className={mode === 'live' ? 'text-emerald-400' : 'text-indigo-400'}>{mode === 'live' ? 'Live (Lead Trading)' : 'Paper'}</span></div>
+            </div>
+            <div className="flex gap-2 w-full mt-2">
+              <button onClick={onBack} className="flex-1 py-2.5 rounded-lg border border-white/[0.1] text-slate-300 text-xs font-medium hover:bg-white/[0.05]">
+                Back to Strategies
+              </button>
+            </div>
+          </div>
+        )}
+
+        {viewTab === 'create' && !success && (
           <div className="px-3 py-3 space-y-4">
             {/* Backtest chart */}
             <div>
@@ -609,14 +642,14 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
       </div>
 
       {/* Create button */}
-      {viewTab === 'create' && (
+      {viewTab === 'create' && !success && (
         <div className="px-3 py-3 border-t border-white/[0.06]">
           <button
             onClick={createBot}
             disabled={submitting}
             className="w-full py-3 rounded-lg bg-emerald-500 text-white text-sm font-bold hover:bg-emerald-400 disabled:opacity-50 transition-colors"
           >
-            {submitting ? 'Creating...' : 'Create'}
+            {submitting ? 'Creating...' : `Create ${mode === 'live' ? '(Live — Lead Trading)' : '(Paper)'}`}
           </button>
         </div>
       )}
