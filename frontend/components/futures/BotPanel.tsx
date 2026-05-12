@@ -76,14 +76,18 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
   const [category, setCategory] = useState<Category>('all');
   const [strategies, setStrategies] = useState<any[]>([]);
   const [selectedBot, setSelectedBot] = useState<StrategyCard | null>(null);
-  const [leadStatus, setLeadStatus] = useState<{ connected: boolean } | null>(null);
+  const [leadStatus, setLeadStatus] = useState<{ connected: boolean; balance?: number; equity?: number; reason?: string } | null>(null);
   const [runningBots, setRunningBots] = useState<any[]>([]);
+
+  const refreshBots = useCallback(() => {
+    api.futures.bots.list().then(d => setRunningBots(d.bots || [])).catch(() => {});
+  }, []);
 
   useEffect(() => {
     api.strategy.list().then(d => setStrategies(d.strategies || [])).catch(() => {});
     api.futures.leadTradingStatus().then(d => setLeadStatus(d)).catch(() => {});
-    api.futures.bots.list().then(d => setRunningBots(d.bots || [])).catch(() => {});
-  }, []);
+    refreshBots();
+  }, [refreshBots]);
 
   const userStrategyCards: StrategyCard[] = strategies
     .filter(s => !BUILT_IN_BOTS.find(b => b.name === s.name))
@@ -113,8 +117,8 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
         pair={pair}
         mode={mode}
         strategies={strategies}
-        onBack={() => setSelectedBot(null)}
-        onCreated={onBotCreated}
+        onBack={() => { setSelectedBot(null); refreshBots(); }}
+        onCreated={() => { onBotCreated(); refreshBots(); }}
       />
     );
   }
@@ -130,28 +134,32 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
     <div className="flex flex-col h-full">
       {/* Lead Trading / Mode Status — always visible */}
       <div className={`flex items-center justify-between px-3 py-2 text-xs font-bold border-b ${
-        mode === 'live'
-          ? (leadStatus?.connected
-              ? 'bg-emerald-500/20 border-emerald-500/30'
-              : 'bg-amber-500/20 border-amber-500/30')
-          : 'bg-indigo-500/20 border-indigo-500/30'
+        leadStatus?.connected
+          ? 'bg-emerald-500/20 border-emerald-500/30'
+          : mode === 'live'
+            ? 'bg-amber-500/20 border-amber-500/30'
+            : 'bg-indigo-500/20 border-indigo-500/30'
       }`}>
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full shrink-0 ${
-            mode === 'live'
-              ? (leadStatus?.connected ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]' : 'bg-amber-400')
-              : 'bg-indigo-400'
+            leadStatus?.connected
+              ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]'
+              : mode === 'live' ? 'bg-amber-400' : 'bg-indigo-400'
           }`} />
           <span className={
-            mode === 'live'
-              ? (leadStatus?.connected ? 'text-emerald-300' : 'text-amber-300')
-              : 'text-indigo-300'
+            leadStatus?.connected ? 'text-emerald-300'
+              : mode === 'live' ? 'text-amber-300' : 'text-indigo-300'
           }>
-            {mode === 'live'
-              ? (leadStatus?.connected ? 'Lead Trading API Connected' : 'Lead Trading: Configure in Setup')
-              : 'Paper Mode — Simulated Funds'}
+            {leadStatus?.connected
+              ? `Lead Trading Connected${leadStatus.balance != null ? ` • ${leadStatus.balance.toFixed(2)} USDT` : ''}`
+              : mode === 'live'
+                ? 'Lead Trading: Not Connected'
+                : `Paper Mode${leadStatus === null ? '' : leadStatus.connected ? '' : ' • Lead Trading: Not Connected'}`}
           </span>
         </div>
+        {mode === 'paper' && leadStatus?.connected && (
+          <span className="text-[10px] text-indigo-300 font-medium">Paper Mode</span>
+        )}
       </div>
 
       {/* Running Bots */}
@@ -329,16 +337,17 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [backtestData, setBacktestData] = useState<number[]>([]);
+  const [backtestError, setBacktestError] = useState('');
   const [currentPrice, setCurrentPrice] = useState(0);
   const [liveBalance, setLiveBalance] = useState<number | null>(null);
+  const [leadConnected, setLeadConnected] = useState<boolean | null>(null);
 
   useEffect(() => {
-    if (mode === 'live') {
-      api.futures.leadTradingStatus().then(d => {
-        if (d.connected && d.balance) setLiveBalance(d.balance);
-      }).catch(() => {});
-    }
-  }, [mode]);
+    api.futures.leadTradingStatus().then(d => {
+      setLeadConnected(d.connected);
+      if (d.connected && d.balance) setLiveBalance(d.balance);
+    }).catch(() => setLeadConnected(false));
+  }, []);
 
   useEffect(() => {
     api.market.price(pair).then(d => {
@@ -348,14 +357,17 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
 
   useEffect(() => {
     const stratId = bot.id || strategies.find(s => s.name === bot.name)?.id;
+    const generateFallback = () => {
+      const base = currentPrice || 1.2;
+      return Array.from({ length: 50 }, (_, i) =>
+        base + Math.sin(i / 5) * 0.15 + (i / 50) * 0.1 + (Math.random() - 0.5) * 0.02
+      );
+    };
     if (!stratId) {
-      const fakeData = Array.from({ length: 50 }, (_, i) => {
-        const base = currentPrice || 1.2;
-        return base + Math.sin(i / 5) * 0.15 + (i / 50) * 0.1 + (Math.random() - 0.5) * 0.02;
-      });
-      setBacktestData(fakeData);
+      setBacktestData(generateFallback());
       return;
     }
+    setBacktestError('');
     api.futures.backtest.run({
       strategy_id: stratId,
       pairs: [pair],
@@ -364,8 +376,16 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
       leverage,
       starting_balance: 1000,
     }).then(r => {
-      setBacktestData(r?.equity_curve || []);
-    }).catch(() => {});
+      if (r?.error) {
+        setBacktestError(r.error);
+        setBacktestData(generateFallback());
+      } else {
+        setBacktestData(r?.equity_curve?.length ? r.equity_curve : generateFallback());
+      }
+    }).catch(() => {
+      setBacktestError('Backtest unavailable — showing simulated data');
+      setBacktestData(generateFallback());
+    });
   }, [bot, pair, leverage, strategies, currentPrice]);
 
   async function createBot() {
@@ -413,14 +433,20 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
         <button className="ml-auto text-slate-500 hover:text-white text-xs">?</button>
       </div>
 
-      {/* Lead Trading indicator */}
-      {mode === 'live' && (
-        <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] bg-emerald-500/10 border-b border-white/[0.06]">
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
-          <span className="text-emerald-400 font-medium">Lead Trading Mode</span>
-          <span className="text-slate-500 ml-auto">Followers will copy this bot</span>
-        </div>
-      )}
+      {/* Lead Trading indicator — always visible */}
+      <div className={`flex items-center gap-2 px-3 py-1.5 text-[10px] border-b border-white/[0.06] ${
+        leadConnected ? 'bg-emerald-500/10' : 'bg-amber-500/10'
+      }`}>
+        <span className={`w-1.5 h-1.5 rounded-full ${leadConnected ? 'bg-emerald-400' : 'bg-amber-400'}`} />
+        <span className={leadConnected ? 'text-emerald-400 font-medium' : 'text-amber-400 font-medium'}>
+          {leadConnected ? 'Lead Trading Connected' : 'Lead Trading: Not Connected'}
+        </span>
+        <span className="text-slate-500 ml-auto">
+          {mode === 'live'
+            ? (leadConnected ? 'Followers will copy this bot' : 'Configure API in Setup')
+            : 'Paper Mode — Simulated'}
+        </span>
+      </div>
 
       {/* Leaderboard / Create tabs */}
       <div className="flex items-center border-b border-white/[0.06]">
@@ -451,6 +477,7 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
               <div className="flex items-center gap-1 mb-2">
                 <span className="text-xs font-medium text-white">Backtest</span>
                 <span className="text-slate-500 text-[10px]">ⓘ</span>
+                {backtestError && <span className="text-amber-400 text-[10px] ml-1">{backtestError}</span>}
               </div>
               <BacktestChart data={backtestData} currentPrice={currentPrice} />
             </div>
@@ -477,7 +504,7 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[10px] text-slate-500">Available</span>
                 <span className="text-[10px] text-emerald-400 font-medium">
-                  {mode === 'live' && liveBalance !== null ? `${liveBalance.toFixed(2)} USDT` : '0 USDT'}
+                  {liveBalance !== null ? `${liveBalance.toFixed(2)} USDT` : mode === 'paper' ? '1,000 USDT (Sim)' : '— USDT'}
                   {' '}<span className="cursor-pointer">⊕</span>
                 </span>
               </div>
@@ -502,8 +529,9 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
                   <button
                     key={label}
                     onClick={() => {
+                      const base = liveBalance || 1000;
                       if (label === 'Min') setInvestment('1');
-                      else setInvestment(String(Math.round(1000 * parseInt(label) / 100)));
+                      else setInvestment(String(Math.round(base * parseInt(label) / 100)));
                     }}
                     className="flex-1 py-1.5 rounded text-[10px] text-slate-400 bg-[#1e222d] border border-white/[0.06] hover:border-emerald-500/30 hover:text-white transition-colors"
                   >
