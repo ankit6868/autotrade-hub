@@ -380,60 +380,65 @@ class FuturesEngine(NativeTradingEngine):
     # ── Live order placement via KuCoin Futures API ─────────────────────
 
     def _place_live_entry(self, pair: str, pos) -> None:
-        """Place a real futures market order on KuCoin Futures."""
+        """Place a real futures order via KuCoin Lead Trading API."""
         if self._mode != "live" or not self._api_key:
             return
         try:
             from .native_trading_engine import _kucoin_post_signed
-            # KuCoin Futures uses contract symbol e.g. XBTUSDTM
             symbol = pair.replace("/", "").replace("USDT", "USDTM")
             side   = "buy" if pos.direction == "long" else "sell"
-            # Calculate number of contracts: 1 contract = 0.001 BTC for XBTUSDTM
-            contract_size  = pos.size * self._leverage  # total position value in USDT
-            contracts      = max(1, int(contract_size / pos.entry * 1000))  # approx
+            position_side = "LONG" if pos.direction == "long" else "SHORT"
+            contract_size  = pos.size * self._leverage
+            contracts      = max(1, int(contract_size / pos.entry * 1000))
             body = {
-                "clientOid":  f"atf-{int(time.time()*1000)}",
-                "side":        side,
-                "symbol":      symbol,
-                "type":        "market",
-                "size":        contracts,
-                "leverage":    str(self._leverage),
+                "clientOid":    f"atf-{int(time.time()*1000)}",
+                "side":          side,
+                "symbol":        symbol,
+                "type":          "market",
+                "size":          contracts,
+                "leverage":      self._leverage,
+                "marginMode":    "ISOLATED",
+                "positionSide":  position_side,
             }
             resp = _kucoin_post_signed(
-                "/api/v1/orders", body,
+                "/api/v1/copy-trade/futures/orders", body,
                 self._api_key, self._api_sec, self._api_pass,
                 base_url=KUCOIN_FUTURES_BASE,
             )
-            log.info("[%s] futures ENTRY order: %s", self.user_id, resp)
+            log.info("[%s] Lead Trading ENTRY order: %s", self.user_id, resp)
         except Exception as e:
-            log.error("[%s] futures entry order failed: %s", self.user_id, e)
+            log.error("[%s] Lead Trading entry order failed: %s", self.user_id, e)
 
     def _place_live_exit(self, pair: str, pos, price: float) -> None:
-        """Close a futures position on KuCoin Futures."""
+        """Close a futures position via KuCoin Lead Trading API."""
         if self._mode != "live" or not self._api_key:
             return
         try:
             from .native_trading_engine import _kucoin_post_signed
             symbol = pair.replace("/", "").replace("USDT", "USDTM")
             side   = "sell" if pos.direction == "long" else "buy"
+            position_side = "LONG" if pos.direction == "long" else "SHORT"
             contract_size = pos.size * self._leverage
             contracts     = max(1, int(contract_size / pos.entry * 1000))
             body = {
-                "clientOid": f"atf-exit-{int(time.time()*1000)}",
-                "side":       side,
-                "symbol":     symbol,
-                "type":       "market",
-                "size":       contracts,
-                "closeOrder": True,
+                "clientOid":    f"atf-exit-{int(time.time()*1000)}",
+                "side":          side,
+                "symbol":        symbol,
+                "type":          "market",
+                "size":          contracts,
+                "leverage":      self._leverage,
+                "marginMode":    "ISOLATED",
+                "positionSide":  position_side,
+                "reduceOnly":    True,
             }
             resp = _kucoin_post_signed(
-                "/api/v1/orders", body,
+                "/api/v1/copy-trade/futures/orders", body,
                 self._api_key, self._api_sec, self._api_pass,
                 base_url=KUCOIN_FUTURES_BASE,
             )
-            log.info("[%s] futures EXIT order: %s", self.user_id, resp)
+            log.info("[%s] Lead Trading EXIT order: %s", self.user_id, resp)
         except Exception as e:
-            log.error("[%s] futures exit order failed: %s", self.user_id, e)
+            log.error("[%s] Lead Trading exit order failed: %s", self.user_id, e)
 
     # ── Manual order management ──────────────────────────────────────────
 

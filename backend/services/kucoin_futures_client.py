@@ -1,9 +1,13 @@
 """
-KuCoin Futures API client — async, HMAC-signed.
+KuCoin Futures Lead Trading API client — async, HMAC-signed.
 
-Mirrors kucoin_client.py but targets https://api-futures.kucoin.com.
-Provides: order book, recent trades, account overview, positions,
-order placement/cancellation, leverage control, and contract metadata.
+All order operations use the Lead Trading endpoints
+(/api/v1/copy-trade/futures/*) so that trades appear in the user's
+KuCoin Lead Trading account and are visible to followers.
+
+Public/read endpoints (orderbook, trades, contracts) use the standard
+futures API. Auth read endpoints (positions, account) also use standard
+futures paths (Lead Trading shares the same account view).
 """
 from __future__ import annotations
 
@@ -122,6 +126,8 @@ class KuCoinFuturesClient:
         data = await self._request("GET", "/api/v1/position", {"symbol": symbol})
         return data.get("data", {})
 
+    # ── Lead Trading order endpoints (/api/v1/copy-trade/futures/*) ───
+
     async def place_order(
         self,
         symbol: str,
@@ -130,59 +136,101 @@ class KuCoinFuturesClient:
         order_type: str = "market",
         price: float | None = None,
         leverage: int | None = None,
-        stop: float | None = None,
-        stop_type: str | None = None,
+        position_side: str | None = None,
         client_oid: str | None = None,
         close_order: bool = False,
         reduce_only: bool = False,
         post_only: bool = False,
         hidden: bool = False,
         time_in_force: str | None = None,
-        tp_price: float | None = None,
-        sl_price: float | None = None,
+        margin_mode: str = "ISOLATED",
+        remark: str | None = None,
     ) -> dict:
+        """Place an order via KuCoin Lead Trading Futures API."""
+        oid = client_oid or f"ath-{int(time.time() * 1000)}"
+        # Determine position side from order context
+        if not position_side:
+            if close_order or reduce_only:
+                position_side = "SHORT" if side == "buy" else "LONG"
+            else:
+                position_side = "LONG" if side == "buy" else "SHORT"
+
         body: dict[str, Any] = {
-            "clientOid": client_oid or f"ath-{int(time.time() * 1000)}",
+            "clientOid": oid,
             "side": side,
             "symbol": symbol,
             "type": order_type,
             "size": size,
+            "marginMode": margin_mode,
+            "positionSide": position_side,
         }
         if leverage is not None:
-            body["leverage"] = str(leverage)
+            body["leverage"] = leverage
         if price is not None and order_type == "limit":
             body["price"] = str(price)
-        if stop is not None:
-            body["stop"] = "up" if side == "buy" else "down"
-            body["stopPrice"] = str(stop)
-            body["stopPriceType"] = stop_type or "TP"
-        if close_order:
-            body["closeOrder"] = True
         if reduce_only:
             body["reduceOnly"] = True
-        if post_only:
-            body["postOnly"] = True
-        if hidden:
-            body["hidden"] = True
         if time_in_force:
             body["timeInForce"] = time_in_force
-        data = await self._request("POST", "/api/v1/orders", body=body)
+        if remark:
+            body["remark"] = remark
+        data = await self._request("POST", "/api/v1/copy-trade/futures/orders", body=body)
+        return data.get("data", {})
+
+    async def place_tp_sl_order(
+        self,
+        symbol: str,
+        side: str,
+        size: int,
+        position_side: str,
+        leverage: int,
+        trigger_stop_up_price: float | None = None,
+        trigger_stop_down_price: float | None = None,
+        order_type: str = "market",
+        margin_mode: str = "ISOLATED",
+        client_oid: str | None = None,
+    ) -> dict:
+        """Place a TP/SL order via Lead Trading Futures API."""
+        body: dict[str, Any] = {
+            "clientOid": client_oid or f"ath-tpsl-{int(time.time() * 1000)}",
+            "symbol": symbol,
+            "marginMode": margin_mode,
+            "leverage": leverage,
+            "positionSide": position_side,
+            "side": side,
+            "type": order_type,
+            "size": size,
+            "stopPriceType": "TP",
+            "reduceOnly": True,
+        }
+        if trigger_stop_up_price is not None:
+            body["triggerStopUpPrice"] = str(trigger_stop_up_price)
+        if trigger_stop_down_price is not None:
+            body["triggerStopDownPrice"] = str(trigger_stop_down_price)
+        data = await self._request("POST", "/api/v1/copy-trade/futures/st-orders", body=body)
         return data.get("data", {})
 
     async def cancel_order(self, order_id: str) -> dict:
-        data = await self._request("DELETE", f"/api/v1/orders/{order_id}")
+        data = await self._request("DELETE", f"/api/v1/copy-trade/futures/orders/{order_id}")
+        return data.get("data", {})
+
+    async def cancel_order_by_client_oid(self, symbol: str, client_oid: str) -> dict:
+        data = await self._request(
+            "DELETE", "/api/v1/copy-trade/futures/orders/client-order",
+            params={"symbol": symbol, "clientOid": client_oid},
+        )
         return data.get("data", {})
 
     async def cancel_all_orders(self, symbol: str | None = None) -> dict:
         params = {"symbol": symbol} if symbol else None
-        data = await self._request("DELETE", "/api/v1/orders", params=params)
+        data = await self._request("DELETE", "/api/v1/copy-trade/futures/orders", params=params)
         return data.get("data", {})
 
     async def get_open_orders(self, symbol: str | None = None) -> list[dict]:
         params: dict = {"status": "active"}
         if symbol:
             params["symbol"] = symbol
-        data = await self._request("GET", "/api/v1/orders", params)
+        data = await self._request("GET", "/api/v1/copy-trade/futures/orders", params)
         items = data.get("data", {})
         if isinstance(items, dict):
             return items.get("items", [])
@@ -192,7 +240,7 @@ class KuCoinFuturesClient:
         params: dict = {"status": "done", "pageSize": limit}
         if symbol:
             params["symbol"] = symbol
-        data = await self._request("GET", "/api/v1/orders", params)
+        data = await self._request("GET", "/api/v1/copy-trade/futures/orders", params)
         items = data.get("data", {})
         if isinstance(items, dict):
             return items.get("items", [])
