@@ -5,7 +5,7 @@ dockerfilePath = "Dockerfile.backend"
 [deploy]
 startCommand = "/usr/local/bin/entrypoint.sh"
 healthcheckPath = "/api/health"
-healthcheckTimeout = 30
+healthcheckTimeout = 90
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
 
