@@ -107,6 +107,8 @@ class FuturesEngine(NativeTradingEngine):
         eng.start_futures(strategy_name, pairs, leverage=10, mode='paper', ...)
     """
 
+    MAX_ACTION_LOG = 50
+
     def __init__(self, user_id: str):
         super().__init__(user_id)
         self._leverage      = 1
@@ -116,6 +118,18 @@ class FuturesEngine(NativeTradingEngine):
         self._per_symbol_leverage: dict[str, int] = {}
         self._per_symbol_margin: dict[str, str] = {}
         self._order_counter = 0
+        self.action_log: list[dict] = []
+
+    def _log_action(self, action_type: str, detail: str, **extra):
+        entry = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "type": action_type,
+            "detail": detail,
+            **extra,
+        }
+        self.action_log.append(entry)
+        if len(self.action_log) > self.MAX_ACTION_LOG:
+            self.action_log = self.action_log[-self.MAX_ACTION_LOG:]
 
     # ── Start ───────────────────────────────────────────────────────────
 
@@ -226,6 +240,9 @@ class FuturesEngine(NativeTradingEngine):
                                 f"LIQUIDATED {pair} @ {live_price:.4f} "
                                 f"liq={pos.liquidation_price:.4f} P&L={pos.pnl_abs:+.2f}"
                             )
+                            self._log_action("liquidated", self.last_action,
+                                pair=pair, price=live_price, pnl=pos.pnl_abs,
+                                direction=pos.direction)
                             log.warning("[%s] %s", self.user_id, self.last_action)
                             _persist_closed_trade(self.user_id, pos, self._mode,
                                                   self._strategy_id, pos.db_id)
@@ -245,6 +262,10 @@ class FuturesEngine(NativeTradingEngine):
                             f"CLOSED {pair} @ {exit_price:.4f} ({reason}) "
                             f"P&L={pos.pnl_abs:+.2f} lev={getattr(pos,'leverage',1)}x"
                         )
+                        self._log_action("closed", self.last_action,
+                            pair=pair, price=exit_price, pnl=pos.pnl_abs,
+                            direction=pos.direction, reason=reason,
+                            entry_price=pos.entry)
                         log.info("[%s] %s", self.user_id, self.last_action)
                         _persist_closed_trade(self.user_id, pos, self._mode,
                                               self._strategy_id, pos.db_id)
@@ -329,6 +350,10 @@ class FuturesEngine(NativeTradingEngine):
                     f"OPENED futures {direction} {pair} @ {entry:.4f} "
                     f"{self._leverage}x liq={pos.liquidation_price:.4f}"
                 )
+                self._log_action("opened", self.last_action,
+                    pair=pair, price=entry, direction=direction,
+                    leverage=self._leverage, sl=sl, tp=tp,
+                    liquidation=pos.liquidation_price, stake=stake)
                 log.info("[%s] %s", self.user_id, self.last_action)
                 if self._mode == "live":
                     self._place_live_entry(pair, pos)
@@ -541,12 +566,42 @@ class FuturesEngine(NativeTradingEngine):
         base["leverage"]      = self._leverage
         base["margin_mode"]   = self._margin_mode
         base["pending_orders"] = len(self._pending_orders)
+        base["action_log"]    = list(self.action_log)
         for pos_info in base.get("positions", []):
             for k, p in self.positions.items():
                 if p.pair == pos_info["pair"]:
                     pos_info["liquidation_price"] = getattr(p, "liquidation_price", None)
                     pos_info["leverage"]          = getattr(p, "leverage", self._leverage)
                     break
+        base["open_positions_detail"] = [
+            {
+                "pair": p.pair, "direction": p.direction, "entry": p.entry,
+                "sl": p.sl, "tp": p.tp, "size": p.size,
+                "leverage": getattr(p, "leverage", self._leverage),
+                "liquidation_price": getattr(p, "liquidation_price", None),
+                "opened_at": str(p.opened_at) if p.opened_at else None,
+                "unrealized_pnl": round(
+                    p.size * ((self._last_prices.get(p.pair, p.entry) - p.entry) / p.entry
+                    if p.direction == "long" else
+                    (p.entry - self._last_prices.get(p.pair, p.entry)) / p.entry)
+                    * getattr(p, "leverage", 1), 4
+                ),
+                "current_price": self._last_prices.get(p.pair, p.entry),
+            }
+            for p in self.positions.values()
+        ]
+        base["closed_trades_detail"] = [
+            {
+                "pair": t.pair, "direction": t.direction,
+                "entry": t.entry, "exit": t.exit_price,
+                "pnl": round(t.pnl_abs, 4), "pnl_pct": round(t.pnl_pct, 2),
+                "reason": t.reason,
+                "opened_at": str(t.opened_at) if t.opened_at else None,
+                "closed_at": str(t.closed_at) if t.closed_at else None,
+                "leverage": getattr(t, "leverage", self._leverage),
+            }
+            for t in self.closed_trades[-20:]
+        ]
         return base
 
 

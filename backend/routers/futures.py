@@ -1285,6 +1285,23 @@ def futures_bot_performance(
     wins = sum(1 for t in trades if (t.profit_abs or 0) > 0)
     win_rate = round(wins / len(trades) * 100, 1) if trades else 0
 
+    engine_data = {}
+    if instance.engine_key:
+        bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
+        eng = bot_engines.get(instance.engine_key)
+        if eng:
+            s = eng.status
+            engine_data = {
+                "action_log": s.get("action_log", []),
+                "open_positions_detail": s.get("open_positions_detail", []),
+                "closed_trades_detail": s.get("closed_trades_detail", []),
+                "balance": s.get("balance", 0),
+                "ticks": s.get("ticks", 0),
+                "last_action": s.get("last_action", ""),
+                "unrealized_pnl": s.get("unrealized_pnl", 0),
+                "realized_pnl": s.get("realized_pnl", 0),
+            }
+
     return {
         "bot_id": bot_id,
         "strategy_name": instance.strategy_name,
@@ -1292,4 +1309,22 @@ def futures_bot_performance(
         "total_pnl": round(total_pnl, 4),
         "win_rate": win_rate,
         "is_running": instance.is_running,
+        "mode": instance.mode,
+        "pairs": instance.pairs,
+        "leverage": instance.leverage,
+        "risk_pct": instance.risk_pct,
+        "trades": [
+            {
+                "pair": t.pair, "direction": t.direction,
+                "entry_price": t.entry_price, "exit_price": t.exit_price,
+                "profit_abs": round(t.profit_abs or 0, 4),
+                "profit_pct": round(t.profit_pct or 0, 2),
+                "exit_reason": t.exit_reason,
+                "entry_time": str(t.entry_time) if t.entry_time else None,
+                "exit_time": str(t.exit_time) if t.exit_time else None,
+                "leverage": t.leverage,
+            }
+            for t in trades[:20]
+        ],
+        **engine_data,
     }

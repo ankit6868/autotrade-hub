@@ -76,6 +76,7 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
   const [category, setCategory] = useState<Category>('all');
   const [strategies, setStrategies] = useState<any[]>([]);
   const [selectedBot, setSelectedBot] = useState<StrategyCard | null>(null);
+  const [viewingBotId, setViewingBotId] = useState<number | null>(null);
   const [leadStatus, setLeadStatus] = useState<{ connected: boolean; balance?: number; equity?: number; reason?: string } | null>(null);
   const [runningBots, setRunningBots] = useState<any[]>([]);
 
@@ -109,6 +110,20 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
   ];
 
   const filtered = category === 'all' ? allBots : allBots.filter(b => b.category === category);
+
+  if (viewingBotId) {
+    return (
+      <BotDetailView
+        botId={viewingBotId}
+        onBack={() => { setViewingBotId(null); refreshBots(); }}
+        onStop={async () => {
+          await api.futures.bots.stop(viewingBotId);
+          setViewingBotId(null);
+          refreshBots();
+        }}
+      />
+    );
+  }
 
   if (selectedBot) {
     return (
@@ -170,7 +185,7 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
             <button onClick={refreshBots} className="text-[9px] text-slate-500 hover:text-white">Refresh</button>
           </div>
           {runningBots.filter(b => b.is_running).map(bot => (
-            <div key={bot.id} className="p-2.5 rounded-lg bg-[#1e222d] border border-emerald-500/10 mb-1.5">
+            <div key={bot.id} onClick={() => setViewingBotId(bot.id)} className="p-2.5 rounded-lg bg-[#1e222d] border border-emerald-500/10 mb-1.5 cursor-pointer hover:border-emerald-500/30 transition-colors">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shadow-[0_0_6px_rgba(52,211,153,0.5)]" />
@@ -251,7 +266,7 @@ export default function BotPanel({ pair, mode, onBotCreated }: Props) {
         <div className="px-3 py-2 border-b border-white/[0.06]">
           <p className="text-[10px] text-slate-500 font-medium mb-1.5">Recent Bots</p>
           {runningBots.filter(b => !b.is_running).slice(0, 3).map(bot => (
-            <div key={bot.id} className="p-2 rounded-lg bg-[#1e222d]/50 border border-white/[0.03] mb-1">
+            <div key={bot.id} onClick={() => setViewingBotId(bot.id)} className="p-2 rounded-lg bg-[#1e222d]/50 border border-white/[0.03] mb-1 cursor-pointer hover:border-white/[0.08] transition-colors">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
@@ -860,6 +875,202 @@ function ConfigModal({ title, value, placeholder, suffix, description, onConfirm
             Confirm
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () => void; onStop: () => void }) {
+  const [data, setData] = useState<any>(null);
+  const [tab, setTab] = useState<'signals' | 'positions' | 'trades'>('signals');
+  const [loading, setLoading] = useState(true);
+
+  const refresh = useCallback(() => {
+    api.futures.bots.performance(botId).then(d => { setData(d); setLoading(false); }).catch(() => setLoading(false));
+  }, [botId]);
+
+  useEffect(() => {
+    refresh();
+    const t = setInterval(refresh, 5000);
+    return () => clearInterval(t);
+  }, [refresh]);
+
+  if (loading || !data) {
+    return <div className="flex items-center justify-center h-full text-slate-500 text-xs">Loading bot data...</div>;
+  }
+
+  const actionLog = data.action_log || [];
+  const openPositions = data.open_positions_detail || [];
+  const closedTrades = data.closed_trades_detail || data.trades || [];
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06]">
+        <button onClick={onBack} className="text-slate-400 hover:text-white text-sm">&lt;</button>
+        <span className="text-sm font-bold text-white">{data.strategy_name}</span>
+        <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ml-1 ${
+          data.is_running ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-500/20 text-slate-400'
+        }`}>{data.is_running ? 'RUNNING' : 'STOPPED'}</span>
+        {data.is_running && (
+          <button onClick={(e) => { e.stopPropagation(); onStop(); }}
+            className="ml-auto text-red-400 hover:text-red-300 text-[10px] font-medium px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20">
+            Stop
+          </button>
+        )}
+      </div>
+
+      {/* Summary stats */}
+      <div className="grid grid-cols-4 gap-1.5 px-3 py-2 border-b border-white/[0.06]">
+        <div className="text-center p-1.5 rounded bg-[#131722]">
+          <p className="text-[9px] text-slate-500">P&L</p>
+          <p className={`text-[11px] font-bold ${(data.realized_pnl || data.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {(data.realized_pnl || data.total_pnl || 0) >= 0 ? '+' : ''}{(data.realized_pnl || data.total_pnl || 0).toFixed(2)}
+          </p>
+        </div>
+        <div className="text-center p-1.5 rounded bg-[#131722]">
+          <p className="text-[9px] text-slate-500">Win Rate</p>
+          <p className="text-[11px] font-bold text-white">{data.win_rate || 0}%</p>
+        </div>
+        <div className="text-center p-1.5 rounded bg-[#131722]">
+          <p className="text-[9px] text-slate-500">Trades</p>
+          <p className="text-[11px] font-bold text-white">{data.total_trades || 0}</p>
+        </div>
+        <div className="text-center p-1.5 rounded bg-[#131722]">
+          <p className="text-[9px] text-slate-500">Ticks</p>
+          <p className="text-[11px] font-bold text-white">{data.ticks || 0}</p>
+        </div>
+      </div>
+
+      {/* Config row */}
+      <div className="flex items-center gap-3 px-3 py-1.5 border-b border-white/[0.06] text-[10px] text-slate-400">
+        <span>{data.pairs}</span>
+        <span>{data.leverage}x</span>
+        <span>Risk: {data.risk_pct || 5}%</span>
+        <span className={data.mode === 'live' ? 'text-emerald-400' : 'text-indigo-400'}>{data.mode}</span>
+      </div>
+
+      {/* Tab selector */}
+      <div className="flex items-center border-b border-white/[0.06]">
+        {(['signals', 'positions', 'trades'] as const).map(t => (
+          <button key={t} onClick={() => setTab(t)}
+            className={`flex-1 py-2 text-[11px] font-medium capitalize ${
+              tab === t ? 'text-white bg-white/[0.06]' : 'text-slate-400 hover:text-white'
+            }`}>
+            {t === 'signals' ? `Signals (${actionLog.length})` : t === 'positions' ? `Open (${openPositions.length})` : `Trades (${closedTrades.length})`}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab content */}
+      <div className="flex-1 overflow-y-auto">
+        {tab === 'signals' && (
+          <div className="px-3 py-2 space-y-1">
+            {actionLog.length === 0 && (
+              <p className="text-slate-500 text-xs text-center py-4">No signals yet — bot is scanning...</p>
+            )}
+            {[...actionLog].reverse().map((log: any, i: number) => (
+              <div key={i} className="p-2 rounded bg-[#131722] border border-white/[0.03]">
+                <div className="flex items-center gap-2">
+                  <span className={`w-1.5 h-1.5 rounded-full ${
+                    log.type === 'opened' ? (log.direction === 'long' ? 'bg-emerald-400' : 'bg-red-400')
+                    : log.type === 'closed' ? 'bg-blue-400'
+                    : 'bg-amber-400'
+                  }`} />
+                  <span className={`text-[10px] font-bold uppercase ${
+                    log.type === 'opened' ? (log.direction === 'long' ? 'text-emerald-400' : 'text-red-400')
+                    : log.type === 'closed' ? ((log.pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400')
+                    : 'text-amber-400'
+                  }`}>{log.type} {log.direction || ''}</span>
+                  <span className="text-[9px] text-slate-500 ml-auto">{new Date(log.ts).toLocaleTimeString()}</span>
+                </div>
+                <p className="text-[10px] text-slate-400 mt-0.5">{log.detail}</p>
+                {log.price && (
+                  <div className="flex items-center gap-3 mt-1 text-[9px]">
+                    <span className="text-slate-500">Price: <span className="text-white">{log.price.toFixed(2)}</span></span>
+                    {log.sl && <span className="text-slate-500">SL: <span className="text-red-400">{log.sl.toFixed(2)}</span></span>}
+                    {log.tp && <span className="text-slate-500">TP: <span className="text-emerald-400">{log.tp.toFixed(2)}</span></span>}
+                    {log.pnl != null && <span className={`font-bold ${log.pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>P&L: {log.pnl >= 0 ? '+' : ''}{log.pnl.toFixed(2)}</span>}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === 'positions' && (
+          <div className="px-3 py-2 space-y-1.5">
+            {openPositions.length === 0 && (
+              <p className="text-slate-500 text-xs text-center py-4">No open positions</p>
+            )}
+            {openPositions.map((pos: any, i: number) => (
+              <div key={i} className="p-2.5 rounded-lg bg-[#131722] border border-white/[0.04]">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${
+                      pos.direction === 'long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                    }`}>{pos.direction.toUpperCase()}</span>
+                    <span className="text-white text-[11px] font-medium">{pos.pair}</span>
+                  </div>
+                  <span className="text-[10px] text-slate-400">{pos.leverage}x</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 mt-2 text-[10px]">
+                  <div><span className="text-slate-500">Entry:</span> <span className="text-white">{pos.entry?.toFixed(2)}</span></div>
+                  <div><span className="text-slate-500">Current:</span> <span className="text-white">{pos.current_price?.toFixed(2)}</span></div>
+                  <div><span className="text-slate-500">SL:</span> <span className="text-red-400">{pos.sl?.toFixed(2)}</span></div>
+                  <div><span className="text-slate-500">TP:</span> <span className="text-emerald-400">{pos.tp?.toFixed(2)}</span></div>
+                  <div><span className="text-slate-500">Size:</span> <span className="text-white">{pos.size?.toFixed(2)} USDT</span></div>
+                  <div><span className="text-slate-500">Liq:</span> <span className="text-amber-400">{pos.liquidation_price?.toFixed(2)}</span></div>
+                </div>
+                <div className="mt-2 pt-1.5 border-t border-white/[0.04] flex justify-between">
+                  <span className="text-[10px] text-slate-500">Unrealized P&L</span>
+                  <span className={`text-[11px] font-bold ${(pos.unrealized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(pos.unrealized_pnl || 0) >= 0 ? '+' : ''}{(pos.unrealized_pnl || 0).toFixed(4)} USDT
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === 'trades' && (
+          <div className="px-3 py-2 space-y-1">
+            {closedTrades.length === 0 && (
+              <p className="text-slate-500 text-xs text-center py-4">No trades yet</p>
+            )}
+            {closedTrades.map((t: any, i: number) => (
+              <div key={i} className="p-2 rounded bg-[#131722] border border-white/[0.03]">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <span className={`text-[9px] font-bold px-1 py-0.5 rounded ${
+                      t.direction === 'long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
+                    }`}>{(t.direction || '').toUpperCase()}</span>
+                    <span className="text-white text-[10px] font-medium">{t.pair}</span>
+                  </div>
+                  <span className={`text-[10px] font-bold ${(t.pnl || t.profit_abs || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(t.pnl || t.profit_abs || 0) >= 0 ? '+' : ''}{(t.pnl || t.profit_abs || 0).toFixed(2)} USDT
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 mt-1 text-[9px] text-slate-500">
+                  <span>Entry: {(t.entry || t.entry_price || 0).toFixed(2)}</span>
+                  <span>Exit: {(t.exit || t.exit_price || 0).toFixed(2)}</span>
+                  <span className={`${(t.pnl_pct || t.profit_pct || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(t.pnl_pct || t.profit_pct || 0) >= 0 ? '+' : ''}{(t.pnl_pct || t.profit_pct || 0).toFixed(1)}%
+                  </span>
+                </div>
+                <div className="flex items-center gap-3 mt-0.5 text-[9px] text-slate-600">
+                  <span>{t.reason || t.exit_reason || ''}</span>
+                  {(t.closed_at || t.exit_time) && <span>{new Date(t.closed_at || t.exit_time).toLocaleString()}</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Refresh indicator */}
+      <div className="px-3 py-1.5 border-t border-white/[0.06] text-center">
+        <span className="text-[9px] text-slate-600">Auto-refreshing every 5s</span>
       </div>
     </div>
   );
