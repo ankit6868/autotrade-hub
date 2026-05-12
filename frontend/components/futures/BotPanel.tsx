@@ -604,17 +604,26 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
             </div>
 
             {/* Margin / Leverage */}
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-400">Margin</span>
-              <select
-                value={leverage}
-                onChange={e => setLeverage(parseInt(e.target.value))}
-                className="bg-[#1e222d] border border-white/[0.06] rounded px-2 py-1 text-xs text-white outline-none cursor-pointer"
-              >
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-bold text-white">Leverage</span>
+                <span className="text-xs font-bold text-emerald-400">{leverage}x</span>
+              </div>
+              <div className="flex gap-1.5">
                 {[1, 2, 3, 5, 10, 20, 50, 75].map(l => (
-                  <option key={l} value={l}>{l}x</option>
+                  <button
+                    key={l}
+                    onClick={() => setLeverage(l)}
+                    className={`flex-1 py-1.5 rounded text-[11px] font-medium transition-colors ${
+                      leverage === l
+                        ? 'bg-emerald-500 text-white'
+                        : 'bg-[#1e222d] text-slate-400 hover:text-white border border-white/[0.06]'
+                    }`}
+                  >
+                    {l}x
+                  </button>
                 ))}
-              </select>
+              </div>
             </div>
 
             {/* Investment (Margin) */}
