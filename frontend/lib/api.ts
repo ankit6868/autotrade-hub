@@ -233,7 +233,8 @@ export const api = {
       request<any>('/api/futures/position/tp-sl', { method: 'POST', body: JSON.stringify(data) }),
     leadTradingStatus: () => request<any>('/api/futures/lead-trading-status'),
     bots: {
-      list: () => request<any>('/api/futures/bots'),
+      list: (mode?: 'paper' | 'live') =>
+        request<any>(`/api/futures/bots${mode ? `?mode=${mode}` : ''}`),
       create: (data: Record<string, unknown>) =>
         request<any>('/api/futures/bots', { method: 'POST', body: JSON.stringify(data) }),
       stop: (botId: number, force?: boolean) =>

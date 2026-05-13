@@ -83,9 +83,9 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
   const [mainEngine, setMainEngine] = useState<any>(null);
 
   const refreshBots = useCallback(() => {
-    api.futures.bots.list().then(d => setRunningBots(d.bots || [])).catch(() => {});
+    api.futures.bots.list(mode).then(d => setRunningBots(d.bots || [])).catch(() => {});
     api.futures.status().then(d => setMainEngine(d?.running ? d : null)).catch(() => setMainEngine(null));
-  }, []);
+  }, [mode]);
 
   useEffect(() => {
     api.strategy.list().then(d => setStrategies(d.strategies || [])).catch(() => {});

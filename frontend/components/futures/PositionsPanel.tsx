@@ -28,7 +28,7 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
       api.futures.orders({ status: 'pending' }).catch(() => ({ orders: [] })),
       api.futures.history({ mode, limit: '50' }).catch(() => ({ trades: [] })),
       api.futures.account(mode).catch(() => null),
-      api.futures.bots.list().catch(() => ({ bots: [] })),
+      api.futures.bots.list(mode).catch(() => ({ bots: [] })),
       api.futures.status().catch(() => null),
     ]);
     setPositions(pos.trades || []);
@@ -452,6 +452,9 @@ function BotsTab({ bots, mainEngine }: { bots: any[]; mainEngine: any }) {
                 <span className="inline-flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
                   {b.strategy_name}
+                  <span className={`text-[8px] font-bold px-1 rounded ${
+                    b.mode === 'live' ? 'bg-orange-500/20 text-orange-400' : 'bg-blue-500/20 text-blue-400'
+                  }`}>{(b.mode || 'paper').toUpperCase()}</span>
                 </span>
               </td>
               <td className="px-2 py-2 text-slate-300">{b.pairs}</td>
@@ -476,6 +479,9 @@ function BotsTab({ bots, mainEngine }: { bots: any[]; mainEngine: any }) {
                 <span className="inline-flex items-center gap-1">
                   <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
                   {b.strategy_name}
+                  <span className={`text-[8px] font-bold px-1 rounded ${
+                    b.mode === 'live' ? 'bg-orange-500/20 text-orange-400' : 'bg-blue-500/20 text-blue-400'
+                  }`}>{(b.mode || 'paper').toUpperCase()}</span>
                 </span>
               </td>
               <td className="px-2 py-2 text-slate-500">{b.pairs}</td>

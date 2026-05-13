@@ -1504,15 +1504,19 @@ def _extract_signal_criteria(strategy_name: str, strategy_id: int | None, db, us
 
 @router.get("/bots")
 def list_futures_bots(
+    mode: str | None = None,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """List all futures bot instances for this user."""
-    instances = db.execute(
+    """List futures bot instances for this user, optionally filtered by mode (paper/live)."""
+    query = (
         select(StrategyInstance)
         .where(StrategyInstance.user_id == user_id, StrategyInstance.market_type == "futures")
-        .order_by(desc(StrategyInstance.created_at))
-    ).scalars().all()
+    )
+    if mode in ("paper", "live"):
+        query = query.where(StrategyInstance.mode == mode)
+    query = query.order_by(desc(StrategyInstance.created_at))
+    instances = db.execute(query).scalars().all()
 
     # Check actual engine status for running bots
     bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
