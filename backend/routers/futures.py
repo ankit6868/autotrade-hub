@@ -33,6 +33,48 @@ _cache: dict[str, tuple[float, any]] = {}
 CACHE_TTL = 1.5  # seconds
 
 
+def _ensure_live_credentials(eng, user_id: str, db: Session) -> tuple[bool, str | None]:
+    """
+    Make sure the futures engine has the user's KuCoin Lead Trading credentials
+    loaded — even when no bot was explicitly started in live mode.
+
+    Manual market / limit orders and force-closes call this before talking to
+    the Lead Trading REST API. Without it, `eng._api_key` is "" (engine still
+    in its default paper state) and the live REST call is silently skipped,
+    leaving a phantom position in the UI with nothing on KuCoin.
+
+    Returns: (ok, error_message).
+        ok=True  → eng._api_key / _api_sec / _api_pass are populated.
+        ok=False → keys missing or undecryptable; error_message is user-facing.
+    """
+    from backend.utils.encryption import decrypt, DecryptError
+
+    if eng._api_key and eng._api_sec and eng._api_pass:
+        return True, None  # already loaded (e.g. live bot is running)
+
+    cfg = db.execute(
+        select(Config).where(Config.user_id == user_id).limit(1)
+    ).scalar_one_or_none()
+    if not cfg or not (cfg.kucoin_key_enc and cfg.kucoin_secret_enc and cfg.kucoin_passphrase_enc):
+        return False, ("KuCoin API key not configured. Go to Setup → add a Lead-Trading "
+                       "futures API key (General + Trade permissions, no Withdraw).")
+    try:
+        kk = decrypt(cfg.kucoin_key_enc or "", user_id)
+        ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
+        kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+    except DecryptError:
+        return False, "Could not decrypt KuCoin credentials. Re-enter them in Setup."
+
+    if not (kk and ks and kp):
+        return False, "KuCoin credentials are blank. Re-enter them in Setup."
+
+    eng._api_key  = kk
+    eng._api_sec  = ks
+    eng._api_pass = kp
+    log.info("[%s] Loaded KuCoin Lead Trading credentials into futures engine on demand.", user_id)
+    return True, None
+
+
 # ── Futures Backtest ─────────────────────────────────────────────────────────
 
 @router.post("/backtest/run")
@@ -383,6 +425,8 @@ def futures_open_positions(
                 "opened_at":         str(p.opened_at),
                 "leverage":          lev,
                 "liquidation_price": round(liq, 6) if liq else None,
+                "_pos_mode":         pos_mode,
+                "exchange_order_id": getattr(p, "exchange_order_id", None),
             })
 
     # Fetch live prices
@@ -407,7 +451,7 @@ def futures_open_positions(
                     else (entry - cur) / entry * stake if entry else 0
         lev_pnl   = raw_pnl * leverage
         native_trades.append({
-            "id":                f"futures-{p['pair']}",
+            "id":                f"futures-{p['pair']}-{p.get('_pos_mode','paper')}",
             "pair":              p["pair"],
             "side":              direction,
             "entry_price":       entry,
@@ -418,7 +462,11 @@ def futures_open_positions(
             "stoploss_price":    p.get("sl"),
             "tp_price":          p.get("tp"),
             "entry_time":        p.get("opened_at"),
-            "mode":              eng._mode,
+            # Use the position's own _mode tag, NOT the engine mode, so a live
+            # manual entry placed while the engine is in default-paper still
+            # reports mode="live" to the UI.
+            "mode":              p.get("_pos_mode") or (eng._mode or "paper"),
+            "exchange_order_id": p.get("exchange_order_id"),
             "market_type":       "futures",
             "unrealized_pnl":    round(lev_pnl, 4),
         })
@@ -586,12 +634,19 @@ def futures_manual_entry(
         return {"error": f"Already have an open position for {pair}. Close it first."}
 
     # ── Live mode: place real order via Lead Trading API ──────────────
+    # CRITICAL: must talk to KuCoin BEFORE we mutate engine state. If the API
+    # rejects (no creds, balance too low, bad symbol, etc.) we return early
+    # without leaving a phantom position in the engine.
     exchange_order_id = None
-    if mode == "live" and eng._api_key:
+    if mode == "live":
+        ok, err = _ensure_live_credentials(eng, user_id, db)
+        if not ok:
+            return {"error": err}
         try:
             kc_symbol     = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
             side          = "buy" if direction == "long" else "sell"
             position_side = "LONG" if direction == "long" else "SHORT"
+            # KuCoin futures lot count: 1 lot = 0.001 BTC for XBTUSDTM
             contract_size = stake * leverage
             contracts     = max(1, int(contract_size / entry_price * 1000))
             client_oid    = f"atf-manual-{int(_time.time()*1000)}"
@@ -612,11 +667,18 @@ def futures_manual_entry(
                 base_url=KUCOIN_FUTURES_BASE,
             )
             if str(resp.get("code")) != "200000":
-                return {"error": f"KuCoin Lead Trading order failed: {resp.get('msg', resp)}"}
+                msg = resp.get("msg") or resp
+                log.warning("[%s] Lead Trading manual entry rejected: %s", user_id, resp)
+                return {"error": f"KuCoin Lead Trading rejected the order: {msg}"}
             exchange_order_id = resp.get("data", {}).get("orderId")
-            log.info("[%s] Lead Trading manual ENTRY: %s", user_id, resp)
+            log.info("[%s] Lead Trading manual ENTRY ok: order_id=%s body=%s",
+                     user_id, exchange_order_id, body)
         except Exception as e:
+            log.exception("[%s] Lead Trading manual entry failed", user_id)
             return {"error": f"Lead Trading order failed: {e}"}
+        # Stash the exchange order id on the position so /force-close can
+        # reconcile with KuCoin even if the engine restarts.
+        pos.exchange_order_id = exchange_order_id
 
     pos_key = f"{pair}-{direction}-manual-{int(now.timestamp())}"
     with eng._lock:
@@ -703,33 +765,44 @@ async def futures_force_close(
             closed_positions.append(pos)
 
     # ── Live mode: place close orders on KuCoin Lead Trading ─────────────
-    if mode == "live" and eng._api_key and closed_positions:
-        kc_symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
-        for pos in closed_positions:
-            try:
-                side          = "sell" if pos.direction == "long" else "buy"
-                position_side = "LONG" if pos.direction == "long" else "SHORT"
-                contract_size = pos.size * getattr(pos, "leverage", eng._leverage or 10)
-                contracts     = max(1, int(contract_size / pos.entry * 1000))
-                body = {
-                    "clientOid":   f"atf-close-{int(_time.time()*1000)}",
-                    "side":         side,
-                    "symbol":       kc_symbol,
-                    "type":         "market",
-                    "size":         contracts,
-                    "leverage":     min(LEAD_MAX_LEVERAGE, getattr(pos, "leverage", eng._leverage or 10)),
-                    "marginMode":   eng.get_symbol_margin(kc_symbol).upper() or "ISOLATED",
-                    "positionSide": position_side,
-                    "reduceOnly":   True,
-                }
-                resp = _kucoin_post_signed(
-                    "/api/v1/copy-trade/futures/orders", body,
-                    eng._api_key, eng._api_sec, eng._api_pass,
-                    base_url=KUCOIN_FUTURES_BASE,
-                )
-                log.info("[%s] Lead Trading CLOSE order: %s", user_id, resp)
-            except Exception as e:
-                log.error("[%s] Lead Trading close failed for %s: %s", user_id, pair, e)
+    if mode == "live" and closed_positions:
+        ok, err = _ensure_live_credentials(eng, user_id, db)
+        if not ok:
+            # Don't lose the close — we already closed the in-memory side and
+            # will mark the DB row closed below. Just surface a soft warning so
+            # the user knows KuCoin wasn't reconciled.
+            log.warning("[%s] force-close skipped live KuCoin call: %s", user_id, err)
+        else:
+            kc_symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+            for pos in closed_positions:
+                try:
+                    side          = "sell" if pos.direction == "long" else "buy"
+                    position_side = "LONG" if pos.direction == "long" else "SHORT"
+                    contract_size = pos.size * getattr(pos, "leverage", eng._leverage or 10)
+                    contracts     = max(1, int(contract_size / pos.entry * 1000))
+                    body = {
+                        "clientOid":   f"atf-close-{int(_time.time()*1000)}",
+                        "side":         side,
+                        "symbol":       kc_symbol,
+                        "type":         "market",
+                        "size":         contracts,
+                        "leverage":     min(LEAD_MAX_LEVERAGE, getattr(pos, "leverage", eng._leverage or 10)),
+                        "marginMode":   eng.get_symbol_margin(kc_symbol).upper() or "ISOLATED",
+                        "positionSide": position_side,
+                        "reduceOnly":   True,
+                    }
+                    resp = _kucoin_post_signed(
+                        "/api/v1/copy-trade/futures/orders", body,
+                        eng._api_key, eng._api_sec, eng._api_pass,
+                        base_url=KUCOIN_FUTURES_BASE,
+                    )
+                    if str(resp.get("code")) != "200000":
+                        log.warning("[%s] Lead Trading CLOSE rejected for %s: %s",
+                                    user_id, pair, resp)
+                    else:
+                        log.info("[%s] Lead Trading CLOSE order ok: %s", user_id, resp)
+                except Exception as e:
+                    log.error("[%s] Lead Trading close failed for %s: %s", user_id, pair, e)
 
     # Persist each closed in-memory position
     total_pnl = 0.0
@@ -961,7 +1034,10 @@ def place_futures_order(
 
     # ── Live mode: send to Lead Trading API ──────────────────────────────
     exchange_order_id = None
-    if mode == "live" and eng._api_key:
+    if mode == "live":
+        ok, err = _ensure_live_credentials(eng, user_id, db)
+        if not ok:
+            return {"error": err}
         try:
             client_oid = f"atf-ord-{int(_t.time()*1000)}"
             margin_mode = eng.get_symbol_margin(symbol).upper() or "ISOLATED"
@@ -1055,19 +1131,24 @@ def cancel_futures_order(
     import urllib.request, json as _json
 
     eng = futures_engine_registry.for_user(user_id)
-    mode = eng._mode or "paper"
 
-    # ── Live mode: cancel on KuCoin Lead Trading ─────────────────────────
-    if mode == "live" and eng._api_key:
-        # Check if there's an exchange_order_id in the DB
-        db_order = db.execute(
-            select(FuturesOrder).where(
-                FuturesOrder.client_oid == order_id,
-                FuturesOrder.user_id == user_id,
-            )
-        ).scalar_one_or_none()
+    # An order is "live" if it has an exchange_order_id (it was forwarded to
+    # KuCoin Lead Trading). Engine mode is unreliable here because the user
+    # may have placed the order in live mode then this request comes through
+    # before any bot was ever started.
+    db_order = db.execute(
+        select(FuturesOrder).where(
+            FuturesOrder.client_oid == order_id,
+            FuturesOrder.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    is_live_order = bool(db_order and db_order.exchange_order_id)
 
-        if db_order and db_order.exchange_order_id:
+    if is_live_order:
+        ok, err = _ensure_live_credentials(eng, user_id, db)
+        if not ok:
+            log.warning("[%s] cancel-order skipped Lead Trading call: %s", user_id, err)
+        else:
             try:
                 from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
                 ts = str(int(_time.time() * 1000))
@@ -1080,7 +1161,7 @@ def cancel_futures_order(
                 req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
                 with urllib.request.urlopen(req_obj, timeout=15) as resp:
                     cancel_resp = _json.loads(resp.read().decode())
-                log.info("[%s] Lead Trading cancel order: %s", user_id, cancel_resp)
+                log.info("[%s] Lead Trading cancel order ok: %s", user_id, cancel_resp)
             except Exception as e:
                 log.error("[%s] Lead Trading cancel failed: %s", user_id, e)
 
@@ -1362,10 +1443,18 @@ def set_position_tp_sl(
     if not updated:
         return {"error": f"No open position for {pair}"}
 
-    mode = eng._mode or "paper"
+    # Look at the position's own _mode tag first — a TP/SL set on a
+    # live manual position must reach KuCoin even if the engine was never
+    # started in live mode.
+    pos_mode = getattr(matched_pos, "_mode", None) if matched_pos else None
+    mode = pos_mode or eng._mode or "paper"
 
     # ── Live mode: place TP/SL orders on KuCoin Lead Trading ─────────────
-    if mode == "live" and eng._api_key and matched_pos:
+    if mode == "live" and matched_pos:
+        ok, err = _ensure_live_credentials(eng, user_id, db)
+        if not ok:
+            log.warning("[%s] TP/SL skipped Lead Trading call: %s", user_id, err)
+            matched_pos = None  # skip the live-side calls below
         kc_symbol     = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
         direction     = matched_pos.direction
         position_side = "LONG" if direction == "long" else "SHORT"
