@@ -370,6 +370,14 @@ app.add_middleware(SlowAPIMiddleware)
 # --- CORS ------------------------------------------------------------------
 _default_cors = "http://localhost:3000,http://127.0.0.1:3000"
 _cors = [o.strip() for o in os.getenv("CORS_ALLOWED_ORIGINS", _default_cors).split(",") if o.strip()]
+# Always allow the production Vercel frontend (direct browser→backend calls
+# bypass Vercel rewrites, avoiding ROUTER_EXTERNAL_TARGET_ERROR on uploads).
+_vercel_origins = [
+    "https://autotrade-hub.vercel.app",
+]
+for vo in _vercel_origins:
+    if vo not in _cors:
+        _cors.append(vo)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors,

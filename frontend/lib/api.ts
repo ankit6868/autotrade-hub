@@ -1,5 +1,19 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+
+// In production on Vercel, call the Railway backend directly to avoid
+// Vercel's edge-proxy ROUTER_EXTERNAL_TARGET_ERROR on uploads / long requests.
+// In local dev, use same-origin (Next.js rewrites proxy to localhost:8000).
+const RAILWAY_BACKEND = 'https://autotrade-backend-production.up.railway.app';
+
+function resolveApiBase(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+  if (typeof window !== 'undefined' && window.location.hostname.includes('vercel.app')) {
+    return RAILWAY_BACKEND;
+  }
+  return '';  // same-origin — Next.js dev rewrites handle it
+}
+
+const API_BASE = resolveApiBase();
 
 // Set by AuthBridge once Clerk is loaded; lets us attach the user's JWT to
 // every backend request without dragging React context into this module.

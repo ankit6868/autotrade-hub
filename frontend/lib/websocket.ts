@@ -23,9 +23,7 @@ class TradeWebSocket {
     if (this.ws?.readyState === WebSocket.OPEN) return;
 
     // NEXT_PUBLIC_WS_URL takes priority (e.g. ws://localhost:8000 in dev).
-    // Falls back to NEXT_PUBLIC_API_URL host, then same-origin.
-    // In dev the Next.js proxy does NOT forward WebSocket upgrades, so we
-    // must point directly at the FastAPI server.
+    // Falls back to NEXT_PUBLIC_API_URL host, then Railway direct, then same-origin.
     let wsUrl: string;
     if (process.env.NEXT_PUBLIC_WS_URL) {
       wsUrl = `${process.env.NEXT_PUBLIC_WS_URL}/ws/trades`;
@@ -33,9 +31,11 @@ class TradeWebSocket {
       const apiUrl = new URL(process.env.NEXT_PUBLIC_API_URL);
       const proto = apiUrl.protocol === 'https:' ? 'wss:' : 'ws:';
       wsUrl = `${proto}//${apiUrl.host}/ws/trades`;
+    } else if (typeof window !== 'undefined' && window.location.hostname.includes('vercel.app')) {
+      // Production on Vercel — connect directly to Railway backend
+      wsUrl = 'wss://autotrade-backend-production.up.railway.app/ws/trades';
     } else {
-      // Same-origin fallback (works in production where WS is proxied at the
-      // load-balancer / nginx level, not Next.js).
+      // Same-origin fallback for local dev
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       wsUrl = `${protocol}//${window.location.host}/ws/trades`;
     }
