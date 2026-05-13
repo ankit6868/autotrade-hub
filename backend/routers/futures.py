@@ -960,9 +960,14 @@ def place_futures_order(
     In live mode, sends to KuCoin Lead Trading API."""
     from backend.services.native_trading_engine import _kucoin_post_signed
     from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+    from backend.services.kucoin_futures_client import normalize_futures_symbol
     import time as _t
 
-    symbol     = req.get("symbol", "XBTUSDTM")
+    # Frontend sends 'BTCUSDTM' but KuCoin Lead Trading expects 'XBTUSDTM'
+    # (Bitcoin uses XBT, the original ISO 4217-style code, on KuCoin futures).
+    # normalize_futures_symbol() handles the BTC→XBT swap and is a no-op for
+    # symbols that are already correct.
+    symbol     = normalize_futures_symbol(req.get("symbol", "XBTUSDTM"))
     side       = req.get("side", "buy")
     order_type = req.get("order_type", "limit")
     size       = float(req.get("size", 0))
@@ -1266,7 +1271,8 @@ def set_futures_leverage(
     user_id: str = Depends(get_user_id),
 ):
     """Set leverage for a symbol."""
-    symbol   = req.get("symbol", "XBTUSDTM")
+    from backend.services.kucoin_futures_client import normalize_futures_symbol
+    symbol   = normalize_futures_symbol(req.get("symbol", "XBTUSDTM"))
     leverage = int(req.get("leverage", 10))
     eng = futures_engine_registry.for_user(user_id)
     result = eng.set_symbol_leverage(symbol, leverage)
@@ -1282,7 +1288,8 @@ def set_futures_margin_mode(
     user_id: str = Depends(get_user_id),
 ):
     """Set margin mode (cross/isolated) for a symbol."""
-    symbol = req.get("symbol", "XBTUSDTM")
+    from backend.services.kucoin_futures_client import normalize_futures_symbol
+    symbol = normalize_futures_symbol(req.get("symbol", "XBTUSDTM"))
     mode   = req.get("mode", "cross")
     eng = futures_engine_registry.for_user(user_id)
     result = eng.set_symbol_margin(symbol, mode)
@@ -1296,6 +1303,8 @@ def get_futures_leverage(
     user_id: str = Depends(get_user_id),
 ):
     """Get current leverage for a symbol."""
+    from backend.services.kucoin_futures_client import normalize_futures_symbol
+    symbol = normalize_futures_symbol(symbol)
     eng = futures_engine_registry.for_user(user_id)
     return {
         "symbol": symbol,
