@@ -688,6 +688,62 @@ def futures_open_positions(
         })
 
     merged = native_trades + [t for t in db_trades if t["pair"] not in pairs_in_native]
+
+    # ── Reconcile with KuCoin Lead Trading for live mode ─────────────────
+    # Limit orders that fill immediately (e.g. buy-above-market) and any
+    # positions opened on KuCoin we don't know about (filled limit orders,
+    # external tools, account restored from snapshot) should appear here
+    # so the user never has a hidden real-money position.
+    if (mode == "live" or mode is None) and _ensure_live_credentials(eng, user_id, db)[0]:
+        try:
+            from backend.services.native_trading_engine import _kucoin_get_signed
+            from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+            kc_resp = _kucoin_get_signed(
+                "/api/v1/positions",
+                eng._api_key, eng._api_sec, eng._api_pass,
+                base_url=KUCOIN_FUTURES_BASE,
+            )
+            if str(kc_resp.get("code")) == "200000":
+                # Map KuCoin futures symbol → app pair: XBTUSDTM → BTC/USDT
+                pairs_already_in_merged = {t["pair"] for t in merged}
+                for kp in (kc_resp.get("data") or []):
+                    qty = float(kp.get("currentQty", 0))
+                    if qty == 0:
+                        continue   # closed / zero positions
+                    kc_sym = kp.get("symbol", "")
+                    # Reverse normalize: XBTUSDTM → BTCUSDTM → BTC/USDT
+                    base = kc_sym.replace("USDTM", "").replace("XBT", "BTC")
+                    pair = f"{base}/USDT"
+                    if pair in pairs_already_in_merged:
+                        continue   # already tracking via engine/DB
+                    direction = "long" if qty > 0 else "short"
+                    entry     = float(kp.get("avgEntryPrice", 0))
+                    cur       = float(kp.get("markPrice", 0)) or entry
+                    margin    = float(kp.get("posMargin", 0) or kp.get("maintMargin", 0))
+                    lev       = float(kp.get("realLeverage", 0)) or float(kp.get("leverage", 1)) or 1
+                    liq       = float(kp.get("liquidationPrice", 0)) or None
+                    unreal    = float(kp.get("unrealisedPnl", 0))
+                    merged.append({
+                        "id":                f"kucoin-{kc_sym}",
+                        "pair":              pair,
+                        "side":              direction,
+                        "entry_price":       entry,
+                        "current_price":     cur,
+                        "amount":            round(margin, 4),
+                        "leverage":          round(lev, 2),
+                        "liquidation_price": liq,
+                        "stoploss_price":    None,
+                        "tp_price":          None,
+                        "entry_time":        kp.get("openingTimestamp") or None,
+                        "mode":              "live",
+                        "exchange_order_id": None,
+                        "market_type":       "futures",
+                        "unrealized_pnl":    round(unreal, 4),
+                        "_source":           "kucoin",
+                    })
+        except Exception as e:
+            log.warning("[%s] KuCoin position reconcile failed: %s", user_id, e)
+
     return {"trades": merged}
 
 
@@ -1042,7 +1098,63 @@ async def futures_force_close(
     if orphan_trades:
         db.commit()
 
-    total_closed = len(closed_positions) + len(orphan_trades)
+    # ── Live mode: also close any KuCoin-only positions for this pair ───
+    # These appear when a limit order filled immediately on KuCoin and we
+    # never created an engine/DB Position to track it. Without this step
+    # /force-close would say "No open position" even though one exists on
+    # KuCoin holding real margin.
+    kucoin_only_closed = 0
+    if mode == "live" and not closed_positions and not orphan_trades:
+        ok, _ = _ensure_live_credentials(eng, user_id, db)
+        if ok:
+            try:
+                kc_symbol = normalize_futures_symbol(
+                    pair.replace("/", "").replace("USDT", "USDTM")
+                )
+                # Get the live position for this symbol
+                from backend.services.native_trading_engine import _kucoin_get_signed
+                pos_resp = _kucoin_get_signed(
+                    "/api/v1/position",
+                    eng._api_key, eng._api_sec, eng._api_pass,
+                    params={"symbol": kc_symbol},
+                    base_url=KUCOIN_FUTURES_BASE,
+                )
+                if str(pos_resp.get("code")) == "200000":
+                    pdata = pos_resp.get("data") or {}
+                    qty = int(pdata.get("currentQty", 0))
+                    if qty != 0:
+                        direction = "long" if qty > 0 else "short"
+                        side          = "sell" if direction == "long" else "buy"
+                        position_side = "LONG" if direction == "long" else "SHORT"
+                        contracts     = abs(qty)
+                        lev_use       = int(pdata.get("realLeverage") or pdata.get("leverage") or 1)
+                        body = {
+                            "clientOid":   f"atf-kucoin-close-{int(_time.time()*1000)}",
+                            "side":         side,
+                            "symbol":       kc_symbol,
+                            "type":         "market",
+                            "size":         contracts,
+                            "leverage":     min(LEAD_MAX_LEVERAGE, lev_use),
+                            "marginMode":   (pdata.get("marginMode") or "ISOLATED").upper(),
+                            "positionSide": position_side,
+                            "reduceOnly":   True,
+                        }
+                        resp = _kucoin_post_signed(
+                            "/api/v1/copy-trade/futures/orders", body,
+                            eng._api_key, eng._api_sec, eng._api_pass,
+                            base_url=KUCOIN_FUTURES_BASE,
+                        )
+                        if str(resp.get("code")) == "200000":
+                            kucoin_only_closed = 1
+                            log.info("[%s] Closed KuCoin-only position for %s qty=%s",
+                                     user_id, pair, qty)
+                        else:
+                            log.warning("[%s] Failed to close KuCoin-only position for %s: %s",
+                                        user_id, pair, resp)
+            except Exception as e:
+                log.error("[%s] KuCoin-only close attempt failed: %s", user_id, e)
+
+    total_closed = len(closed_positions) + len(orphan_trades) + kucoin_only_closed
     if total_closed == 0:
         return {"error": f"No open futures position for {pair}"}
 
@@ -1413,10 +1525,50 @@ def get_futures_orders(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Get pending or filled futures orders."""
+    """Get pending or filled futures orders. For live mode, reconciles
+    DB rows against KuCoin's actual order status — limit orders that
+    filled (e.g. buy-above-market) get flipped to 'filled' here so they
+    stop showing in the Open Orders tab while a real position is open."""
     eng = futures_engine_registry.for_user(user_id)
     # Combine engine pending + DB records
     engine_orders = eng.get_pending_orders(symbol)
+
+    # ── Live-mode reconcile: ask KuCoin if our 'pending' rows really are
+    # still pending. KuCoin only returns truly-active orders, so any of our
+    # rows with an exchange_order_id NOT in that list has either filled or
+    # been cancelled. We flip those to 'filled' (good enough — the next
+    # position fetch will pull the real exit details if it then closes).
+    if (status == "pending" or status is None) and _ensure_live_credentials(eng, user_id, db)[0]:
+        try:
+            from backend.services.native_trading_engine import _kucoin_get_signed
+            from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+            kc_resp = _kucoin_get_signed(
+                "/api/v1/orders", eng._api_key, eng._api_sec, eng._api_pass,
+                params={"status": "active"},
+                base_url=KUCOIN_FUTURES_BASE,
+            )
+            if str(kc_resp.get("code")) == "200000":
+                items = (kc_resp.get("data") or {}).get("items") or []
+                live_active_ids = {str(o.get("id")) for o in items if o.get("id")}
+                pending_rows = db.execute(
+                    select(FuturesOrder).where(
+                        FuturesOrder.user_id == user_id,
+                        FuturesOrder.status == "pending",
+                        FuturesOrder.exchange_order_id.isnot(None),
+                    )
+                ).scalars().all()
+                changed = False
+                for o in pending_rows:
+                    if str(o.exchange_order_id) not in live_active_ids:
+                        o.status     = "filled"
+                        o.filled_at  = datetime.utcnow()
+                        changed = True
+                        log.info("[%s] Reconcile: order %s no longer active on "
+                                 "KuCoin → marked filled", user_id, o.exchange_order_id)
+                if changed:
+                    db.commit()
+        except Exception as e:
+            log.warning("[%s] KuCoin order reconcile failed: %s", user_id, e)
 
     query = select(FuturesOrder).where(FuturesOrder.user_id == user_id)
     if status:
