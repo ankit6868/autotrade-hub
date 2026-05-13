@@ -7,6 +7,7 @@ pending orders, positions, bot management, and account overview.
 """
 from __future__ import annotations
 
+import logging
 import time as _time
 from datetime import datetime
 from fastapi import APIRouter, Depends, Request
@@ -19,6 +20,8 @@ from backend.models.config import Config
 from backend.utils.clerk_auth import get_user_id
 from backend.services.futures_engine import futures_engine_registry
 from backend.utils.audit import log_event
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/futures", tags=["futures"])
 
@@ -1659,7 +1662,7 @@ def create_futures_bot(
         log.info("[%s] Stopped %d duplicate bot(s) for %s/%s/%s",
                  user_id, len(existing), strategy_name, pairs_csv, mode)
 
-    engine_key = f"bot-{strategy_name}-{int(_time.time())}"
+    engine_key = f"bot-{strategy_name}-{int(_time.time() * 1000)}"
     instance = StrategyInstance(
         user_id=user_id, strategy_id=strategy_id, strategy_name=strategy_name,
         market_type="futures", mode=mode, pairs=pairs_csv,

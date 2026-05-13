@@ -22,22 +22,21 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
   const [closingPair, setClosingPair] = useState<string | null>(null);
 
   const refreshAll = useCallback(async () => {
-    try {
-      const [pos, orders, history, acct, botList, engineStatus] = await Promise.all([
-        api.futures.open(mode),
-        api.futures.orders({ status: 'pending' }).catch(() => ({ orders: [] })),
-        api.futures.history({ mode, limit: '50' }),
-        api.futures.account(mode).catch(() => null),
-        api.futures.bots.list().catch(() => ({ bots: [] })),
-        api.futures.status().catch(() => null),
-      ]);
-      setPositions(pos.trades || []);
-      setOpenOrders(orders.orders || []);
-      setTradeHistory(history.trades || []);
-      if (acct) setAccount(acct);
-      setBots(botList.bots || []);
-      setMainEngine(engineStatus?.running ? engineStatus : null);
-    } catch { /* silent */ }
+    // Each call wrapped independently so one failure doesn't block others
+    const [pos, orders, history, acct, botList, engineStatus] = await Promise.all([
+      api.futures.open(mode).catch(() => ({ trades: [] })),
+      api.futures.orders({ status: 'pending' }).catch(() => ({ orders: [] })),
+      api.futures.history({ mode, limit: '50' }).catch(() => ({ trades: [] })),
+      api.futures.account(mode).catch(() => null),
+      api.futures.bots.list().catch(() => ({ bots: [] })),
+      api.futures.status().catch(() => null),
+    ]);
+    setPositions(pos.trades || []);
+    setOpenOrders(orders.orders || []);
+    setTradeHistory(history.trades || []);
+    if (acct) setAccount(acct);
+    setBots(botList.bots || []);
+    setMainEngine(engineStatus?.running ? engineStatus : null);
   }, [mode]);
 
   useEffect(() => {
@@ -85,7 +84,7 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
     { key: 'order_history', label: 'Order History' },
     { key: 'trade_history', label: 'Trade History' },
     { key: 'position_history', label: 'Position History' },
-    { key: 'bots', label: 'Trading Algorithm', count: bots.filter(b => b.is_running).length + (mainEngine ? 1 : 0) },
+    { key: 'bots', label: 'Trading Algorithm', count: bots.length + (mainEngine ? 1 : 0) },
   ];
 
   return (
@@ -401,64 +400,100 @@ function AssetsTab({ account }: { account: any }) {
 function BotsTab({ bots, mainEngine }: { bots: any[]; mainEngine: any }) {
   const hasContent = bots.length > 0 || mainEngine;
   if (!hasContent) {
-    return <div className="text-center text-slate-500 py-8 text-sm">No running algorithms</div>;
+    return (
+      <div className="text-center py-8">
+        <p className="text-slate-500 text-sm mb-2">No trading algorithms</p>
+        <p className="text-slate-600 text-xs">Create a bot from the Bot panel on the right to start automated trading.</p>
+      </div>
+    );
   }
+
+  const runningBots = bots.filter(b => b.is_running);
+  const stoppedBots = bots.filter(b => !b.is_running);
+
   return (
-    <table className="w-full text-xs">
-      <thead>
-        <tr className="text-slate-500 text-[10px]">
-          <th className="text-left px-2 py-1">Strategy</th>
-          <th className="text-left px-2 py-1">Pairs</th>
-          <th className="text-right px-2 py-1">Leverage</th>
-          <th className="text-right px-2 py-1">Wallet</th>
-          <th className="text-right px-2 py-1">Trades</th>
-          <th className="text-right px-2 py-1">PNL</th>
-          <th className="text-left px-2 py-1">Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {mainEngine && (
-          <tr className="border-t border-cyan-500/20 bg-cyan-500/[0.03]">
-            <td className="px-2 py-2 text-white">
-              <span className="inline-block bg-cyan-500/20 text-cyan-300 text-[9px] font-bold px-1 rounded mr-1">MAIN</span>
-              {mainEngine.strategy || 'Engine'}
-            </td>
-            <td className="px-2 py-2 text-slate-300">{mainEngine.pairs?.join(', ') || mainEngine.pair || '—'}</td>
-            <td className="text-right px-2 py-2 text-slate-300">{mainEngine.leverage || '—'}x</td>
-            <td className="text-right px-2 py-2 text-slate-300">{mainEngine.wallet?.toFixed(2) || '—'}</td>
-            <td className="text-right px-2 py-2 text-slate-400">{mainEngine.total_trades ?? '—'}</td>
-            <td className={`text-right px-2 py-2 ${(mainEngine.total_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {mainEngine.total_pnl != null ? `${mainEngine.total_pnl >= 0 ? '+' : ''}${mainEngine.total_pnl.toFixed(2)}` : '—'}
-            </td>
-            <td className="px-2 py-2">
-              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-400">
-                Running
-              </span>
-            </td>
+    <div>
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="text-slate-500 text-[10px]">
+            <th className="text-left px-2 py-1">Strategy</th>
+            <th className="text-left px-2 py-1">Pairs</th>
+            <th className="text-right px-2 py-1">Leverage</th>
+            <th className="text-right px-2 py-1">Wallet</th>
+            <th className="text-right px-2 py-1">Trades</th>
+            <th className="text-right px-2 py-1">PNL</th>
+            <th className="text-left px-2 py-1">Status</th>
           </tr>
-        )}
-        {bots.map((b, i) => (
-          <tr key={i} className="border-t border-white/[0.04]">
-            <td className="px-2 py-2 text-white">{b.strategy_name}</td>
-            <td className="px-2 py-2 text-slate-300">{b.pairs}</td>
-            <td className="text-right px-2 py-2 text-slate-300">{b.leverage}x</td>
-            <td className="text-right px-2 py-2 text-slate-300">{b.wallet}</td>
-            <td className="text-right px-2 py-2 text-slate-400">{b.total_trades}</td>
-            <td className={`text-right px-2 py-2 ${b.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {b.total_pnl >= 0 ? '+' : ''}{b.total_pnl?.toFixed(2)}
-            </td>
-            <td className="px-2 py-2">
-              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${
-                b.winding_down ? 'bg-amber-500/10 text-amber-400'
-                  : b.is_running ? 'bg-emerald-500/10 text-emerald-400'
-                  : 'bg-slate-500/10 text-slate-400'
-              }`}>
-                {b.winding_down ? 'Closing' : b.is_running ? 'Running' : 'Stopped'}
-              </span>
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {mainEngine && (
+            <tr className="border-t border-cyan-500/20 bg-cyan-500/[0.03]">
+              <td className="px-2 py-2 text-white">
+                <span className="inline-block bg-cyan-500/20 text-cyan-300 text-[9px] font-bold px-1 rounded mr-1">MAIN</span>
+                {mainEngine.strategy || 'Engine'}
+              </td>
+              <td className="px-2 py-2 text-slate-300">{mainEngine.pairs?.join(', ') || mainEngine.pair || '—'}</td>
+              <td className="text-right px-2 py-2 text-slate-300">{mainEngine.leverage || '—'}x</td>
+              <td className="text-right px-2 py-2 text-slate-300">{mainEngine.wallet?.toFixed(2) || '—'}</td>
+              <td className="text-right px-2 py-2 text-slate-400">{mainEngine.total_trades ?? '—'}</td>
+              <td className={`text-right px-2 py-2 ${(mainEngine.total_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {mainEngine.total_pnl != null ? `${mainEngine.total_pnl >= 0 ? '+' : ''}${mainEngine.total_pnl.toFixed(2)}` : '—'}
+              </td>
+              <td className="px-2 py-2">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-cyan-500/10 text-cyan-400">
+                  Running
+                </span>
+              </td>
+            </tr>
+          )}
+          {runningBots.map((b, i) => (
+            <tr key={`run-${i}`} className="border-t border-white/[0.04]">
+              <td className="px-2 py-2 text-white">
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  {b.strategy_name}
+                </span>
+              </td>
+              <td className="px-2 py-2 text-slate-300">{b.pairs}</td>
+              <td className="text-right px-2 py-2 text-slate-300">{b.leverage}x</td>
+              <td className="text-right px-2 py-2 text-slate-300">{b.wallet}</td>
+              <td className="text-right px-2 py-2 text-slate-400">{b.total_trades}</td>
+              <td className={`text-right px-2 py-2 ${(b.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {(b.total_pnl || 0) >= 0 ? '+' : ''}{(b.total_pnl || 0).toFixed(2)}
+              </td>
+              <td className="px-2 py-2">
+                <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] ${
+                  b.winding_down ? 'bg-amber-500/10 text-amber-400' : 'bg-emerald-500/10 text-emerald-400'
+                }`}>
+                  {b.winding_down ? 'Closing' : 'Running'}
+                </span>
+              </td>
+            </tr>
+          ))}
+          {stoppedBots.map((b, i) => (
+            <tr key={`stop-${i}`} className="border-t border-white/[0.04] opacity-60">
+              <td className="px-2 py-2 text-slate-400">
+                <span className="inline-flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-slate-500" />
+                  {b.strategy_name}
+                </span>
+              </td>
+              <td className="px-2 py-2 text-slate-500">{b.pairs}</td>
+              <td className="text-right px-2 py-2 text-slate-500">{b.leverage}x</td>
+              <td className="text-right px-2 py-2 text-slate-500">{b.wallet}</td>
+              <td className="text-right px-2 py-2 text-slate-500">{b.total_trades}</td>
+              <td className={`text-right px-2 py-2 ${(b.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                {(b.total_pnl || 0) >= 0 ? '+' : ''}{(b.total_pnl || 0).toFixed(2)}
+              </td>
+              <td className="px-2 py-2">
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-red-500/10 text-red-400">
+                  {b.engine_running === false && b.is_running === false ? 'Crashed' : 'Stopped'}
+                </span>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
