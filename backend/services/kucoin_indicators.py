@@ -148,9 +148,10 @@ def _fetch_klines(pair: str, timeframe: str) -> pd.DataFrame | None:
     url = f"{KUCOIN_BASE}/api/v1/market/candles"
     params = {"symbol": symbol, "type": kline_type}
 
+    from backend.services._kucoin_proxy import httpx_client_kwargs as _kc_kwargs
     for attempt in range(MAX_RETRIES):
         try:
-            with httpx.Client(timeout=REQUEST_TIMEOUT) as client:
+            with httpx.Client(timeout=REQUEST_TIMEOUT, **_kc_kwargs()) as client:
                 r = client.get(url, params=params)
             if r.status_code == 429:
                 time.sleep(min(BACKOFF_CAP, BACKOFF_BASE * (2 ** attempt) + random.uniform(0, 0.1)))

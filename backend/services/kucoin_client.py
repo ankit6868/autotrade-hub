@@ -39,7 +39,8 @@ class KuCoinClient:
         timestamp = str(int(time.time() * 1000))
         url = f"{KUCOIN_BASE}{endpoint}"
         headers = self._sign(timestamp, method.upper(), endpoint)
-        async with httpx.AsyncClient() as client:
+        from backend.services._kucoin_proxy import httpx_client_kwargs as _kc_kwargs
+        async with httpx.AsyncClient(**_kc_kwargs()) as client:
             if method.upper() == "GET":
                 resp = await client.get(url, headers=headers, params=params, timeout=15)
             else:
@@ -59,7 +60,8 @@ class KuCoinClient:
         ]
 
     async def get_symbols(self) -> list[str]:
-        async with httpx.AsyncClient() as client:
+        from backend.services._kucoin_proxy import httpx_client_kwargs as _kc_kwargs
+        async with httpx.AsyncClient(**_kc_kwargs()) as client:
             resp = await client.get(f"{KUCOIN_BASE}/api/v2/symbols", timeout=15)
             resp.raise_for_status()
             data = resp.json()
@@ -67,7 +69,8 @@ class KuCoinClient:
 
     async def get_ticker(self, pair: str) -> dict:
         symbol = pair.replace("/", "-")
-        async with httpx.AsyncClient() as client:
+        from backend.services._kucoin_proxy import httpx_client_kwargs as _kc_kwargs
+        async with httpx.AsyncClient(**_kc_kwargs()) as client:
             resp = await client.get(
                 f"{KUCOIN_BASE}/api/v1/market/orderbook/level1",
                 params={"symbol": symbol},
@@ -83,7 +86,8 @@ class KuCoinClient:
             params["startAt"] = start
         if end:
             params["endAt"] = end
-        async with httpx.AsyncClient() as client:
+        from backend.services._kucoin_proxy import httpx_client_kwargs as _kc_kwargs
+        async with httpx.AsyncClient(**_kc_kwargs()) as client:
             resp = await client.get(
                 f"{KUCOIN_BASE}/api/v1/market/candles",
                 params=params,

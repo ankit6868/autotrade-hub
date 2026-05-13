@@ -394,7 +394,8 @@ class FreqtradeManager:
                 })
                 url = f"https://api.kucoin.com/api/v1/market/candles?{qs}"
                 req = urllib.request.Request(url, headers={"User-Agent": "AutoTradeHub/1.0"})
-                with urllib.request.urlopen(req, timeout=30) as resp:
+                from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+                with _proxy_urlopen(req, timeout=30) as resp:
                     data = json.loads(resp.read().decode())
             except Exception as exc:
                 return {"error": f"KuCoin API network error for {pair}: {exc}"}

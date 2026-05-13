@@ -16,7 +16,8 @@ TTL_S = 120  # 2 min cache — volumes don't swing that fast
 
 
 def _fetch_raw() -> list[dict]:
-    with httpx.Client(timeout=10.0) as client:
+    from backend.services._kucoin_proxy import httpx_client_kwargs as _kc_kwargs
+    with httpx.Client(timeout=10.0, **_kc_kwargs()) as client:
         r = client.get(f"{KUCOIN_BASE}/api/v1/market/allTickers")
         r.raise_for_status()
         payload = r.json()

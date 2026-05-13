@@ -166,10 +166,11 @@ KUCOIN_BASE = "https://api.kucoin.com"
 
 def _kucoin_get(path: str, params: dict | None = None) -> dict:
     """GET from KuCoin public REST API (no auth required)."""
+    from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
     qs = ("?" + urllib.parse.urlencode(params)) if params else ""
     url = f"{KUCOIN_BASE}{path}{qs}"
     req = urllib.request.Request(url, headers={"User-Agent": "AutoTradeHub/2.0"})
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with _proxy_urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -178,6 +179,7 @@ def _kucoin_post_signed(path: str, body: dict, api_key: str,
                          base_url: str = KUCOIN_BASE) -> dict:
     """POST to KuCoin private REST API (signed). base_url allows switching to Futures API."""
     import base64, hashlib, hmac as _hmac
+    from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
     ts = str(int(time.time() * 1000))
     body_str = json.dumps(body)
     str_to_sign = f"{ts}POST{path}{body_str}"
@@ -198,7 +200,7 @@ def _kucoin_post_signed(path: str, body: dict, api_key: str,
     url = f"{base_url}{path}"
     data = body_str.encode()
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with _proxy_urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -207,6 +209,7 @@ def _kucoin_get_signed(path: str, api_key: str, api_secret: str,
                        base_url: str = KUCOIN_BASE) -> dict:
     """Authenticated GET from KuCoin private REST API."""
     import base64, hashlib, hmac as _hmac
+    from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
     qs = ("?" + urllib.parse.urlencode(params)) if params else ""
     ts = str(int(time.time() * 1000))
     str_to_sign = f"{ts}GET{path}{qs}"
@@ -227,7 +230,7 @@ def _kucoin_get_signed(path: str, api_key: str, api_secret: str,
     }
     url = f"{base_url}{path}{qs}"
     req = urllib.request.Request(url, headers=headers)
-    with urllib.request.urlopen(req, timeout=20) as resp:
+    with _proxy_urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode())
 
 

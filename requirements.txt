@@ -12,6 +12,9 @@ PyJWT[crypto]==2.10.1
 
 # Async HTTP client (used to call OpenRouter, KuCoin)
 httpx==0.28.1
+# Optional SOCKS5 transport for KUCOIN_HTTPS_PROXY=socks5://...
+# Skip if you only use http(s) proxies — httpx-socks is a tiny dep, safe to keep.
+httpx-socks==0.10.0
 
 # Document parsing
 PyPDF2==3.0.1

@@ -72,7 +72,8 @@ class KuCoinFuturesClient:
         url = f"{KUCOIN_FUTURES_BASE}{endpoint}"
         body_str = json.dumps(body) if body else ""
         headers = self._headers(method.upper(), endpoint, body_str)
-        async with httpx.AsyncClient() as client:
+        from backend.services._kucoin_proxy import httpx_client_kwargs as _kc_kwargs
+        async with httpx.AsyncClient(**_kc_kwargs()) as client:
             if method.upper() == "GET":
                 resp = await client.get(url, headers=headers, params=params, timeout=15)
             elif method.upper() == "DELETE":
@@ -84,7 +85,8 @@ class KuCoinFuturesClient:
 
     async def _public_get(self, endpoint: str, params: dict | None = None) -> Any:
         url = f"{KUCOIN_FUTURES_BASE}{endpoint}"
-        async with httpx.AsyncClient() as client:
+        from backend.services._kucoin_proxy import httpx_client_kwargs as _kc_kwargs
+        async with httpx.AsyncClient(**_kc_kwargs()) as client:
             resp = await client.get(url, params=params, timeout=15)
             resp.raise_for_status()
             return resp.json()
