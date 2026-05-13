@@ -858,6 +858,7 @@ def place_futures_order(
     side       = req.get("side", "buy")
     order_type = req.get("order_type", "limit")
     size       = float(req.get("size", 0))
+    cost_usdt  = float(req.get("cost_usdt", 0))   # USDT cost sent by frontend
     price      = req.get("price")
     stop_price = req.get("stop_price")
     leverage   = req.get("leverage")
@@ -869,8 +870,8 @@ def place_futures_order(
     time_in_force = req.get("time_in_force", "GTC")
     position_side = req.get("position_side")
 
-    if size <= 0:
-        return {"error": "size must be positive"}
+    if size <= 0 and cost_usdt <= 0:
+        return {"error": "size or cost_usdt must be positive"}
 
     eng = futures_engine_registry.for_user(user_id)
 
@@ -883,6 +884,36 @@ def place_futures_order(
 
     lev = min(LEAD_MAX_LEVERAGE, leverage or eng._leverage or 10)
     mode = eng._mode or "paper"
+
+    # ── Recalculate size from cost_usdt when provided ────────────────────
+    # The frontend sends cost_usdt (the USDT amount the user typed) plus
+    # amountNum (= cost_usdt / price, i.e. fractional BTC) as `size`.
+    # For live KuCoin: we need an integer lot count.
+    # For paper mode: we need the USDT stake (same as manual-entry).
+    if cost_usdt > 0:
+        # Fetch a reference price for lot-size conversion
+        ref_price = price or stop_price
+        if ref_price is None:
+            # Best-effort: grab ticker price
+            try:
+                from backend.services.native_trading_engine import _kucoin_get
+                sym_p = symbol.replace("USDTM", "-USDT").replace("XBTUSDTM", "BTC-USDT")
+                _pdata = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym_p})
+                if str(_pdata.get("code")) == "200000":
+                    ref_price = float(_pdata["data"]["price"])
+            except Exception:
+                pass
+
+        if mode == "live":
+            # KuCoin lot count: same formula as manual-entry
+            if ref_price and ref_price > 0:
+                notional = cost_usdt * lev
+                size = max(1, int(notional / ref_price * 1000))
+            else:
+                size = max(1, int(cost_usdt * lev))   # fallback
+        else:
+            # Paper mode: store USDT stake (same unit as manual-entry)
+            size = cost_usdt
 
     # Determine position side
     if not position_side:
@@ -950,6 +981,7 @@ def place_futures_order(
         sl_price=float(sl_price) if sl_price else None,
         hidden=hidden, post_only=post_only, reduce_only=reduce_only,
         time_in_force=time_in_force,
+        cost_usdt=cost_usdt,
     )
 
     # Persist to DB

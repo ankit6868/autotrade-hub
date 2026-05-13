@@ -189,10 +189,13 @@ export default function ManualOrderPanel({
         const futSymbol = symbol.includes('USDTM') ? symbol : symbol.replace('/', '').replace('USDT', 'USDTM');
 
         // Build order payload
+        // Send cost_usdt so the backend can calculate proper lot/position size
+        // (amountNum is BTC — too small for int() conversion on KuCoin)
         const orderPayload: Record<string, unknown> = {
           symbol: futSymbol,
           side,
           size: amountNum,
+          cost_usdt: costUsdt_,
           leverage,
           reduce_only: reduceOnly,
         };

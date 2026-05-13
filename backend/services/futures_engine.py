@@ -73,7 +73,7 @@ class PendingOrder:
         "order_id", "symbol", "side", "order_type", "size", "price",
         "stop_price", "leverage", "margin_mode", "tp_price", "sl_price",
         "hidden", "post_only", "reduce_only", "time_in_force",
-        "created_at", "db_id",
+        "created_at", "db_id", "cost_usdt",
     )
 
     def __init__(self, **kwargs):
@@ -483,6 +483,7 @@ class FuturesEngine(NativeTradingEngine):
         post_only: bool = False,
         reduce_only: bool = False,
         time_in_force: str = "GTC",
+        cost_usdt: float = 0,
     ) -> dict:
         with self._lock:
             self._order_counter += 1
@@ -496,6 +497,7 @@ class FuturesEngine(NativeTradingEngine):
                 tp_price=tp_price, sl_price=sl_price,
                 hidden=hidden, post_only=post_only,
                 reduce_only=reduce_only, time_in_force=time_in_force,
+                cost_usdt=cost_usdt,
             )
             self._pending_orders[oid] = order
         return {"order_id": oid, "status": "pending", "symbol": symbol, "side": side, "type": order_type}
@@ -583,7 +585,13 @@ class FuturesEngine(NativeTradingEngine):
                 )
                 trade_key = f"{pair}#filled#{oid}"
                 self.positions[trade_key] = pos
-                self.balance -= order.size
+                # Deduct USDT margin from balance, not raw size (which may be BTC)
+                usdt_cost = getattr(order, "cost_usdt", 0) or 0
+                if usdt_cost > 0:
+                    margin = usdt_cost  # cost_usdt is already the USDT stake
+                else:
+                    margin = order.size  # legacy: size is in USDT for paper
+                self.balance -= margin
                 self.last_action = f"FILLED order {oid} → {direction} {pair} @ {fill_price:.4f} {lev}x"
                 log.info("[%s] %s", self.user_id, self.last_action)
 
