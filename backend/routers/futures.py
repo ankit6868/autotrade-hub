@@ -117,6 +117,89 @@ def _compute_live_sizing(cost_usdt: float, leverage: int, price: float,
     return contracts, round(real_margin, 4), round(real_notional, 4), None
 
 
+def _sync_margin_mode_to_kucoin(eng, kc_symbol: str, desired_mode: str,
+                                  user_id: str) -> tuple[bool, str | None]:
+    """
+    Push the user's chosen Cross/Isolated setting to KuCoin Futures BEFORE
+    placing an order — so the order body's `marginMode` field matches the
+    symbol's configured mode on the exchange.
+
+    Without this, the toggle in the UI only updates engine local memory.
+    KuCoin still has the previous mode, and the next order is rejected with
+    "The order's margin mode does not match the selected one".
+
+    Returns (ok, error_message).
+      - ok=True even if KuCoin is already in `desired_mode` (idempotent).
+      - ok=False with a user-facing message if KuCoin refuses (most common
+        reason: an open position on the symbol is locking the mode).
+    """
+    from backend.services.native_trading_engine import _kucoin_post_signed
+    from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+
+    mode_upper = (desired_mode or "ISOLATED").upper()
+    if mode_upper not in ("CROSS", "ISOLATED"):
+        return False, f"Invalid margin mode: {desired_mode}"
+
+    try:
+        resp = _kucoin_post_signed(
+            "/api/v2/position/changeMarginMode",
+            {"symbol": kc_symbol, "marginMode": mode_upper},
+            eng._api_key, eng._api_sec, eng._api_pass,
+            base_url=KUCOIN_FUTURES_BASE,
+        )
+    except Exception as e:
+        log.warning("[%s] changeMarginMode network error for %s: %s",
+                    user_id, kc_symbol, e)
+        # Don't block the order on a network blip — let the actual order
+        # attempt either succeed or surface the real error.
+        return True, None
+
+    code = str(resp.get("code", ""))
+    if code == "200000":
+        log.info("[%s] Synced %s margin mode to %s on KuCoin",
+                 user_id, kc_symbol, mode_upper)
+        return True, None
+
+    msg = (resp.get("msg") or "").lower()
+    # 330005 = already in this mode (older API); treat as success.
+    # Some accounts return 200000 with msg "already set" — also fine.
+    if "already" in msg or code in ("330005", "330006"):
+        return True, None
+
+    # KuCoin's typical block: "Please close all open positions first" or
+    # "The margin mode cannot be modified". Surface it clearly.
+    log.warning("[%s] changeMarginMode rejected: code=%s msg=%s",
+                user_id, code, resp.get("msg"))
+    return False, (
+        f"Could not switch {kc_symbol} to {mode_upper} margin mode on KuCoin: "
+        f"{resp.get('msg', 'rejected')}. Close any open positions on this "
+        f"symbol first, or pick the margin mode that matches your existing "
+        f"position."
+    )
+
+
+def _sync_leverage_to_kucoin(eng, kc_symbol: str, leverage: int,
+                              user_id: str) -> None:
+    """Push the user's chosen leverage to KuCoin (best-effort, idempotent).
+
+    Failures are logged but never block the order — the leverage is also
+    in the order body itself; this just keeps the per-symbol setting on
+    KuCoin in sync so other tooling sees the same number.
+    """
+    from backend.services.native_trading_engine import _kucoin_post_signed
+    from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+    try:
+        _kucoin_post_signed(
+            "/api/v2/position/changeLeverage",
+            {"symbol": kc_symbol, "leverage": str(leverage)},
+            eng._api_key, eng._api_sec, eng._api_pass,
+            base_url=KUCOIN_FUTURES_BASE,
+        )
+    except Exception as e:
+        log.warning("[%s] changeLeverage failed for %s lev=%s: %s",
+                    user_id, kc_symbol, leverage, e)
+
+
 def _ensure_live_credentials(eng, user_id: str, db: Session) -> tuple[bool, str | None]:
     """
     Make sure the futures engine has the user's KuCoin Lead Trading credentials
@@ -742,6 +825,18 @@ def futures_manual_entry(
             position_side = "LONG" if direction == "long" else "SHORT"
             client_oid    = f"atf-manual-{int(_time.time()*1000)}"
             margin_mode   = eng.get_symbol_margin(kc_symbol).upper() or "ISOLATED"
+
+            # Sync the user's chosen margin mode + leverage to KuCoin before
+            # placing the order. Without this, KuCoin remembers whatever mode
+            # the symbol was last in and rejects the order with
+            # "The order's margin mode does not match the selected one".
+            sync_ok, sync_err = _sync_margin_mode_to_kucoin(
+                eng, kc_symbol, margin_mode, user_id
+            )
+            if not sync_ok:
+                return {"error": sync_err}
+            _sync_leverage_to_kucoin(eng, kc_symbol, leverage, user_id)
+
             body = {
                 "clientOid":   client_oid,
                 "side":         side,
@@ -1159,6 +1254,16 @@ def place_futures_order(
         try:
             client_oid = f"atf-ord-{int(_t.time()*1000)}"
             margin_mode = eng.get_symbol_margin(symbol).upper() or "ISOLATED"
+
+            # Sync margin mode + leverage to KuCoin first — see comment in
+            # /manual-entry for full rationale.
+            sync_ok, sync_err = _sync_margin_mode_to_kucoin(
+                eng, symbol, margin_mode, user_id
+            )
+            if not sync_ok:
+                return {"error": sync_err}
+            _sync_leverage_to_kucoin(eng, symbol, lev, user_id)
+
             body: dict = {
                 "clientOid":   client_oid,
                 "side":         side,
@@ -1387,12 +1492,16 @@ def set_futures_leverage(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Set leverage for a symbol."""
+    """Set leverage for a symbol — updates engine state AND pushes to KuCoin."""
     from backend.services.kucoin_futures_client import normalize_futures_symbol
     symbol   = normalize_futures_symbol(req.get("symbol", "XBTUSDTM"))
     leverage = int(req.get("leverage", 10))
     eng = futures_engine_registry.for_user(user_id)
     result = eng.set_symbol_leverage(symbol, leverage)
+    # Best-effort sync to KuCoin so order placement uses the same value.
+    # Silent if creds aren't loaded yet — order path will sync on demand.
+    if _ensure_live_credentials(eng, user_id, db)[0]:
+        _sync_leverage_to_kucoin(eng, symbol, leverage, user_id)
     log_event(db, user_id, "futures.set_leverage", request, payload=result)
     return result
 
@@ -1404,12 +1513,28 @@ def set_futures_margin_mode(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Set margin mode (cross/isolated) for a symbol."""
+    """Set margin mode (cross/isolated) for a symbol — updates engine AND KuCoin.
+
+    Without the KuCoin sync, the next order would be rejected with
+    "The order's margin mode does not match the selected one".
+    """
     from backend.services.kucoin_futures_client import normalize_futures_symbol
     symbol = normalize_futures_symbol(req.get("symbol", "XBTUSDTM"))
     mode   = req.get("mode", "cross")
     eng = futures_engine_registry.for_user(user_id)
     result = eng.set_symbol_margin(symbol, mode)
+
+    # Push to KuCoin if creds available. If KuCoin refuses (e.g. open
+    # position locks the mode), surface the error so the toggle visibly
+    # reverts in the UI instead of silently going out of sync.
+    if _ensure_live_credentials(eng, user_id, db)[0]:
+        ok, err = _sync_margin_mode_to_kucoin(eng, symbol, mode, user_id)
+        if not ok:
+            result["warning"] = err
+            result["synced_with_kucoin"] = False
+        else:
+            result["synced_with_kucoin"] = True
+
     log_event(db, user_id, "futures.set_margin_mode", request, payload=result)
     return result
 
