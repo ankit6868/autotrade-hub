@@ -22,6 +22,7 @@ export default function FuturesTerminal() {
   const [marginMode, setMarginMode] = useState('isolated');
   const [account, setAccount] = useState<any>({ balance: 1000, available_balance: 1000 });
   const [lastPrice, setLastPrice] = useState(0);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
 
   const tvSymbol = `KUCOIN:${pair.replace('/', '')}`;
   const futSymbol = pair.replace('/', '').replace('USDT', 'USDTM');
@@ -111,7 +112,7 @@ export default function FuturesTerminal() {
           {/* Bottom: Positions Panel */}
           <div className="h-[240px] border-t border-white/[0.06] bg-[#0d1117] overflow-hidden flex">
             <div className="flex-1 overflow-hidden">
-              <PositionsPanel mode={mode} onRefresh={refreshAccount} />
+              <PositionsPanel mode={mode} onRefresh={refreshAccount} refreshTrigger={refreshTrigger} />
             </div>
             {/* Asset Overview embedded in positions area on large screens */}
             <div className="hidden xl:block w-[280px] border-l border-white/[0.06] overflow-y-auto">
@@ -187,7 +188,7 @@ export default function FuturesTerminal() {
                 lastPrice={lastPrice}
                 onLeverageChange={handleLeverageChange}
                 onMarginModeChange={handleMarginModeChange}
-                onOrderPlaced={refreshAccount}
+                onOrderPlaced={() => { refreshAccount(); setRefreshTrigger(n => n + 1); }}
               />
             ) : (
               <BotPanel

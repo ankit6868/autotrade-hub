@@ -5,11 +5,12 @@ import { api } from '@/lib/api';
 interface Props {
   mode: 'paper' | 'live';
   onRefresh?: () => void;
+  refreshTrigger?: number;
 }
 
 type Tab = 'positions' | 'open_orders' | 'order_history' | 'trade_history' | 'position_history' | 'assets' | 'bots';
 
-export default function PositionsPanel({ mode, onRefresh }: Props) {
+export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
   const [positions, setPositions] = useState<any[]>([]);
   const [openOrders, setOpenOrders] = useState<any[]>([]);
@@ -44,6 +45,13 @@ export default function PositionsPanel({ mode, onRefresh }: Props) {
     const t = setInterval(refreshAll, 8000);
     return () => clearInterval(t);
   }, [refreshAll]);
+
+  // Immediate refresh when parent signals an order was placed
+  useEffect(() => {
+    if (refreshTrigger && refreshTrigger > 0) {
+      refreshAll();
+    }
+  }, [refreshTrigger, refreshAll]);
 
   async function closePosition(pair: string) {
     setClosingPair(pair);

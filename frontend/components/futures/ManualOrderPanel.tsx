@@ -17,8 +17,23 @@ interface Props {
   onPriceSet?: (price: string) => void;
 }
 
-type OrderTab = 'limit' | 'market' | 'conditional';
-type AdvancedTab = 'advanced_limit' | 'trailing_stop' | 'hidden' | 'twap';
+// Unified order type — covers both basic tabs and advanced dropdown items
+type OrderType = 'limit' | 'market' | 'conditional' | 'advanced_limit' | 'trailing_stop' | 'hidden' | 'twap';
+
+const BASIC_TABS: { key: OrderType; label: string }[] = [
+  { key: 'limit', label: 'Limit' },
+  { key: 'market', label: 'Market' },
+  { key: 'conditional', label: 'Conditional' },
+];
+
+const ADVANCED_ITEMS: { key: OrderType; label: string }[] = [
+  { key: 'advanced_limit', label: 'Advanced Limit' },
+  { key: 'trailing_stop', label: 'Trailing Stop' },
+  { key: 'hidden', label: 'Hidden Order' },
+  { key: 'twap', label: 'TWAP' },
+];
+
+const ALL_TYPES = [...BASIC_TABS, ...ADVANCED_ITEMS];
 
 export default function ManualOrderPanel({
   symbol, pair, mode, leverage, marginMode, availableBalance, lastPrice,
@@ -31,41 +46,68 @@ export default function ManualOrderPanel({
       .then(d => setLeadStatus(d))
       .catch(() => setLeadStatus(null));
   }, []);
-  const [orderTab, setOrderTab] = useState<OrderTab>('limit');
+
+  const [orderType, setOrderType] = useState<OrderType>('limit');
   const [showAdvancedMenu, setShowAdvancedMenu] = useState(false);
   const [leverageModal, setLeverageModal] = useState(false);
   const [showMarginDropdown, setShowMarginDropdown] = useState(false);
 
+  // Common fields
   const [price, setPrice] = useState('');
   const [amount, setAmount] = useState('');
-  const [costMode, setCostMode] = useState(true);    // default to cost mode (USDT)
-  const [costUsdt, setCostUsdt] = useState('');       // USDT cost input
+  const [costMode, setCostMode] = useState(true);
+  const [costUsdt, setCostUsdt] = useState('');
   const [stopPrice, setStopPrice] = useState('');
+  const [tpEnabled, setTpEnabled] = useState(false);
+  const [slEnabled, setSlEnabled] = useState(false);
   const [tpPrice, setTpPrice] = useState('');
   const [slPrice, setSlPrice] = useState('');
   const [postOnly, setPostOnly] = useState(false);
-  const [hidden, setHidden] = useState(false);
   const [reduceOnly, setReduceOnly] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  const [success, setSuccess] = useState('');
   const [sliderValue, setSliderValue] = useState(0);
-  const [tpslSide, setTpslSide] = useState<'long' | 'short'>('long');
+
+  // Advanced Limit fields
+  const [timeInForce, setTimeInForce] = useState<'GTC' | 'IOC' | 'FOK'>('GTC');
+
+  // Trailing Stop fields
+  const [callbackRate, setCallbackRate] = useState('');
+  const [activationPrice, setActivationPrice] = useState('');
+
+  // TWAP fields
+  const [twapDuration, setTwapDuration] = useState('60');   // minutes
+  const [twapSlices, setTwapSlices] = useState('10');
+  const [twapPriceLimit, setTwapPriceLimit] = useState('');
 
   const marginRef = useRef<HTMLDivElement>(null);
+  const advancedRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (marginRef.current && !marginRef.current.contains(e.target as Node)) {
         setShowMarginDropdown(false);
       }
+      if (advancedRef.current && !advancedRef.current.contains(e.target as Node)) {
+        setShowAdvancedMenu(false);
+      }
     }
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const priceNum  = parseFloat(price) || 0;
-  const baseCoin  = pair.split('/')[0];
+  // Clear success message after 3s
+  useEffect(() => {
+    if (success) {
+      const t = setTimeout(() => setSuccess(''), 3000);
+      return () => clearTimeout(t);
+    }
+  }, [success]);
+
+  const baseCoin = pair.split('/')[0];
   const effectiveRef = parseFloat(price) > 0 ? parseFloat(price) : (lastPrice || 1);
+  const priceNum = parseFloat(price) || 0;
   const amountNum = costMode
     ? (parseFloat(costUsdt) || 0) / effectiveRef
     : (parseFloat(amount) || 0);
@@ -76,11 +118,22 @@ export default function ManualOrderPanel({
   const maxLongAmount = refPrice > 0 ? (availableBalance * leverage) / refPrice : 0;
   const maxShortAmount = maxLongAmount;
 
+  // Is this an advanced type shown via dropdown?
+  const isAdvancedType = ['advanced_limit', 'trailing_stop', 'hidden', 'twap'].includes(orderType);
+  const activeLabel = ALL_TYPES.find(t => t.key === orderType)?.label || 'Limit';
+
+  // Does this order type need a price field?
+  const needsPrice = orderType !== 'market' && orderType !== 'trailing_stop';
+  // Does this order type need a stop/trigger price?
+  const needsStopPrice = orderType === 'conditional' || orderType === 'trailing_stop';
+
   async function placeOrder(side: 'buy' | 'sell') {
     setSubmitting(true);
     setError('');
+    setSuccess('');
     try {
-      if (orderTab === 'market') {
+      if (orderType === 'market') {
+        // Market order — uses manual entry endpoint
         const direction = side === 'buy' ? 'long' : 'short';
         const stakePct = availableBalance > 0
           ? (costUsdt_ / availableBalance) * 100
@@ -88,42 +141,146 @@ export default function ManualOrderPanel({
         if (stakePct <= 0) { setError('Enter an amount'); setSubmitting(false); return; }
         const r = await api.futures.manualEntry(pair, direction, Math.min(stakePct, 100), leverage);
         if (r.error) setError(r.error);
-        else onOrderPlaced();
+        else {
+          setSuccess(`${direction.toUpperCase()} market order placed at ${r.entry}`);
+          onOrderPlaced();
+          resetForm();
+        }
+      } else if (orderType === 'twap') {
+        // TWAP: split into multiple smaller market orders over time
+        const slices = parseInt(twapSlices) || 10;
+        const totalCostUsdt = costUsdt_;
+        if (totalCostUsdt <= 0) { setError('Enter an amount'); setSubmitting(false); return; }
+        const direction = side === 'buy' ? 'long' : 'short';
+        const perSliceStakePct = availableBalance > 0
+          ? ((totalCostUsdt / slices) / availableBalance) * 100
+          : 1;
+        // Place first slice immediately
+        const r = await api.futures.manualEntry(pair, direction, Math.min(perSliceStakePct, 100), leverage);
+        if (r.error) setError(r.error);
+        else {
+          setSuccess(`TWAP: Slice 1/${slices} placed. Remaining slices queued.`);
+          onOrderPlaced();
+          // Queue remaining slices via interval (client-side TWAP)
+          const intervalMs = ((parseInt(twapDuration) || 60) * 60 * 1000) / slices;
+          let sliceCount = 1;
+          const interval = setInterval(async () => {
+            sliceCount++;
+            if (sliceCount > slices) { clearInterval(interval); return; }
+            try {
+              await api.futures.manualEntry(pair, direction, Math.min(perSliceStakePct, 100), leverage);
+            } catch { /* silent */ }
+          }, intervalMs);
+          resetForm();
+        }
       } else {
-        if (priceNum <= 0) { setError('Enter a price for limit orders'); setSubmitting(false); return; }
-        if (amountNum <= 0) { setError('Enter an amount'); setSubmitting(false); return; }
-        const futSymbol = symbol.replace('/', '').replace('USDT', 'USDTM');
-        const r = await api.futures.placeOrder({
+        // Limit, Conditional, Advanced Limit, Trailing Stop, Hidden
+        if (orderType !== 'trailing_stop' && priceNum <= 0) {
+          setError('Enter a valid price');
+          setSubmitting(false);
+          return;
+        }
+        if (amountNum <= 0 && orderType !== 'trailing_stop') {
+          setError('Enter an amount');
+          setSubmitting(false);
+          return;
+        }
+
+        const futSymbol = symbol.includes('USDTM') ? symbol : symbol.replace('/', '').replace('USDT', 'USDTM');
+
+        // Build order payload
+        const orderPayload: Record<string, unknown> = {
           symbol: futSymbol,
           side,
-          order_type: orderTab === 'conditional' ? 'stop' : 'limit',
           size: amountNum,
-          price: priceNum,
-          stop_price: orderTab === 'conditional' ? parseFloat(stopPrice) || undefined : undefined,
           leverage,
-          tp_price: tpPrice ? parseFloat(tpPrice) : undefined,
-          sl_price: slPrice ? parseFloat(slPrice) : undefined,
-          hidden,
-          post_only: postOnly,
           reduce_only: reduceOnly,
-        });
+        };
+
+        // TP/SL
+        if (tpEnabled && tpPrice) orderPayload.tp_price = parseFloat(tpPrice);
+        if (slEnabled && slPrice) orderPayload.sl_price = parseFloat(slPrice);
+
+        switch (orderType) {
+          case 'limit':
+            orderPayload.order_type = 'limit';
+            orderPayload.price = priceNum;
+            orderPayload.post_only = postOnly;
+            orderPayload.time_in_force = 'GTC';
+            break;
+
+          case 'conditional':
+            orderPayload.order_type = 'stop';
+            orderPayload.price = priceNum;
+            orderPayload.stop_price = parseFloat(stopPrice) || priceNum;
+            break;
+
+          case 'advanced_limit':
+            orderPayload.order_type = 'limit';
+            orderPayload.price = priceNum;
+            orderPayload.post_only = postOnly;
+            orderPayload.time_in_force = timeInForce;
+            break;
+
+          case 'trailing_stop': {
+            // Trailing stop: use conditional order with callback
+            const cbRate = parseFloat(callbackRate) || 1;
+            const actPrice = parseFloat(activationPrice) || (lastPrice || 0);
+            const trailStopPrice = side === 'buy'
+              ? actPrice * (1 + cbRate / 100)
+              : actPrice * (1 - cbRate / 100);
+            // Use manual entry stake approach for trailing stop sizing
+            const trailStakePct = availableBalance > 0
+              ? (costUsdt_ / availableBalance) * 100
+              : 5;
+            if (trailStakePct <= 0) { setError('Enter an amount'); setSubmitting(false); return; }
+            orderPayload.order_type = 'stop';
+            orderPayload.price = actPrice;
+            orderPayload.stop_price = trailStopPrice;
+            orderPayload.size = costUsdt_ / (actPrice || 1);
+            break;
+          }
+
+          case 'hidden':
+            orderPayload.order_type = 'limit';
+            orderPayload.price = priceNum;
+            orderPayload.hidden = true;
+            orderPayload.post_only = postOnly;
+            orderPayload.time_in_force = timeInForce;
+            break;
+        }
+
+        const r = await api.futures.placeOrder(orderPayload);
         if (r.error) setError(r.error);
-        else onOrderPlaced();
+        else {
+          setSuccess(`${activeLabel} ${side.toUpperCase()} order placed successfully`);
+          onOrderPlaced();
+          resetForm();
+        }
       }
-    } catch (e) {
-      setError(String(e));
+    } catch (e: unknown) {
+      setError(e instanceof Error ? e.message : String(e));
     }
     setSubmitting(false);
   }
 
+  function resetForm() {
+    setCostUsdt('');
+    setAmount('');
+    setSliderValue(0);
+    setStopPrice('');
+    setCallbackRate('');
+    setActivationPrice('');
+  }
+
   function handleSliderChange(pct: number) {
     setSliderValue(pct);
-    const ref = effectiveRef > 0 ? effectiveRef : 1;
     if (availableBalance > 0) {
       const usdtCost = availableBalance * pct / 100;
       if (costMode) {
         setCostUsdt(usdtCost.toFixed(2));
-      } else if (ref > 0) {
+      } else {
+        const ref = effectiveRef > 0 ? effectiveRef : 1;
         const btcAmount = (usdtCost * leverage) / ref;
         setAmount(btcAmount.toFixed(6));
       }
@@ -134,9 +291,16 @@ export default function ManualOrderPanel({
     if (lastPrice) setPrice(lastPrice.toString());
   }
 
+  function handleOrderTypeChange(key: OrderType) {
+    setOrderType(key);
+    setShowAdvancedMenu(false);
+    setError('');
+    setSuccess('');
+  }
+
   return (
     <div className="flex flex-col h-full overflow-hidden">
-      {/* Lead Trading / Paper Account badge — always visible */}
+      {/* Lead Trading / Paper Account badge */}
       <div className={`flex items-center justify-between px-3 py-2 text-xs font-bold border-b ${
         mode === 'paper'
           ? 'bg-indigo-500/20 border-indigo-500/30'
@@ -172,13 +336,12 @@ export default function ManualOrderPanel({
 
       {/* Cross/Isolated + Leverage row */}
       <div className="flex items-center gap-2 px-3 py-2 border-b border-white/[0.06]">
-        {/* Margin mode dropdown */}
         <div className="relative" ref={marginRef}>
           <button
             onClick={() => setShowMarginDropdown(!showMarginDropdown)}
             className="flex items-center gap-1 text-xs text-white"
           >
-            <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block" />
+            <span className={`w-2 h-2 rounded-full inline-block ${marginMode === 'cross' ? 'bg-blue-400' : 'bg-emerald-400'}`} />
             <span className="capitalize font-medium">{marginMode}</span>
             <svg className="w-3 h-3 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
           </button>
@@ -188,21 +351,19 @@ export default function ManualOrderPanel({
                 <button
                   key={m}
                   onClick={() => { onMarginModeChange(m); setShowMarginDropdown(false); }}
-                  className={`block w-full text-left px-3 py-2 text-xs capitalize ${marginMode === m ? 'text-emerald-400' : 'text-slate-300 hover:bg-white/[0.06]'}`}
+                  className={`block w-full text-left px-3 py-2 text-xs capitalize ${marginMode === m ? 'text-emerald-400 bg-white/[0.04]' : 'text-slate-300 hover:bg-white/[0.06]'}`}
                 >
-                  {m}
+                  <span className="flex items-center gap-2">
+                    <span className={`w-1.5 h-1.5 rounded-full ${m === 'cross' ? 'bg-blue-400' : 'bg-emerald-400'}`} />
+                    {m}
+                    {marginMode === m && <span className="ml-auto text-emerald-400">&#10003;</span>}
+                  </span>
                 </button>
               ))}
-              <div className="border-t border-white/[0.06] mt-1 pt-1">
-                <button className="block w-full text-left px-3 py-2 text-xs text-slate-400 hover:bg-white/[0.06]">
-                  Edit Multiple
-                </button>
-              </div>
             </div>
           )}
         </div>
 
-        {/* Leverage button */}
         <button
           onClick={() => setLeverageModal(true)}
           className="px-2 py-0.5 rounded bg-slate-700/80 text-emerald-400 text-xs font-bold hover:bg-slate-600 border border-white/[0.06]"
@@ -220,61 +381,69 @@ export default function ManualOrderPanel({
       {/* Order type tabs */}
       <div className="flex items-center px-3 py-1.5 border-b border-white/[0.06] relative">
         <div className="flex items-center gap-0.5">
-          {([
-            { key: 'limit' as OrderTab, label: 'Limit' },
-            { key: 'market' as OrderTab, label: 'Market' },
-            { key: 'conditional' as OrderTab, label: 'Conditional' },
-          ]).map(t => (
+          {BASIC_TABS.map(t => (
             <button
               key={t.key}
-              onClick={() => { setOrderTab(t.key); setShowAdvancedMenu(false); }}
-              className={`px-2 py-1 text-xs font-medium ${
-                orderTab === t.key ? 'text-white' : 'text-slate-500 hover:text-slate-300'
+              onClick={() => handleOrderTypeChange(t.key)}
+              className={`px-2 py-1 text-xs font-medium transition-colors ${
+                orderType === t.key
+                  ? 'text-white border-b-2 border-emerald-500'
+                  : 'text-slate-500 hover:text-slate-300'
               }`}
             >
               {t.label}
             </button>
           ))}
         </div>
-        {/* Dropdown arrow for advanced */}
-        <button
-          onClick={() => setShowAdvancedMenu(!showAdvancedMenu)}
-          className="ml-1 text-slate-500 hover:text-white text-xs"
-        >
-          ▾
-        </button>
+        {/* Advanced dropdown trigger */}
+        <div className="relative" ref={advancedRef}>
+          <button
+            onClick={() => setShowAdvancedMenu(!showAdvancedMenu)}
+            className={`ml-1 px-1.5 py-1 text-xs flex items-center gap-0.5 transition-colors ${
+              isAdvancedType
+                ? 'text-emerald-400 font-medium'
+                : 'text-slate-500 hover:text-white'
+            }`}
+          >
+            {isAdvancedType ? activeLabel : ''}
+            <span className="text-[10px]">&#9662;</span>
+          </button>
 
-        {showAdvancedMenu && (
-          <div className="absolute top-full left-2 z-20 mt-1 bg-[#1e222d] border border-white/[0.1] rounded-lg shadow-xl py-1 min-w-[160px]">
-            {[
-              { key: 'advanced_limit' as AdvancedTab, label: 'Advanced Limit' },
-              { key: 'conditional' as AdvancedTab, label: 'Conditional' },
-              { key: 'trailing_stop' as AdvancedTab, label: 'Trailing Stop' },
-              { key: 'hidden' as AdvancedTab, label: 'Hidden Order' },
-              { key: 'twap' as AdvancedTab, label: 'TWAP' },
-            ].map(a => (
-              <button
-                key={a.key}
-                onClick={() => { setShowAdvancedMenu(false); }}
-                className="block w-full text-left px-3 py-2 text-xs text-slate-300 hover:bg-white/[0.06]"
-              >
-                {a.label}
-              </button>
-            ))}
-          </div>
-        )}
+          {showAdvancedMenu && (
+            <div className="absolute top-full left-0 z-20 mt-1 bg-[#1e222d] border border-white/[0.1] rounded-lg shadow-xl py-1 min-w-[160px]">
+              {ADVANCED_ITEMS.map(a => (
+                <button
+                  key={a.key}
+                  onClick={() => handleOrderTypeChange(a.key)}
+                  className={`block w-full text-left px-3 py-2 text-xs transition-colors ${
+                    orderType === a.key
+                      ? 'text-emerald-400 bg-white/[0.04]'
+                      : 'text-slate-300 hover:bg-white/[0.06]'
+                  }`}
+                >
+                  <span className="flex items-center justify-between">
+                    {a.label}
+                    {orderType === a.key && <span className="text-emerald-400">&#10003;</span>}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
 
         <div className="ml-auto">
-          <button className="text-slate-500 hover:text-white text-xs">?</button>
+          <button className="text-slate-500 hover:text-white text-xs" title="Order type help">?</button>
         </div>
       </div>
 
       {/* Order form */}
       <div className="flex-1 overflow-y-auto px-3 py-2.5 space-y-3">
-        {/* Price */}
-        {orderTab !== 'market' && (
+        {/* Price field — shown for all except Market and Trailing Stop */}
+        {needsPrice && (
           <div>
-            <label className="text-[10px] text-slate-500 mb-1 block">Price</label>
+            <label className="text-[10px] text-slate-500 mb-1 block">
+              {orderType === 'conditional' ? 'Limit Price' : 'Price'}
+            </label>
             <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
               <input
                 type="number"
@@ -291,18 +460,23 @@ export default function ManualOrderPanel({
                   Last
                 </button>
                 <span className="text-[10px] text-slate-500">USDT</span>
-                <button className="text-[10px] text-slate-400 hover:text-white font-medium px-1 py-0.5 rounded bg-slate-700/50">
-                  BBO
-                </button>
+                {orderType === 'limit' && (
+                  <button
+                    onClick={fillLastPrice}
+                    className="text-[10px] text-slate-400 hover:text-white font-medium px-1 py-0.5 rounded bg-slate-700/50"
+                  >
+                    BBO
+                  </button>
+                )}
               </div>
             </div>
           </div>
         )}
 
-        {/* Stop price (conditional) */}
-        {orderTab === 'conditional' && (
+        {/* Stop / Trigger Price — shown for Conditional and Trailing Stop */}
+        {orderType === 'conditional' && (
           <div>
-            <label className="text-[10px] text-slate-500 mb-1 block">Stop Price</label>
+            <label className="text-[10px] text-slate-500 mb-1 block">Trigger Price</label>
             <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
               <input
                 type="number"
@@ -316,7 +490,154 @@ export default function ManualOrderPanel({
           </div>
         )}
 
-        {/* Amount / Cost toggle */}
+        {/* Trailing Stop specific fields */}
+        {orderType === 'trailing_stop' && (
+          <>
+            <div>
+              <label className="text-[10px] text-slate-500 mb-1 block">Activation Price</label>
+              <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
+                <input
+                  type="number"
+                  value={activationPrice}
+                  onChange={e => setActivationPrice(e.target.value)}
+                  placeholder={lastPrice ? lastPrice.toString() : '0.00'}
+                  className="flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none"
+                />
+                <div className="flex items-center gap-1.5 pr-2 shrink-0">
+                  <button
+                    onClick={() => lastPrice && setActivationPrice(lastPrice.toString())}
+                    className="text-[10px] text-emerald-400 hover:text-emerald-300 font-medium"
+                  >
+                    Last
+                  </button>
+                  <span className="text-[10px] text-slate-500">USDT</span>
+                </div>
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-500 mb-1 block">Callback Rate (%)</label>
+              <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
+                <input
+                  type="number"
+                  value={callbackRate}
+                  onChange={e => setCallbackRate(e.target.value)}
+                  placeholder="1.0"
+                  min="0.1"
+                  max="10"
+                  step="0.1"
+                  className="flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none"
+                />
+                <span className="text-[10px] text-slate-500 pr-2">%</span>
+              </div>
+              <div className="flex gap-1 mt-1.5">
+                {[0.5, 1, 2, 3, 5].map(r => (
+                  <button
+                    key={r}
+                    onClick={() => setCallbackRate(r.toString())}
+                    className={`flex-1 text-[9px] py-1 rounded border transition-colors ${
+                      callbackRate === r.toString()
+                        ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400'
+                        : 'border-white/[0.06] text-slate-500 hover:text-white hover:border-white/20'
+                    }`}
+                  >
+                    {r}%
+                  </button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Advanced Limit specific: Time in Force */}
+        {(orderType === 'advanced_limit' || orderType === 'hidden') && (
+          <div>
+            <label className="text-[10px] text-slate-500 mb-1 block">Time in Force</label>
+            <div className="flex gap-1">
+              {(['GTC', 'IOC', 'FOK'] as const).map(tif => (
+                <button
+                  key={tif}
+                  onClick={() => setTimeInForce(tif)}
+                  className={`flex-1 py-1.5 text-[10px] font-medium rounded border transition-colors ${
+                    timeInForce === tif
+                      ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400'
+                      : 'border-white/[0.06] text-slate-500 hover:text-white hover:border-white/20'
+                  }`}
+                >
+                  {tif}
+                </button>
+              ))}
+            </div>
+            <p className="text-[9px] text-slate-600 mt-1">
+              {timeInForce === 'GTC' && 'Good Till Cancel — stays until filled or cancelled'}
+              {timeInForce === 'IOC' && 'Immediate or Cancel — fills what it can, cancels rest'}
+              {timeInForce === 'FOK' && 'Fill or Kill — must fill entirely or cancel'}
+            </p>
+          </div>
+        )}
+
+        {/* TWAP specific fields */}
+        {orderType === 'twap' && (
+          <>
+            <div>
+              <label className="text-[10px] text-slate-500 mb-1 block">Duration (minutes)</label>
+              <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
+                <input
+                  type="number"
+                  value={twapDuration}
+                  onChange={e => setTwapDuration(e.target.value)}
+                  placeholder="60"
+                  className="flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none"
+                />
+                <span className="text-[10px] text-slate-500 pr-2">min</span>
+              </div>
+              <div className="flex gap-1 mt-1.5">
+                {[15, 30, 60, 120, 240].map(d => (
+                  <button
+                    key={d}
+                    onClick={() => setTwapDuration(d.toString())}
+                    className={`flex-1 text-[9px] py-1 rounded border transition-colors ${
+                      twapDuration === d.toString()
+                        ? 'border-emerald-500/50 bg-emerald-500/10 text-emerald-400'
+                        : 'border-white/[0.06] text-slate-500 hover:text-white hover:border-white/20'
+                    }`}
+                  >
+                    {d >= 60 ? `${d / 60}h` : `${d}m`}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-500 mb-1 block">Number of Slices</label>
+              <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
+                <input
+                  type="number"
+                  value={twapSlices}
+                  onChange={e => setTwapSlices(e.target.value)}
+                  placeholder="10"
+                  min="2"
+                  max="100"
+                  className="flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none"
+                />
+                <span className="text-[10px] text-slate-500 pr-2">slices</span>
+              </div>
+            </div>
+            <div>
+              <label className="text-[10px] text-slate-500 mb-1 block">Price Limit (optional)</label>
+              <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
+                <input
+                  type="number"
+                  value={twapPriceLimit}
+                  onChange={e => setTwapPriceLimit(e.target.value)}
+                  placeholder="No limit"
+                  className="flex-1 bg-transparent px-3 py-2 text-sm text-white outline-none"
+                />
+                <span className="text-[10px] text-slate-500 pr-2">USDT</span>
+              </div>
+            </div>
+          </>
+        )}
+
+        {/* Amount / Cost toggle — shown for all order types */}
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="text-[10px] text-slate-500">
@@ -351,7 +672,7 @@ export default function ManualOrderPanel({
             <span className="text-[10px] text-slate-400 pr-2 shrink-0">{costMode ? 'USDT' : baseCoin}</span>
           </div>
 
-          {/* Slider with dots */}
+          {/* Slider */}
           <div className="mt-2 px-1">
             <div className="relative py-2">
               <div className="absolute top-1/2 left-0 right-0 h-[2px] bg-slate-700 -translate-y-1/2 rounded" />
@@ -375,11 +696,11 @@ export default function ManualOrderPanel({
           </div>
         </div>
 
-        {/* Available + Info */}
+        {/* Available + Max info */}
         <div className="space-y-1 text-[11px]">
           <div className="flex justify-between">
             <span className="text-slate-500">Available</span>
-            <span className="text-white">{availableBalance.toFixed(2)} USDT <span className="text-emerald-400 cursor-pointer">⊕</span></span>
+            <span className="text-white">{availableBalance.toFixed(2)} USDT</span>
           </div>
           <div className="flex justify-between">
             <span className="text-slate-500">Max Long</span>
@@ -391,69 +712,128 @@ export default function ManualOrderPanel({
           </div>
           {costMode && amountNum > 0 && (
             <div className="flex justify-between text-[9px]">
-              <span className="text-slate-600">≈ {baseCoin} amount</span>
+              <span className="text-slate-600">&#8776; {baseCoin} amount</span>
               <span className="text-slate-400">{amountNum.toFixed(6)} {baseCoin}</span>
+            </div>
+          )}
+          {orderType === 'twap' && costUsdt_ > 0 && (
+            <div className="flex justify-between text-[9px]">
+              <span className="text-slate-600">Per slice</span>
+              <span className="text-slate-400">{(costUsdt_ / (parseInt(twapSlices) || 10)).toFixed(2)} USDT</span>
             </div>
           )}
         </div>
 
-        {/* TP/SL toggles */}
-        <div className="space-y-2">
-          <div className="flex items-center gap-4 text-[11px]">
-            <label className="flex items-center gap-1.5 cursor-pointer">
+        {/* TP/SL section — for all order types except TWAP */}
+        {orderType !== 'twap' && (
+          <div className="space-y-2 border-t border-white/[0.06] pt-2">
+            <div className="text-[10px] text-slate-500 font-medium">Take Profit / Stop Loss</div>
+            {/* TP */}
+            <div>
+              <label className="flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer mb-1">
+                <input
+                  type="checkbox"
+                  checked={tpEnabled}
+                  onChange={() => setTpEnabled(!tpEnabled)}
+                  className="accent-emerald-500 w-3 h-3 rounded"
+                />
+                Take Profit
+              </label>
+              {tpEnabled && (
+                <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
+                  <input
+                    type="number"
+                    value={tpPrice}
+                    onChange={e => setTpPrice(e.target.value)}
+                    placeholder="TP Price"
+                    className="flex-1 bg-transparent px-3 py-1.5 text-sm text-white outline-none min-w-0"
+                  />
+                  <span className="text-[10px] text-slate-500 pr-2">USDT</span>
+                </div>
+              )}
+            </div>
+            {/* SL */}
+            <div>
+              <label className="flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer mb-1">
+                <input
+                  type="checkbox"
+                  checked={slEnabled}
+                  onChange={() => setSlEnabled(!slEnabled)}
+                  className="accent-red-500 w-3 h-3 rounded"
+                />
+                Stop Loss
+              </label>
+              {slEnabled && (
+                <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
+                  <input
+                    type="number"
+                    value={slPrice}
+                    onChange={e => setSlPrice(e.target.value)}
+                    placeholder="SL Price"
+                    className="flex-1 bg-transparent px-3 py-1.5 text-sm text-white outline-none min-w-0"
+                  />
+                  <span className="text-[10px] text-slate-500 pr-2">USDT</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Options: Post Only, Reduce Only — context-dependent */}
+        <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+          {(orderType === 'limit' || orderType === 'advanced_limit' || orderType === 'hidden') && (
+            <label className="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer">
               <input
-                type="radio"
-                name="tpsl"
-                checked={tpslSide === 'long'}
-                onChange={() => setTpslSide('long')}
+                type="checkbox"
+                checked={postOnly}
+                onChange={() => setPostOnly(!postOnly)}
                 className="accent-emerald-500 w-3 h-3"
               />
-              <span className="text-slate-400">TP/SL of Long</span>
+              Post Only
             </label>
-            <label className="flex items-center gap-1.5 cursor-pointer">
-              <input
-                type="radio"
-                name="tpsl"
-                checked={tpslSide === 'short'}
-                onChange={() => setTpslSide('short')}
-                className="accent-red-500 w-3 h-3"
-              />
-              <span className="text-slate-400">TP/SL of Short</span>
-            </label>
-          </div>
+          )}
+          <label className="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={reduceOnly}
+              onChange={() => setReduceOnly(!reduceOnly)}
+              className="accent-emerald-500 w-3 h-3"
+            />
+            Reduce Only
+          </label>
         </div>
 
-        {/* Reduce Only */}
-        <label className="flex items-center gap-2 text-[11px] text-slate-400 cursor-pointer">
-          <input
-            type="radio"
-            checked={reduceOnly}
-            onChange={() => setReduceOnly(!reduceOnly)}
-            className="accent-emerald-500 w-3 h-3"
-          />
-          Reduce Only
-        </label>
-
-        {/* Error */}
-        {error && <p className="text-red-400 text-xs">{error}</p>}
+        {/* Success / Error messages */}
+        {success && (
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-emerald-500/10 border border-emerald-500/20">
+            <span className="text-emerald-400 text-xs">&#10003;</span>
+            <p className="text-emerald-400 text-xs flex-1">{success}</p>
+          </div>
+        )}
+        {error && (
+          <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-red-500/10 border border-red-500/20">
+            <span className="text-red-400 text-xs">&#10007;</span>
+            <p className="text-red-400 text-xs flex-1">{error}</p>
+          </div>
+        )}
       </div>
 
       {/* Buy/Long + Sell/Short buttons */}
-      <div className="px-3 py-2 space-y-2">
+      <div className="px-3 py-2 space-y-2 border-t border-white/[0.06]">
         <div className="grid grid-cols-2 gap-2">
           <button
             disabled={submitting}
             onClick={() => placeOrder('buy')}
-            className="py-2.5 rounded-lg bg-emerald-500 text-white text-sm font-bold hover:bg-emerald-400 disabled:opacity-50 transition-colors"
+            className="py-2.5 rounded-lg bg-emerald-500 text-white text-sm font-bold hover:bg-emerald-400 disabled:opacity-50 transition-colors active:scale-[0.98]"
           >
-            Buy/Long
+            {submitting ? '...' : 'Buy/Long'}
           </button>
           <button
             disabled={submitting}
             onClick={() => placeOrder('sell')}
-            className="py-2.5 rounded-lg bg-red-500 text-white text-sm font-bold hover:bg-red-400 disabled:opacity-50 transition-colors"
+            className="py-2.5 rounded-lg bg-red-500 text-white text-sm font-bold hover:bg-red-400 disabled:opacity-50 transition-colors active:scale-[0.98]"
           >
-            Sell/Short
+            {submitting ? '...' : 'Sell/Short'}
           </button>
         </div>
 
@@ -461,8 +841,8 @@ export default function ManualOrderPanel({
         <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-500">
           <div>Margin {marginCost > 0 ? marginCost.toFixed(2) : '0.00'} USDT</div>
           <div className="text-right">Margin {marginCost > 0 ? marginCost.toFixed(2) : '0.00'} USDT</div>
-          <div>Est. Liq. Price —</div>
-          <div className="text-right">Est. Liq. Price —</div>
+          <div>Cost {costUsdt_ > 0 ? costUsdt_.toFixed(2) : '0.00'} USDT</div>
+          <div className="text-right">Cost {costUsdt_ > 0 ? costUsdt_.toFixed(2) : '0.00'} USDT</div>
         </div>
       </div>
 
