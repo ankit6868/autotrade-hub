@@ -107,6 +107,19 @@ export default function ManualOrderPanel({
 
   const baseCoin = pair.split('/')[0];
   const effectiveRef = parseFloat(price) > 0 ? parseFloat(price) : (lastPrice || 1);
+
+  // Per-symbol contract multiplier (BTC-per-lot / coin-per-lot) on KuCoin
+  // Futures. Mirrors backend's _LOT_SIZE_BY_SYMBOL — keep these in sync.
+  // Used to show the user the minimum order size at their chosen leverage,
+  // so they don't get a surprise rejection from the backend.
+  const LOT_SIZE_BY_COIN: Record<string, number> = {
+    BTC: 0.001, ETH: 0.01, SOL: 0.1, XRP: 10, DOGE: 1000, ADA: 10,
+    AVAX: 0.1, BNB: 0.01, LTC: 0.1, LINK: 1, MATIC: 10, DOT: 1,
+    TRX: 100, ATOM: 1, OP: 1, ARB: 1,
+  };
+  const lotSize = LOT_SIZE_BY_COIN[baseCoin] ?? 0.001;
+  const minNotional = lotSize * effectiveRef;
+  const minCostUsdt = minNotional / Math.max(leverage, 1);
   const priceNum = parseFloat(price) || 0;
   const amountNum = costMode
     ? (parseFloat(costUsdt) || 0) / effectiveRef
@@ -142,7 +155,11 @@ export default function ManualOrderPanel({
         const r = await api.futures.manualEntry(pair, direction, Math.min(stakePct, 100), leverage, mode);
         if (r.error) setError(r.error);
         else {
-          setSuccess(`${direction.toUpperCase()} market order placed at ${r.entry}`);
+          // Backend returns real margin/notional after lot-size rounding so
+          // the user sees what KuCoin actually locked (not their typed cost,
+          // which can differ when below the symbol's minimum lot size).
+          const marginStr = r.margin != null ? ` · margin ${Number(r.margin).toFixed(2)} USDT` : '';
+          setSuccess(`${direction.toUpperCase()} market order placed at ${r.entry}${marginStr}`);
           onOrderPlaced();
           resetForm();
         }
@@ -714,6 +731,21 @@ export default function ManualOrderPanel({
             <span className="text-slate-500">Max Short</span>
             <span className="text-slate-300">{maxShortAmount.toFixed(4)} {baseCoin}</span>
           </div>
+          {/* Lot-size floor at current leverage. KuCoin's minimum order is
+              1 contract, so anything below this would either be rejected
+              (live) or silently bumped up to a much larger position. */}
+          <div className="flex justify-between">
+            <span className="text-slate-500">Min Cost (1 lot)</span>
+            <span className={`tabular-nums ${costUsdt_ > 0 && costUsdt_ < minCostUsdt ? 'text-amber-400' : 'text-slate-300'}`}>
+              {minCostUsdt.toFixed(2)} USDT
+            </span>
+          </div>
+          {costUsdt_ > 0 && costUsdt_ < minCostUsdt && (
+            <div className="text-[10px] text-amber-400 pt-0.5">
+              ⚠ Below minimum for {baseCoin} at {leverage}x. Order will be rejected.
+              Try Cost ≥ {minCostUsdt.toFixed(2)} USDT or higher leverage.
+            </div>
+          )}
           {costMode && amountNum > 0 && (
             <div className="flex justify-between text-[9px]">
               <span className="text-slate-600">&#8776; {baseCoin} amount</span>

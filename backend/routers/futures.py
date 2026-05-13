@@ -33,6 +33,90 @@ _cache: dict[str, tuple[float, any]] = {}
 CACHE_TTL = 1.5  # seconds
 
 
+# ── KuCoin Futures lot-size table ────────────────────────────────────────────
+# KuCoin contracts have a fixed multiplier — the amount of underlying per
+# contract. Smallest order is 1 contract, so 1 contract's *notional* sets the
+# minimum order size at a given price/leverage.
+# Values cross-checked against KuCoin API /api/v1/contracts/active. Add more
+# here if users start trading new pairs; unknown symbols fall back to 0.001.
+_LOT_SIZE_BY_SYMBOL: dict[str, float] = {
+    "XBTUSDTM":  0.001,
+    "ETHUSDTM":  0.01,
+    "SOLUSDTM":  0.1,
+    "XRPUSDTM":  10.0,
+    "DOGEUSDTM": 1000.0,
+    "ADAUSDTM":  10.0,
+    "AVAXUSDTM": 0.1,
+    "BNBUSDTM":  0.01,
+    "LTCUSDTM":  0.1,
+    "LINKUSDTM": 1.0,
+    "MATICUSDTM": 10.0,
+    "DOTUSDTM":  1.0,
+    "TRXUSDTM":  100.0,
+    "ATOMUSDTM": 1.0,
+    "OPUSDTM":   1.0,
+    "ARBUSDTM":  1.0,
+}
+
+
+def _futures_lot_size(kc_symbol: str) -> float:
+    """Return the contract multiplier (underlying-per-lot) for a KuCoin futures
+    symbol. Falls back to 0.001 if unknown — safe-ish default but the caller
+    should still surface KuCoin's rejection if the guess is wrong."""
+    return _LOT_SIZE_BY_SYMBOL.get(kc_symbol.upper(), 0.001)
+
+
+def _compute_live_sizing(cost_usdt: float, leverage: int, price: float,
+                          kc_symbol: str) -> tuple[int | None, float, float, str | None]:
+    """
+    Convert a user-typed `cost_usdt` (USDT they want to commit as margin) into
+    an exact KuCoin contract count, plus the *real* margin and notional that
+    will actually be locked.
+
+    Returns: (contracts, real_margin_usdt, real_notional_usdt, error_message)
+
+      contracts          — integer lot count to send to KuCoin (None on error).
+      real_margin_usdt   — what KuCoin will actually lock from your wallet.
+      real_notional_usdt — position value at entry (margin * leverage).
+      error_message      — non-empty when the order would be rejected; the
+                            caller should return this to the frontend BEFORE
+                            mutating engine state so we don't leave phantoms.
+
+    Why this exists: the old code did `max(1, int(notional / price * 1000))`
+    which silently rounded a $1 BTC order at 1x up to 1 contract (0.001 BTC ≈
+    $79). Users got 80× the exposure they asked for. Now we compute the
+    minimum cost for 1 contract at the chosen leverage and reject below it.
+    """
+    if leverage <= 0:
+        return None, 0.0, 0.0, "Leverage must be ≥ 1."
+    if price <= 0:
+        return None, 0.0, 0.0, "Could not fetch a valid price for this symbol."
+    if cost_usdt <= 0:
+        return None, 0.0, 0.0, "Enter a cost greater than 0."
+
+    lot = _futures_lot_size(kc_symbol)
+    # Margin required for 1 contract at this leverage:
+    #   notional_per_lot = lot * price
+    #   margin_per_lot   = notional_per_lot / leverage
+    min_margin = (lot * price) / leverage
+    if cost_usdt < min_margin:
+        return None, 0.0, 0.0, (
+            f"Minimum cost for {kc_symbol} at {leverage}x leverage is "
+            f"{min_margin:.2f} USDT (1 contract = {lot} {kc_symbol[:-5]} ≈ "
+            f"{lot * price:.2f} USDT notional). Increase the Cost or leverage."
+        )
+
+    # User can afford ≥1 contract — pick the largest lot count whose margin
+    # fits within their cost. round() would over-fill; floor is the right
+    # consumer-friendly choice (charges no more than asked).
+    notional_target = cost_usdt * leverage
+    contracts = int(notional_target / (lot * price))
+    contracts = max(1, contracts)  # safety; min_margin guard above guarantees ≥1
+    real_notional = contracts * lot * price
+    real_margin = real_notional / leverage
+    return contracts, round(real_margin, 4), round(real_notional, 4), None
+
+
 def _ensure_live_credentials(eng, user_id: str, db: Session) -> tuple[bool, str | None]:
     """
     Make sure the futures engine has the user's KuCoin Lead Trading credentials
@@ -610,7 +694,13 @@ def futures_manual_entry(
     except Exception as e:
         return {"error": f"Price fetch failed: {e}"}
 
-    stake = balance * (stake_pct / 100)
+    # User's *intended* margin in USDT. Frontend computes stake_pct from the
+    # user's cost-USDT input, so multiply back to get the raw number.
+    user_cost = balance * (stake_pct / 100)
+    # `stake` is what we eventually store on the position. For live mode it
+    # gets overwritten with the REAL margin KuCoin will lock (after lot-size
+    # rounding); for paper mode it stays equal to user_cost.
+    stake = user_cost
 
     if direction == "long":
         sl_price = round(entry_price * (1 - sl_pct), 6)
@@ -618,14 +708,6 @@ def futures_manual_entry(
     else:
         sl_price = round(entry_price * (1 + sl_pct), 6)
         tp_price = round(entry_price * (1 - tp_pct / 100), 6)
-
-    now = datetime.now(_tz.utc)
-    pos = FuturesPosition(
-        pair=pair, direction=direction,
-        entry=entry_price, sl=sl_price, tp=tp_price,
-        size=stake, leverage=leverage, opened_at=now,
-    )
-    pos._mode = mode  # tag position with its mode for filtering
 
     with eng._lock:
         existing_pairs = [p.pair for p in eng.positions.values()
@@ -638,17 +720,26 @@ def futures_manual_entry(
     # rejects (no creds, balance too low, bad symbol, etc.) we return early
     # without leaving a phantom position in the engine.
     exchange_order_id = None
+    real_notional = real_margin = None
     if mode == "live":
         ok, err = _ensure_live_credentials(eng, user_id, db)
         if not ok:
             return {"error": err}
+        kc_symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+
+        # Lot-size-aware sizing. Bails out with a user-facing error BEFORE we
+        # touch the exchange when the requested cost is below the symbol's
+        # minimum order at this leverage.
+        contracts, real_margin, real_notional, sz_err = _compute_live_sizing(
+            cost_usdt=user_cost, leverage=leverage,
+            price=entry_price, kc_symbol=kc_symbol,
+        )
+        if sz_err:
+            return {"error": sz_err}
+
         try:
-            kc_symbol     = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
             side          = "buy" if direction == "long" else "sell"
             position_side = "LONG" if direction == "long" else "SHORT"
-            # KuCoin futures lot count: 1 lot = 0.001 BTC for XBTUSDTM
-            contract_size = stake * leverage
-            contracts     = max(1, int(contract_size / entry_price * 1000))
             client_oid    = f"atf-manual-{int(_time.time()*1000)}"
             margin_mode   = eng.get_symbol_margin(kc_symbol).upper() or "ISOLATED"
             body = {
@@ -671,11 +762,26 @@ def futures_manual_entry(
                 log.warning("[%s] Lead Trading manual entry rejected: %s", user_id, resp)
                 return {"error": f"KuCoin Lead Trading rejected the order: {msg}"}
             exchange_order_id = resp.get("data", {}).get("orderId")
-            log.info("[%s] Lead Trading manual ENTRY ok: order_id=%s body=%s",
-                     user_id, exchange_order_id, body)
+            log.info("[%s] Lead Trading manual ENTRY ok: order_id=%s cost=%.2f "
+                     "real_margin=%.2f notional=%.2f body=%s",
+                     user_id, exchange_order_id, user_cost, real_margin,
+                     real_notional, body)
         except Exception as e:
             log.exception("[%s] Lead Trading manual entry failed", user_id)
             return {"error": f"Lead Trading order failed: {e}"}
+        # Use the REAL margin (what KuCoin actually locked) as the position
+        # size — this is what shows in Positions table, History P&L, etc.
+        # If we kept user_cost the app would show $1 while KuCoin shows $79.
+        stake = real_margin
+
+    now = datetime.now(_tz.utc)
+    pos = FuturesPosition(
+        pair=pair, direction=direction,
+        entry=entry_price, sl=sl_price, tp=tp_price,
+        size=stake, leverage=leverage, opened_at=now,
+    )
+    pos._mode = mode  # tag position with its mode for filtering
+    if exchange_order_id:
         # Stash the exchange order id on the position so /force-close can
         # reconcile with KuCoin even if the engine restarts.
         pos.exchange_order_id = exchange_order_id
@@ -695,6 +801,7 @@ def futures_manual_entry(
     log_event(db, user_id, "futures.manual_entry", request, payload={
         "pair": pair, "direction": direction, "entry": entry_price,
         "leverage": leverage, "mode": mode, "exchange_order_id": exchange_order_id,
+        "margin": stake, "notional": real_notional,
     })
     return {
         "entered": True,
@@ -707,6 +814,8 @@ def futures_manual_entry(
         "leverage": leverage,
         "mode": mode,
         "exchange_order_id": exchange_order_id,
+        "margin": round(stake, 4),                   # what KuCoin actually locked
+        "notional": real_notional,                    # position value at entry
     }
 
 
@@ -1001,15 +1110,15 @@ def place_futures_order(
     mode = req_mode if req_mode in ("paper", "live") else (eng._mode or "paper")
 
     # ── Recalculate size from cost_usdt when provided ────────────────────
-    # The frontend sends cost_usdt (the USDT amount the user typed) plus
-    # amountNum (= cost_usdt / price, i.e. fractional BTC) as `size`.
-    # For live KuCoin: we need an integer lot count.
-    # For paper mode: we need the USDT stake (same as manual-entry).
+    # The frontend sends cost_usdt (the USDT margin the user typed). For
+    # live KuCoin we need an integer lot count and the *real* margin that
+    # KuCoin will lock (1 lot is the minimum, so $1 BTC at 1x rounds up to
+    # ~$79 — we must catch this and refuse with a clear error).
+    real_margin = None
+    real_notional = None
     if cost_usdt > 0:
-        # Fetch a reference price for lot-size conversion
         ref_price = price or stop_price
         if ref_price is None:
-            # Best-effort: grab ticker price
             try:
                 from backend.services.native_trading_engine import _kucoin_get
                 sym_p = symbol.replace("USDTM", "-USDT").replace("XBTUSDTM", "BTC-USDT")
@@ -1020,15 +1129,19 @@ def place_futures_order(
                 pass
 
         if mode == "live":
-            # KuCoin lot count: same formula as manual-entry
-            if ref_price and ref_price > 0:
-                notional = cost_usdt * lev
-                size = max(1, int(notional / ref_price * 1000))
-            else:
-                size = max(1, int(cost_usdt * lev))   # fallback
+            contracts, real_margin, real_notional, sz_err = _compute_live_sizing(
+                cost_usdt=cost_usdt, leverage=lev,
+                price=float(ref_price or 0), kc_symbol=symbol,
+            )
+            if sz_err:
+                return {"error": sz_err}
+            size = contracts
         else:
-            # Paper mode: store USDT stake (same unit as manual-entry)
+            # Paper mode: store USDT margin as the size unit (consistent with
+            # manual-entry — Positions row shows the margin column).
             size = cost_usdt
+            real_margin = cost_usdt
+            real_notional = cost_usdt * lev
 
     # Determine position side
     if not position_side:
@@ -1118,6 +1231,10 @@ def place_futures_order(
     db.refresh(order_rec)
     result["db_id"] = order_rec.id
     result["exchange_order_id"] = exchange_order_id
+    if real_margin is not None:
+        result["margin"] = real_margin
+    if real_notional is not None:
+        result["notional"] = real_notional
 
     log_event(db, user_id, "futures.place_order", request, payload=result)
     return result
