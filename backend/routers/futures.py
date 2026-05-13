@@ -200,6 +200,63 @@ def _sync_leverage_to_kucoin(eng, kc_symbol: str, leverage: int,
                     user_id, kc_symbol, leverage, e)
 
 
+def _fetch_kucoin_symbol_settings(eng, kc_symbol: str,
+                                    user_id: str) -> tuple[int | None, str | None]:
+    """
+    Read KuCoin's current per-symbol leverage and margin mode.
+
+    Why: KuCoin's Cross mode keeps one shared leverage per symbol that
+    doesn't always match what we send in the order body. The app's UI
+    needs to show that REAL value (e.g. "Cross 3.00x"), not the requested
+    one, so the user isn't surprised when their $1 margin actually leverages
+    a $79 position.
+
+    Returns (leverage:int | None, margin_mode:"CROSS"/"ISOLATED" | None).
+    Either may be None if KuCoin doesn't respond or has no record for the
+    symbol — the caller falls back to engine state in that case.
+    """
+    from backend.services.native_trading_engine import _kucoin_get_signed
+    from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+
+    try:
+        resp = _kucoin_get_signed(
+            "/api/v1/position",
+            eng._api_key, eng._api_sec, eng._api_pass,
+            params={"symbol": kc_symbol},
+            base_url=KUCOIN_FUTURES_BASE,
+        )
+    except Exception as e:
+        log.warning("[%s] fetch position settings failed for %s: %s",
+                    user_id, kc_symbol, e)
+        return None, None
+
+    if str(resp.get("code")) != "200000":
+        return None, None
+
+    data = resp.get("data") or {}
+    # `realLeverage` is the live effective leverage; `leverage` is the per-symbol
+    # configured value. Prefer realLeverage when a position is open (matches
+    # what KuCoin's UI shows), fall back to the configured leverage otherwise.
+    real_lev = data.get("realLeverage")
+    cfg_lev  = data.get("leverage")
+    try:
+        lev_val = float(real_lev) if real_lev not in (None, 0, "0") else float(cfg_lev or 0)
+        lev_int = int(round(lev_val)) if lev_val else None
+    except (TypeError, ValueError):
+        lev_int = None
+
+    # marginMode field in /api/v1/position payload is one of "ISOLATED"/"CROSS".
+    # Older API returned crossMode boolean instead; handle both.
+    mode_raw = (data.get("marginMode") or "").upper()
+    if not mode_raw:
+        cross_flag = data.get("crossMode")
+        if cross_flag is True:
+            mode_raw = "CROSS"
+        elif cross_flag is False:
+            mode_raw = "ISOLATED"
+    return lev_int, (mode_raw or None)
+
+
 def _ensure_live_credentials(eng, user_id: str, db: Session) -> tuple[bool, str | None]:
     """
     Make sure the futures engine has the user's KuCoin Lead Trading credentials
@@ -893,6 +950,16 @@ def futures_manual_entry(
                 return {"error": sync_err}
             _sync_leverage_to_kucoin(eng, kc_symbol, leverage, user_id)
 
+            # Read back KuCoin's REAL leverage/margin-mode (Cross often keeps
+            # its own per-symbol leverage that overrides our request). Use
+            # those values for the order body, response, and DB row so the
+            # app and KuCoin always agree on what leverage is in effect.
+            kc_lev, kc_mode = _fetch_kucoin_symbol_settings(eng, kc_symbol, user_id)
+            if kc_lev:
+                leverage = kc_lev
+            if kc_mode in ("CROSS", "ISOLATED"):
+                margin_mode = kc_mode
+
             body = {
                 "clientOid":   client_oid,
                 "side":         side,
@@ -1376,6 +1443,14 @@ def place_futures_order(
                 return {"error": sync_err}
             _sync_leverage_to_kucoin(eng, symbol, lev, user_id)
 
+            # Read back KuCoin's REAL leverage/margin-mode so the DB row +
+            # success response reflect what KuCoin will actually apply.
+            kc_lev, kc_mode = _fetch_kucoin_symbol_settings(eng, symbol, user_id)
+            if kc_lev:
+                lev = kc_lev
+            if kc_mode in ("CROSS", "ISOLATED"):
+                margin_mode = kc_mode
+
             body: dict = {
                 "clientOid":   client_oid,
                 "side":         side,
@@ -1694,16 +1769,49 @@ def set_futures_margin_mode(
 @router.get("/leverage/{symbol}")
 def get_futures_leverage(
     symbol: str,
+    db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Get current leverage for a symbol."""
+    """Get current leverage + margin mode for a symbol.
+
+    For users with live KuCoin creds, returns KuCoin's REAL values (so the
+    leverage selector in the UI reflects what's actually on the exchange,
+    not just the engine's last local setting). Falls back to engine memory
+    when creds aren't loaded.
+    """
     from backend.services.kucoin_futures_client import normalize_futures_symbol
     symbol = normalize_futures_symbol(symbol)
     eng = futures_engine_registry.for_user(user_id)
+
+    leverage    = eng.get_symbol_leverage(symbol)
+    margin_mode = eng.get_symbol_margin(symbol)
+    source      = "engine"
+
+    # Live mode: prefer KuCoin's reality. This is also what we'll pre-select
+    # in the leverage modal on page load, so it matches whatever the user
+    # set in KuCoin's own trading UI before opening AutoTrade.
+    if _ensure_live_credentials(eng, user_id, db)[0]:
+        kc_lev, kc_mode = _fetch_kucoin_symbol_settings(eng, symbol, user_id)
+        if kc_lev:
+            leverage = kc_lev
+            # Mirror into engine so subsequent orders use the same value
+            try:
+                eng.set_symbol_leverage(symbol, kc_lev)
+            except Exception:
+                pass
+            source = "kucoin"
+        if kc_mode in ("CROSS", "ISOLATED"):
+            margin_mode = kc_mode.lower()
+            try:
+                eng.set_symbol_margin(symbol, margin_mode)
+            except Exception:
+                pass
+
     return {
-        "symbol": symbol,
-        "leverage": eng.get_symbol_leverage(symbol),
-        "margin_mode": eng.get_symbol_margin(symbol),
+        "symbol":      symbol,
+        "leverage":    leverage,
+        "margin_mode": margin_mode,
+        "source":      source,    # "kucoin" if from exchange, "engine" otherwise
     }
 
 

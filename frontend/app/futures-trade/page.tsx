@@ -63,12 +63,32 @@ export default function FuturesTerminal() {
 
   async function handleLeverageChange(lev: number) {
     setLeverage(lev);
-    try { await api.futures.setLeverage({ symbol: futSymbol, leverage: lev }); } catch { /* */ }
+    try {
+      await api.futures.setLeverage({ symbol: futSymbol, leverage: lev });
+    } catch { /* */ }
+    // Re-read from KuCoin — Cross mode may keep its own per-symbol leverage
+    // that overrides our request, and the user needs to see the real value.
+    try {
+      const back = await api.futures.getLeverage(futSymbol);
+      if (back.leverage && back.leverage !== lev) {
+        setLeverage(back.leverage);
+      }
+    } catch { /* */ }
   }
 
   async function handleMarginModeChange(m: string) {
     setMarginMode(m);
-    try { await api.futures.setMarginMode({ symbol: futSymbol, mode: m }); } catch { /* */ }
+    try {
+      await api.futures.setMarginMode({ symbol: futSymbol, mode: m });
+    } catch { /* */ }
+    // Re-read after toggle in case KuCoin rejected (e.g. open position
+    // locks the mode) — the UI should snap back to the real mode.
+    try {
+      const back = await api.futures.getLeverage(futSymbol);
+      if (back.margin_mode && back.margin_mode !== m) {
+        setMarginMode(back.margin_mode);
+      }
+    } catch { /* */ }
   }
 
   function handlePriceClick(price: number) {
@@ -188,7 +208,14 @@ export default function FuturesTerminal() {
                 lastPrice={lastPrice}
                 onLeverageChange={handleLeverageChange}
                 onMarginModeChange={handleMarginModeChange}
-                onOrderPlaced={() => { refreshAccount(); setRefreshTrigger(n => n + 1); }}
+                onOrderPlaced={() => {
+                  refreshAccount();
+                  // Re-fetch leverage/margin-mode from KuCoin — Cross orders
+                  // can land at a different leverage than the UI selector
+                  // showed when the user clicked Buy/Sell.
+                  fetchLeverage();
+                  setRefreshTrigger(n => n + 1);
+                }}
               />
             ) : (
               <BotPanel
