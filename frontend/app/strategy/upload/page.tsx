@@ -34,11 +34,11 @@ export default function StrategyUploadPage() {
 
         setLoadingStep('Reading document...');
         await new Promise((r) => setTimeout(r, 300));
-        setLoadingStep('Sending to AI (Nemotron Super 120B)...');
+        setLoadingStep('Sending to AI for parsing...');
 
         const data = await api.strategy.upload(formData);
         if (data.error) {
-          setError(String(data.error));
+          setError(formatError(data.error));
         } else {
           setLoadingStep('Validating...');
           setResult(data);
@@ -48,32 +48,88 @@ export default function StrategyUploadPage() {
         formData.append('text', text);
         formData.append('name', name);
 
-        setLoadingStep('Sending to AI (Nemotron Super 120B)...');
+        setLoadingStep('Sending to AI for parsing...');
         const data = await api.strategy.upload(formData);
         if (data.error) {
-          // Show the full error message — it includes which models were tried
-          setError(String(data.error));
+          setError(formatError(data.error));
         } else {
           setLoadingStep('Validating...');
           setResult(data);
         }
       }
     } catch (e: unknown) {
-      setError(String(e));
+      const msg = String(e);
+      if (msg.includes('ROUTER_EXTERNAL_TARGET_ERROR') || msg.includes('fetch failed') || msg.includes('ECONNREFUSED')) {
+        setError(
+          'Cannot reach the backend server. This usually means:\n' +
+          '1. The backend is not deployed or not running\n' +
+          '2. The BACKEND_URL environment variable is not set in Vercel\n' +
+          '3. The backend URL is not publicly accessible\n\n' +
+          'You can use "Save Without AI" below to save your strategy description directly.'
+        );
+      } else {
+        setError(formatError(msg));
+      }
     }
     setLoading(false);
     setLoadingStep('');
+  }
+
+  // Save the strategy text directly without AI parsing
+  async function handleSaveWithoutAI() {
+    setSaving(true);
+    setError('');
+    try {
+      const strategyText = mode === 'upload' && file
+        ? await file.text()
+        : text;
+
+      if (!strategyText.trim()) {
+        setError('No strategy text to save');
+        setSaving(false);
+        return;
+      }
+
+      const formData = new FormData();
+      if (mode === 'upload' && file) {
+        formData.append('file', file);
+      } else {
+        formData.append('text', strategyText);
+      }
+      formData.append('name', name);
+      formData.append('skip_ai', 'true');
+
+      const data = await api.strategy.upload(formData);
+      if (data.error) {
+        // If backend is unreachable, show a clear message
+        if (String(data.error).includes('ROUTER_EXTERNAL_TARGET_ERROR') || String(data.error).includes('fetch failed')) {
+          setError('Backend server is unreachable. Please check your deployment configuration.');
+        } else {
+          setError(formatError(data.error));
+        }
+      } else {
+        setResult(data);
+        setSaved(true);
+      }
+    } catch (e: unknown) {
+      const msg = String(e);
+      if (msg.includes('ROUTER_EXTERNAL_TARGET_ERROR') || msg.includes('fetch failed') || msg.includes('ECONNREFUSED')) {
+        setError('Backend server is unreachable. Please check your deployment configuration (BACKEND_URL in Vercel).');
+      } else {
+        setError(formatError(msg));
+      }
+    }
+    setSaving(false);
   }
 
   async function handleSave() {
     if (!result?.id) return;
     setSaving(true);
     try {
-      // Update the strategy name if user changed it
       await api.strategy.update(result.id, { name });
       setSaved(true);
     } catch {
-      // Strategy already saved from parsing — just mark as saved
+      // Strategy already saved from parsing
       setSaved(true);
     }
     setSaving(false);
@@ -83,6 +139,19 @@ export default function StrategyUploadPage() {
     e.preventDefault();
     const dropped = e.dataTransfer.files[0];
     if (dropped) setFile(dropped);
+  }
+
+  function formatError(msg: string): string {
+    if (msg.includes('ROUTER_EXTERNAL_TARGET_ERROR')) {
+      return 'Cannot reach the backend server. Check that your backend is deployed and BACKEND_URL is set correctly in Vercel.';
+    }
+    if (msg.includes('OpenRouter key not configured')) {
+      return 'OpenRouter API key not configured. Go to Setup page to add your free OpenRouter API key for AI strategy parsing.';
+    }
+    if (msg.includes('decrypted')) {
+      return 'Your OpenRouter API key needs to be re-entered. Go to Setup and save your key again.';
+    }
+    return msg;
   }
 
   return (
@@ -163,15 +232,24 @@ export default function StrategyUploadPage() {
         </div>
       )}
 
-      {/* Parse button */}
+      {/* Action buttons */}
       {mode !== 'template' && (
-        <button
-          onClick={handleParse}
-          disabled={loading || (mode === 'upload' && !file) || (mode === 'type' && !text)}
-          className="btn-primary mb-8"
-        >
-          {loading ? 'Parsing...' : 'Parse Strategy with AI'}
-        </button>
+        <div className="flex flex-wrap gap-3 mb-8">
+          <button
+            onClick={handleParse}
+            disabled={loading || saving || (mode === 'upload' && !file) || (mode === 'type' && !text)}
+            className="btn-primary"
+          >
+            {loading ? 'Parsing...' : 'Parse Strategy with AI'}
+          </button>
+          <button
+            onClick={handleSaveWithoutAI}
+            disabled={loading || saving || (mode === 'upload' && !file) || (mode === 'type' && !text)}
+            className="px-6 py-2.5 rounded-xl font-semibold text-sm border border-white/10 text-slate-300 hover:bg-white/5 transition-all disabled:opacity-50"
+          >
+            {saving ? 'Saving...' : 'Save Without AI'}
+          </button>
+        </div>
       )}
 
       {/* Loading */}
@@ -185,7 +263,27 @@ export default function StrategyUploadPage() {
       {/* Error */}
       {error && (
         <div className="card mb-8 border-red-500/30 bg-red-500/10">
-          <p className="text-red-400">{error}</p>
+          <p className="text-red-400 whitespace-pre-line">{error}</p>
+          {error.includes('backend') && (
+            <div className="mt-3 pt-3 border-t border-red-500/20">
+              <p className="text-slate-400 text-sm mb-2">Quick fixes:</p>
+              <ul className="text-sm text-slate-500 list-disc list-inside space-y-1">
+                <li>Check that your backend is deployed and accessible</li>
+                <li>In Vercel project settings, add <code className="text-slate-300 bg-slate-800 px-1 rounded">BACKEND_URL</code> pointing to your backend</li>
+                <li>Use &quot;Save Without AI&quot; to save the strategy description directly</li>
+              </ul>
+            </div>
+          )}
+          {error.includes('OpenRouter') && (
+            <div className="mt-3 pt-3 border-t border-red-500/20">
+              <button
+                onClick={() => router.push('/setup')}
+                className="text-sm text-emerald-400 hover:text-emerald-300 underline"
+              >
+                Go to Setup to configure OpenRouter API key
+              </button>
+            </div>
+          )}
         </div>
       )}
 
@@ -193,19 +291,29 @@ export default function StrategyUploadPage() {
       {result && (
         <div className="card">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold">Generated Strategy</h2>
-            <span className="text-xs text-slate-500">Model: {String(result.model_used)}</span>
+            <h2 className="text-xl font-semibold">
+              {result.model_used ? 'Generated Strategy' : 'Strategy Saved'}
+            </h2>
+            {result.model_used && (
+              <span className="text-xs text-slate-500">Model: {String(result.model_used)}</span>
+            )}
           </div>
 
           {/* Save success banner */}
           {saved && (
             <div className="mb-4 p-3 rounded-xl bg-emerald-500/15 border border-emerald-500/40 text-emerald-300 text-sm flex items-center gap-2">
-              ✅ <strong>Strategy saved!</strong> You can find it in{' '}
+              <span>&#9989;</span> <strong>Strategy saved!</strong> You can find it in{' '}
               <button
                 onClick={() => router.push('/strategy/editor?id=' + result.id)}
                 className="underline hover:text-emerald-200"
               >
                 Strategy Editor
+              </button>
+              {' '}and in the <button
+                onClick={() => router.push('/futures-trade')}
+                className="underline hover:text-emerald-200"
+              >
+                Futures Terminal Bot Panel
               </button>
             </div>
           )}
@@ -233,14 +341,14 @@ export default function StrategyUploadPage() {
                 disabled={saving}
                 className="px-6 py-2.5 rounded-xl font-semibold text-sm bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30 transition-all disabled:opacity-50"
               >
-                {saving ? '⏳ Saving…' : '💾 Save Strategy'}
+                {saving ? 'Saving...' : 'Save Strategy'}
               </button>
             ) : (
               <button
                 onClick={() => router.push('/strategy/editor?id=' + result.id)}
                 className="px-6 py-2.5 rounded-xl font-semibold text-sm bg-emerald-500/20 border border-emerald-500/50 text-emerald-300 hover:bg-emerald-500/30 transition-all"
               >
-                ✏️ Open in Editor
+                Open in Editor
               </button>
             )}
             <button
@@ -248,6 +356,9 @@ export default function StrategyUploadPage() {
               className="btn-primary"
             >
               Edit Code
+            </button>
+            <button onClick={() => router.push('/futures-trade')} className="btn-secondary">
+              Use in Futures Terminal
             </button>
             <button onClick={() => router.push('/backtest')} className="btn-secondary">
               Run Backtest
