@@ -202,12 +202,15 @@ export const api = {
       history: (limit = 20) =>
         request<any>(`/api/futures/backtest/history?limit=${limit}`),
     },
-    forceClose: (pair: string) =>
-      request<any>(`/api/futures/force-close/${pair}`, { method: 'POST' }),
-    manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5, leverage?: number) =>
+    forceClose: (pair: string, mode?: 'paper' | 'live') =>
+      request<any>(`/api/futures/force-close/${pair}`, {
+        method: 'POST',
+        body: JSON.stringify({ mode }),
+      }),
+    manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5, leverage?: number, mode?: 'paper' | 'live') =>
       request<any>('/api/futures/manual-entry', {
         method: 'POST',
-        body: JSON.stringify({ pair, direction, stake_pct: stakePct, ...(leverage ? { leverage } : {}) }),
+        body: JSON.stringify({ pair, direction, stake_pct: stakePct, ...(leverage ? { leverage } : {}), ...(mode ? { mode } : {}) }),
       }),
     orderbook: (symbol: string) => request<any>(`/api/futures/orderbook/${symbol}`),
     recentTrades: (symbol: string) => request<any>(`/api/futures/trades/${symbol}`),

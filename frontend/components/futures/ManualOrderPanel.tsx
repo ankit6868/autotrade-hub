@@ -139,7 +139,7 @@ export default function ManualOrderPanel({
           ? (costUsdt_ / availableBalance) * 100
           : 5;
         if (stakePct <= 0) { setError('Enter an amount'); setSubmitting(false); return; }
-        const r = await api.futures.manualEntry(pair, direction, Math.min(stakePct, 100), leverage);
+        const r = await api.futures.manualEntry(pair, direction, Math.min(stakePct, 100), leverage, mode);
         if (r.error) setError(r.error);
         else {
           setSuccess(`${direction.toUpperCase()} market order placed at ${r.entry}`);
@@ -156,7 +156,7 @@ export default function ManualOrderPanel({
           ? ((totalCostUsdt / slices) / availableBalance) * 100
           : 1;
         // Place first slice immediately
-        const r = await api.futures.manualEntry(pair, direction, Math.min(perSliceStakePct, 100), leverage);
+        const r = await api.futures.manualEntry(pair, direction, Math.min(perSliceStakePct, 100), leverage, mode);
         if (r.error) setError(r.error);
         else {
           setSuccess(`TWAP: Slice 1/${slices} placed. Remaining slices queued.`);
@@ -168,7 +168,7 @@ export default function ManualOrderPanel({
             sliceCount++;
             if (sliceCount > slices) { clearInterval(interval); return; }
             try {
-              await api.futures.manualEntry(pair, direction, Math.min(perSliceStakePct, 100), leverage);
+              await api.futures.manualEntry(pair, direction, Math.min(perSliceStakePct, 100), leverage, mode);
             } catch { /* silent */ }
           }, intervalMs);
           resetForm();
@@ -198,6 +198,7 @@ export default function ManualOrderPanel({
           cost_usdt: costUsdt_,
           leverage,
           reduce_only: reduceOnly,
+          mode,
         };
 
         // TP/SL

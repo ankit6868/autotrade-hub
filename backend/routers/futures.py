@@ -363,9 +363,27 @@ def futures_open_positions(
     from backend.services.native_trading_engine import _kucoin_get
 
     eng = futures_engine_registry.for_user(user_id)
-    # Only show in-memory positions when engine is running in the REQUESTED mode.
-    # Prevents paper bot positions leaking into the live page and vice-versa.
-    native_positions = eng.get_open_positions() if (mode is None or eng._mode == mode) else []
+    # Build positions list filtered by mode.
+    # Each position may have a _mode tag (manual trades), otherwise use engine mode.
+    native_positions = []
+    with eng._lock:
+        for p in eng.positions.values():
+            pos_mode = getattr(p, "_mode", eng._mode or "paper")
+            if mode is not None and pos_mode != mode:
+                continue
+            liq = getattr(p, "liquidation_price", None)
+            lev = getattr(p, "leverage", 1)
+            native_positions.append({
+                "pair":              p.pair,
+                "direction":         p.direction,
+                "entry":             round(p.entry, 6),
+                "sl":                round(p.effective_sl, 6) if hasattr(p, "effective_sl") else round(p.sl, 6),
+                "tp":                round(p.tp, 6),
+                "stake":             round(p.size, 2),
+                "opened_at":         str(p.opened_at),
+                "leverage":          lev,
+                "liquidation_price": round(liq, 6) if liq else None,
+            })
 
     # Fetch live prices
     live_prices: dict[str, float] = {}
@@ -521,12 +539,14 @@ def futures_manual_entry(
     direction     = req.get("direction", "long").lower()
     stake_pct     = float(req.get("stake_pct", 5.0))
     req_leverage  = req.get("leverage")
+    req_mode      = req.get("mode")  # explicit mode from frontend
 
     eng = futures_engine_registry.for_user(user_id)
 
     raw_lev  = int(req_leverage) if req_leverage else (eng._leverage if (eng._leverage and eng._leverage > 1) else 10)
     leverage = min(LEAD_MAX_LEVERAGE, raw_lev)
-    mode     = eng._mode     if eng._mode     else "paper"
+    # Use explicit mode from request first, then engine mode, then default
+    mode     = req_mode if req_mode in ("paper", "live") else (eng._mode or "paper")
     balance  = eng.balance   if eng.balance   else 1000.0
     sl_pct   = abs(eng._stoploss or 0.015)
     _raw_tp = getattr(eng, "_take_profit", None) or getattr(eng, "_take_profit_pct", None)
@@ -557,9 +577,11 @@ def futures_manual_entry(
         entry=entry_price, sl=sl_price, tp=tp_price,
         size=stake, leverage=leverage, opened_at=now,
     )
+    pos._mode = mode  # tag position with its mode for filtering
 
     with eng._lock:
-        existing_pairs = [p.pair for p in eng.positions.values()]
+        existing_pairs = [p.pair for p in eng.positions.values()
+                          if getattr(p, "_mode", eng._mode) == mode]
     if pair in existing_pairs:
         return {"error": f"Already have an open position for {pair}. Close it first."}
 
@@ -629,7 +651,7 @@ def futures_manual_entry(
 # ── Force Close ───────────────────────────────────────────────────────────────
 
 @router.post("/force-close/{pair:path}")
-def futures_force_close(
+async def futures_force_close(
     pair: str,
     request: Request,
     db: Session = Depends(get_db),
@@ -643,6 +665,14 @@ def futures_force_close(
     from sqlalchemy import update as sql_update
     from datetime import timezone as _tz
 
+    # Parse optional JSON body for mode
+    req_mode = None
+    try:
+        body = await request.json()
+        req_mode = body.get("mode") if isinstance(body, dict) else None
+    except Exception:
+        pass
+
     eng = futures_engine_registry.for_user(user_id)
 
     # Fetch live exit price
@@ -655,11 +685,15 @@ def futures_force_close(
 
     now = datetime.now(_tz.utc)
     closed_positions = []
-    mode = eng._mode or "paper"
+    # Use explicit mode from request first, then engine mode, then default
+    mode = req_mode if req_mode in ("paper", "live") else (eng._mode or "paper")
 
-    # ── Close all in-memory positions for this pair ────────────────────────
+    # ── Close all in-memory positions for this pair (mode-filtered) ─────
     with eng._lock:
-        matching_keys = [k for k, p in eng.positions.items() if p.pair == pair]
+        matching_keys = [
+            k for k, p in eng.positions.items()
+            if p.pair == pair and getattr(p, "_mode", eng._mode or "paper") == mode
+        ]
         for trade_key in matching_keys:
             pos = eng.positions.pop(trade_key)
             ep  = exit_price or pos.entry
@@ -703,15 +737,16 @@ def futures_force_close(
         _persist_closed_trade(user_id, pos, mode, eng._strategy_id, pos.db_id)
         total_pnl += pos.pnl_abs
 
-    # ── Also close any orphaned open DB positions for this pair ───────────
-    orphan_trades = db.execute(
-        select(Trade).where(
-            Trade.user_id    == user_id,
-            Trade.pair       == pair,
-            Trade.market_type == "futures",
-            Trade.status     == "open",
-        )
-    ).scalars().all()
+    # ── Also close any orphaned open DB positions for this pair + mode ──
+    orphan_query = select(Trade).where(
+        Trade.user_id    == user_id,
+        Trade.pair       == pair,
+        Trade.market_type == "futures",
+        Trade.status     == "open",
+    )
+    if mode:
+        orphan_query = orphan_query.where(Trade.mode == mode)
+    orphan_trades = db.execute(orphan_query).scalars().all()
 
     for t in orphan_trades:
         ep = exit_price or t.entry_price
@@ -869,6 +904,7 @@ def place_futures_order(
     reduce_only = req.get("reduce_only", False)
     time_in_force = req.get("time_in_force", "GTC")
     position_side = req.get("position_side")
+    req_mode   = req.get("mode")  # explicit mode from frontend
 
     if size <= 0 and cost_usdt <= 0:
         return {"error": "size or cost_usdt must be positive"}
@@ -883,7 +919,8 @@ def place_futures_order(
         leverage = int(leverage)
 
     lev = min(LEAD_MAX_LEVERAGE, leverage or eng._leverage or 10)
-    mode = eng._mode or "paper"
+    # Use explicit mode from request first, then engine mode, then default
+    mode = req_mode if req_mode in ("paper", "live") else (eng._mode or "paper")
 
     # ── Recalculate size from cost_usdt when provided ────────────────────
     # The frontend sends cost_usdt (the USDT amount the user typed) plus

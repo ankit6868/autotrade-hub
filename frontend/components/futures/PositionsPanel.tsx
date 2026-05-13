@@ -55,7 +55,7 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
   async function closePosition(pair: string) {
     setClosingPair(pair);
     try {
-      await api.futures.forceClose(pair);
+      await api.futures.forceClose(pair, mode);
       refreshAll();
       onRefresh?.();
     } catch { /* */ }
