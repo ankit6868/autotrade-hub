@@ -1,5 +1,10 @@
 /** @type {import('next').NextConfig} */
-const apiTarget = process.env.BACKEND_URL || 'http://localhost:8000';
+// On Vercel, default to the Railway production backend; locally default to localhost.
+const apiTarget =
+  process.env.BACKEND_URL ||
+  (process.env.VERCEL
+    ? 'https://autotrade-backend-production.up.railway.app'
+    : 'http://localhost:8000');
 
 const nextConfig = {
   output: 'standalone',
