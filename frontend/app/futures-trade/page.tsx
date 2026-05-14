@@ -108,11 +108,14 @@ export default function FuturesTerminal() {
     // md+ viewports so the page properly reclaims the freed space.
     // Mobile uses left:0 with extra pt-14 to clear the fixed mobile header.
     <div className="app-fixed-page fixed inset-x-0 top-0 bottom-0 flex flex-col overflow-hidden bg-[#0d1117] z-20 pt-14 md:pt-0 transition-[left] duration-300 ease-out">
-      {/* Top bar: pair tabs + mode toggle. Add left padding on md+ when the
-          sidebar is closed so the floating hamburger doesn't overlap pair
-          tabs. (When open, the sidebar takes the corner and the hamburger
-          sits over the sidebar.) */}
-      <div className="flex items-center justify-between bg-[#0d1117] border-b border-white/[0.06] pl-14 md:pl-0">
+      {/* Top bar: pair tabs + mode toggle. Add `needs-hamburger-clear`
+          which (via globals.css) adds left padding ONLY when the sidebar
+          is closed — so the floating hamburger doesn't overlap the
+          BTCUSDT Perp title. When the sidebar is open the hamburger sits
+          over the sidebar so we don't need the extra padding. Mobile
+          always gets the padding because the sidebar overlays at all
+          times there. */}
+      <div className="needs-hamburger-clear flex items-center justify-between bg-[#0d1117] border-b border-white/[0.06] transition-[padding-left] duration-200">
         <PairTabs activePair={pair} onPairChange={setPair} />
         <div className="flex items-center gap-2 px-3 shrink-0">
           <div className="flex rounded-md overflow-hidden border border-white/[0.1] text-[11px]">
@@ -157,22 +160,33 @@ export default function FuturesTerminal() {
       </div>
 
       {/* Main layout. Different shape per breakpoint:
-          - lg+ : 2-row grid (chart row | bottom row), each row has its
-                  own columns. Same as KuCoin's desktop layout.
+          - lg+ : Three independent columns (Left = Chart over Positions,
+                  Middle = OrderBook full height, Right = Manual/Bot over
+                  Asset Overview). Each column's internal split is
+                  decoupled from the others — so collapsing Asset Overview
+                  only changes the right column. Chart and Positions on
+                  the left are untouched.
           - <lg : single column with the mobile tab switcher above
                   picking which panel to show alongside the always-visible
                   Positions strip at the bottom. */}
       <div className="flex-1 flex flex-col overflow-hidden">
 
-        {/* ──────────────── lg+ TOP ROW (3 columns) ──────────────── */}
+        {/* ───────── lg+ desktop: 3 independent vertical columns ───────── */}
         <div className="hidden lg:flex flex-1 min-h-0 overflow-hidden">
-          {/* Chart — grows */}
-          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
-            <KuCoinFuturesChart pair={pair} defaultInterval="15m" />
+          {/* LEFT column: Chart on top, Positions panel at the bottom.
+              Independent of the right column — collapsing Asset Overview
+              won't shrink the Positions panel here. */}
+          <div className="flex-1 min-w-0 flex flex-col overflow-hidden border-r border-white/[0.06]">
+            <div className="flex-1 min-h-0 overflow-hidden">
+              <KuCoinFuturesChart pair={pair} defaultInterval="15m" />
+            </div>
+            <div className="h-[260px] shrink-0 border-t border-white/[0.06] overflow-hidden">
+              <PositionsPanel mode={mode} onRefresh={refreshAccount} refreshTrigger={refreshTrigger} />
+            </div>
           </div>
 
-          {/* Order Book / Recent Trades */}
-          <div className="w-[220px] xl:w-[250px] border-l border-white/[0.06] bg-[#0d1117] flex-col flex overflow-hidden">
+          {/* MIDDLE column: Order Book / Recent Trades — full height. */}
+          <div className="w-[220px] xl:w-[250px] border-r border-white/[0.06] bg-[#0d1117] flex flex-col overflow-hidden">
             <div className="flex border-b border-white/[0.06] shrink-0">
               <button
                 onClick={() => setMiddlePanel('orderbook')}
@@ -194,8 +208,13 @@ export default function FuturesTerminal() {
             </div>
           </div>
 
-          {/* Manual / Bot trading */}
-          <div className="w-[300px] xl:w-[340px] border-l border-white/[0.06] bg-[#0d1117] flex-col flex overflow-hidden">
+          {/* RIGHT column: Manual/Bot trading on top (flex-grows to fill
+              freed space), Asset Overview pinned at the bottom. When
+              Asset is collapsed the Manual/Bot section claims its
+              vertical space — exactly what the user wants and what
+              KuCoin does. The chart on the left is untouched. */}
+          <div className="w-[300px] xl:w-[340px] bg-[#0d1117] flex flex-col overflow-hidden">
+            {/* Manual / Bot tabs */}
             <div className="flex border-b border-white/[0.06] shrink-0">
               <button
                 onClick={() => setRightPanel('manual')}
@@ -210,6 +229,8 @@ export default function FuturesTerminal() {
                 }`}
               >Bot</button>
             </div>
+            {/* Trading form — flex-1, takes whatever vertical space Asset
+                Overview isn't using. */}
             <div className="flex-1 overflow-y-auto min-h-0">
               {rightPanel === 'manual' ? (
                 <ManualOrderPanel
@@ -236,6 +257,21 @@ export default function FuturesTerminal() {
                   onBotCreated={refreshAccount}
                 />
               )}
+            </div>
+            {/* Asset Overview — shrinkable. Collapsed: only the header
+                row (~56px) shows; the Manual/Bot above grows. Expanded:
+                up to 260px of details. Smooth height transition. */}
+            <div
+              className={`shrink-0 border-t border-white/[0.06] overflow-y-auto transition-[height] duration-300 ease-out ${
+                assetCollapsed ? 'h-[56px]' : 'h-[260px]'
+              }`}
+            >
+              <AssetOverview
+                mode={mode}
+                pair={pair}
+                collapsed={assetCollapsed}
+                onToggleCollapsed={() => setAssetCollapsed(v => !v)}
+              />
             </div>
           </div>
         </div>
@@ -314,31 +350,11 @@ export default function FuturesTerminal() {
           )}
         </div>
 
-        {/* ─── BOTTOM ROW — lg+ only. Two cells: Positions + Asset.
-            Height collapses from 260px → 56px when Asset is collapsed,
-            so the user can claim that vertical space back. The Asset
-            Overview cell uses the controlled-collapse pattern so the
-            chevron's state stays in sync with the row height. */}
-        <div
-          className={`hidden lg:flex border-t border-white/[0.06] bg-[#0d1117] overflow-hidden transition-[height] duration-300 ease-out ${
-            assetCollapsed ? 'h-[56px]' : 'h-[260px]'
-          }`}
-        >
-          <div className="flex-1 min-w-0 overflow-hidden border-r border-white/[0.06]">
-            <PositionsPanel mode={mode} onRefresh={refreshAccount} refreshTrigger={refreshTrigger} />
-          </div>
-          <div className="w-[300px] xl:w-[340px] overflow-y-auto">
-            <AssetOverview
-              mode={mode}
-              pair={pair}
-              collapsed={assetCollapsed}
-              onToggleCollapsed={() => setAssetCollapsed(v => !v)}
-            />
-          </div>
-        </div>
-
         {/* Mobile bottom: just Positions, sized so user can scroll it.
-            Asset Overview is reachable from the mobile tab switcher. */}
+            Asset Overview is reachable from the mobile tab switcher.
+            (Desktop now puts Positions inside the LEFT column directly,
+            and Asset Overview inside the RIGHT column — see lg+ block
+            above. No shared bottom row.) */}
         <div className="lg:hidden h-[220px] border-t border-white/[0.06] bg-[#0d1117] overflow-hidden">
           <PositionsPanel mode={mode} onRefresh={refreshAccount} refreshTrigger={refreshTrigger} />
         </div>

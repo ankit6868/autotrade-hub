@@ -346,3 +346,13 @@ body > * {
   body[data-sidebar-open='true']  .app-fixed-page { left: 16rem; }
   body[data-sidebar-open='false'] .app-fixed-page { left: 0; }
 }
+
+/* Top-bar-style elements that sit at the very top of a page need left
+   padding when the sidebar is closed so the floating hamburger button
+   doesn't overlap their content. Always padded on mobile (sidebar always
+   overlays there). */
+.needs-hamburger-clear { padding-left: 3.5rem; }     /* ≈ 56px to clear hamburger */
+@media (min-width: 768px) {
+  body[data-sidebar-open='true']  .needs-hamburger-clear { padding-left: 0; }
+  body[data-sidebar-open='false'] .needs-hamburger-clear { padding-left: 3.5rem; }
+}
