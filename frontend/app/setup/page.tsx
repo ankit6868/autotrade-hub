@@ -156,9 +156,31 @@ export default function SetupPage() {
 
             {testResult && (
               <div className={`p-4 rounded-lg text-sm ${testResult.connected ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/10 text-red-400 border border-red-500/30'}`}>
-                {testResult.connected
-                  ? `Connected! USDT Balance: ${Number(testResult.usdt_balance).toFixed(2)}`
-                  : `Failed: ${testResult.error}`}
+                {testResult.connected ? (
+                  testResult.account_type === 'futures' ? (
+                    /* Lead Trading futures account — show real margin numbers
+                       so the user can confirm it's the right account. */
+                    <div className="space-y-1.5">
+                      <div className="font-semibold flex items-center gap-2">
+                        <span>✓ Connected — Lead Trading Futures Account</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 text-xs opacity-90 mt-1">
+                        <div>Account Equity</div>
+                        <div className="text-right tabular-nums">{Number(testResult.usdt_balance).toFixed(2)} USDT</div>
+                        <div>Available Balance</div>
+                        <div className="text-right tabular-nums">{Number(testResult.available_balance).toFixed(2)} USDT</div>
+                        <div>Position Margin</div>
+                        <div className="text-right tabular-nums">{Number(testResult.position_margin).toFixed(2)} USDT</div>
+                        <div>Unrealized P&L</div>
+                        <div className={`text-right tabular-nums ${Number(testResult.unrealised_pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {Number(testResult.unrealised_pnl) >= 0 ? '+' : ''}{Number(testResult.unrealised_pnl).toFixed(2)} USDT
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    `Connected! Spot USDT Balance: ${Number(testResult.usdt_balance).toFixed(2)}`
+                  )
+                ) : `Failed: ${testResult.error}`}
               </div>
             )}
           </div>

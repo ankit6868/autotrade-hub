@@ -108,13 +108,76 @@ class KuCoinClient:
             for c in data
         ]
 
+    async def _get_futures_balance(self) -> dict | None:
+        """Fetch the user's Lead Trading futures USDT balance.
+
+        Hits `/api/v1/account-overview` on api-futures.kucoin.com — the same
+        endpoint the Futures Terminal "Lead Trading Account" badge uses.
+        Returns None on any failure so the caller can fall back gracefully.
+        """
+        from backend.services._kucoin_proxy import httpx_client_kwargs as _kc_kwargs
+        FUTURES_BASE = "https://api-futures.kucoin.com"
+        endpoint = "/api/v1/account-overview"
+        # Re-sign for the futures host. Same HMAC scheme, just different base.
+        timestamp = str(int(time.time() * 1000))
+        # GET requests include the query string in the signature base.
+        qs = "?currency=USDT"
+        headers = self._sign(timestamp, "GET", f"{endpoint}{qs}")
+        try:
+            async with httpx.AsyncClient(**_kc_kwargs()) as client:
+                resp = await client.get(
+                    f"{FUTURES_BASE}{endpoint}",
+                    params={"currency": "USDT"},
+                    headers=headers, timeout=15,
+                )
+            payload = resp.json()
+            if str(payload.get("code")) != "200000":
+                return None
+            data = payload.get("data") or {}
+            return {
+                "account_equity":    float(data.get("accountEquity", 0)),
+                "available_balance": float(data.get("availableBalance", 0)),
+                "margin_balance":    float(data.get("marginBalance", 0)),
+                "unrealised_pnl":    float(data.get("unrealisedPNL", 0)),
+                "position_margin":   float(data.get("positionMargin", 0)),
+                "order_margin":      float(data.get("orderMargin", 0)),
+            }
+        except Exception:
+            return None
+
     async def test_connection(self) -> dict:
+        """Verify the key works and return a useful balance summary.
+
+        Tries futures first (most users on this app are Lead Trading users
+        whose money lives in futures, NOT spot — a $0 spot reading scares
+        them into thinking the key is broken when it's actually fine).
+        Falls back to spot if futures call doesn't auth.
+        """
+        # Try futures first — that's where the money is for Lead Trading keys.
+        fut = await self._get_futures_balance()
+        if fut is not None:
+            return {
+                "connected": True,
+                "account_type": "futures",
+                "usdt_balance":     round(fut["account_equity"], 4),
+                "available_balance": round(fut["available_balance"], 4),
+                "unrealised_pnl":   round(fut["unrealised_pnl"], 4),
+                "position_margin":  round(fut["position_margin"], 4),
+                "order_margin":     round(fut["order_margin"], 4),
+            }
+
+        # Fall back to spot — useful for users who only have spot keys.
         try:
             data = await self.get_accounts()
             if data.get("code") == "200000":
                 balances = await self.get_balances()
                 total_usdt = sum(b["balance"] for b in balances if b["currency"] == "USDT")
-                return {"connected": True, "usdt_balance": total_usdt, "accounts": len(balances)}
+                return {
+                    "connected": True,
+                    "account_type": "spot",
+                    "usdt_balance": total_usdt,
+                    "accounts": len(balances),
+                }
             return {"connected": False, "error": data.get("msg", "Unknown error")}
         except Exception as e:
             return {"connected": False, "error": str(e)}
