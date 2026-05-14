@@ -412,9 +412,18 @@ async def root():
 
 @app.get("/api/health")
 async def health():
+    # Surface proxy status so the user can see at a glance whether the
+    # KUCOIN_HTTPS_PROXY env var was parsed correctly and which entry is
+    # currently in use (credentials redacted).
+    try:
+        from backend.services._kucoin_proxy import proxy_status
+        proxy = proxy_status()
+    except Exception:
+        proxy = {"count": 0, "active": None}
     return {
         "status": "healthy",
         "active_users": freqtrade_mgr.active_users(),
+        "kucoin_proxy": proxy,
         "timestamp": datetime.utcnow().isoformat(),
     }
 
