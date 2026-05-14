@@ -124,8 +124,14 @@ export default function ManualOrderPanel({
   const amountNum = costMode
     ? (parseFloat(costUsdt) || 0) / effectiveRef
     : (parseFloat(amount) || 0);
+  // The "Cost (USDT)" field IS the margin — the USDT amount that will be
+  // locked from the user's wallet when the order fills. The notional position
+  // value is cost × leverage. The previous code divided cost by leverage to
+  // get "Margin", which was the wrong direction and produced confusing
+  // displays ("you typed 5 USDT, margin 0.25 USDT" was the bug).
   const costUsdt_ = costMode ? (parseFloat(costUsdt) || 0) : amountNum * effectiveRef;
-  const marginCost = costUsdt_ / leverage;
+  const marginCost = costUsdt_;                 // cost === margin locked
+  const notionalValue = costUsdt_ * leverage;   // position size on the exchange
 
   const refPrice = priceNum > 0 ? priceNum : (lastPrice || 0);
   const maxLongAmount = refPrice > 0 ? (availableBalance * leverage) / refPrice : 0;
@@ -660,18 +666,23 @@ export default function ManualOrderPanel({
           </>
         )}
 
-        {/* Amount / Cost toggle — shown for all order types */}
+        {/* Amount / Margin toggle — shown for all order types.
+            "Margin (USDT)" is what we charge from the user's wallet (= what
+            KuCoin locks); the position size = Margin × leverage. Naming this
+            consistently across the form and order-summary box removes the
+            "is Cost the margin or the notional?" ambiguity that confused the
+            old Margin-divided-by-leverage display. */}
         <div>
           <div className="flex items-center justify-between mb-1">
             <label className="text-[10px] text-slate-500">
-              {costMode ? 'Cost (USDT)' : `Amount (${baseCoin})`}
+              {costMode ? 'Margin (USDT)' : `Amount (${baseCoin})`}
             </label>
             <button
               type="button"
               onClick={() => { setCostMode(v => !v); setAmount(''); setCostUsdt(''); }}
               className="text-[9px] px-1.5 py-0.5 rounded border border-white/10 text-slate-400 hover:text-white hover:border-white/30 transition-colors"
             >
-              {costMode ? `By ${baseCoin}` : 'By Cost (USDT)'}
+              {costMode ? `By ${baseCoin}` : 'By Margin (USDT)'}
             </button>
           </div>
           <div className="flex items-center bg-[#1e222d] rounded border border-white/[0.06]">
@@ -735,17 +746,29 @@ export default function ManualOrderPanel({
           </div>
           {/* Lot-size floor at current leverage. KuCoin's minimum order is
               1 contract, so anything below this would either be rejected
-              (live) or silently bumped up to a much larger position. */}
+              (live) or silently bumped up to a much larger position. We
+              show BOTH the min margin and the min notional, mirroring
+              KuCoin's "must be ≥ X USDT" error message style. */}
           <div className="flex justify-between">
-            <span className="text-slate-500">Min Cost (1 lot)</span>
+            <span className="text-slate-500">Min Margin (1 lot)</span>
             <span className={`tabular-nums ${costUsdt_ > 0 && costUsdt_ < minCostUsdt ? 'text-amber-400' : 'text-slate-300'}`}>
               {minCostUsdt.toFixed(2)} USDT
             </span>
           </div>
+          <div className="flex justify-between">
+            <span className="text-slate-500">Min Notional (1 lot)</span>
+            <span className="tabular-nums text-slate-300">
+              {minNotional.toFixed(2)} USDT
+            </span>
+          </div>
           {costUsdt_ > 0 && costUsdt_ < minCostUsdt && (
-            <div className="text-[10px] text-amber-400 pt-0.5">
-              ⚠ Below minimum for {baseCoin} at {leverage}x. Order will be rejected.
-              Try Cost ≥ {minCostUsdt.toFixed(2)} USDT or higher leverage.
+            <div className="text-[10px] text-amber-400 pt-0.5 leading-snug">
+              ⚠ Margin {costUsdt_.toFixed(2)} USDT is below the minimum
+              {' '}({minCostUsdt.toFixed(2)} USDT) for one {baseCoin} contract
+              at {leverage}× leverage. KuCoin will reject this order.
+              <br />
+              Either type a Margin ≥ <b>{minCostUsdt.toFixed(2)} USDT</b>, or
+              increase leverage so the minimum drops further.
             </div>
           )}
           {costMode && amountNum > 0 && (
@@ -875,12 +898,27 @@ export default function ManualOrderPanel({
           </button>
         </div>
 
-        {/* Margin info */}
-        <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-500">
-          <div>Margin {marginCost > 0 ? marginCost.toFixed(2) : '0.00'} USDT</div>
-          <div className="text-right">Margin {marginCost > 0 ? marginCost.toFixed(2) : '0.00'} USDT</div>
-          <div>Cost {costUsdt_ > 0 ? costUsdt_.toFixed(2) : '0.00'} USDT</div>
-          <div className="text-right">Cost {costUsdt_ > 0 ? costUsdt_.toFixed(2) : '0.00'} USDT</div>
+        {/* Order summary — what the user will actually get when this fills.
+            Margin = USDT locked from wallet (= what they typed in Cost).
+            Notional = position value on the exchange = Margin × leverage. */}
+        <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-slate-500 mt-1">
+          <div>Margin</div>
+          <div className="text-right text-slate-300 tabular-nums">
+            {marginCost > 0 ? marginCost.toFixed(2) : '0.00'} USDT
+          </div>
+          <div>Notional ({leverage}× leverage)</div>
+          <div className="text-right text-slate-300 tabular-nums">
+            {notionalValue > 0 ? notionalValue.toFixed(2) : '0.00'} USDT
+          </div>
+          {refPrice > 0 && costUsdt_ > 0 && lotSize > 0 && (
+            <>
+              <div>≈ Contracts</div>
+              <div className="text-right text-slate-400 tabular-nums">
+                {Math.max(1, Math.floor(notionalValue / (lotSize * refPrice)))}
+                {' '}({(Math.max(1, Math.floor(notionalValue / (lotSize * refPrice))) * lotSize).toFixed(6)} {baseCoin})
+              </div>
+            </>
+          )}
         </div>
       </div>
 
