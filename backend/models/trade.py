@@ -112,6 +112,12 @@ class FuturesOrder(Base):
 
     id = Column(Integer, primary_key=True)
     user_id = Column(Text, nullable=False, index=True)
+    # 'paper' | 'live'. Default 'paper' is conservative — orders without an
+    # explicit mode never accidentally appear in Live tab. Critical for
+    # isolation: without this column, a paper LIMIT BUY at 81058 was leaking
+    # into the Live mode Open Orders panel even though it was clearly a
+    # simulated order.
+    mode = Column(Text, nullable=False, default="paper", server_default="paper", index=True)
     symbol = Column(Text, nullable=False)
     side = Column(Text, nullable=False)
     order_type = Column(Text, nullable=False, default="limit")
@@ -143,7 +149,9 @@ class FuturesOrder(Base):
         CheckConstraint("order_type IN ('limit', 'market', 'stop', 'stop_limit', 'trailing_stop', 'twap')"),
         CheckConstraint("status IN ('pending', 'active', 'filled', 'partially_filled', 'cancelled', 'triggered')"),
         CheckConstraint("margin_mode IN ('cross', 'isolated')"),
+        CheckConstraint("mode IN ('paper', 'live')"),
         Index("ix_futures_orders_user_status", "user_id", "status"),
+        Index("ix_futures_orders_user_mode", "user_id", "mode"),
     )
 
 

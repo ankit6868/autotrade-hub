@@ -25,7 +25,7 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
     // Each call wrapped independently so one failure doesn't block others
     const [pos, orders, history, acct, botList, engineStatus] = await Promise.all([
       api.futures.open(mode).catch(() => ({ trades: [] })),
-      api.futures.orders({ status: 'pending' }).catch(() => ({ orders: [] })),
+      api.futures.orders({ status: 'pending', mode }).catch(() => ({ orders: [] })),
       api.futures.history({ mode, limit: '50' }).catch(() => ({ trades: [] })),
       api.futures.account(mode).catch(() => null),
       api.futures.bots.list(mode).catch(() => ({ bots: [] })),
@@ -71,7 +71,8 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
 
   async function closeAllPositions() {
     for (const p of positions) {
-      await api.futures.forceClose(p.pair);
+      // Pass explicit mode so backend force-closes only the matching side.
+      await api.futures.forceClose(p.pair, mode);
     }
     refreshAll();
     onRefresh?.();
@@ -123,7 +124,7 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
           <OrdersTab orders={openOrders} onCancel={cancelOrder} />
         )}
         {tab === 'order_history' && (
-          <OrderHistoryTab />
+          <OrderHistoryTab mode={mode} />
         )}
         {tab === 'trade_history' && (
           <TradeHistoryTab trades={tradeHistory} />
@@ -284,11 +285,11 @@ function OrdersTab({ orders, onCancel }: { orders: any[]; onCancel: (id: string)
   );
 }
 
-function OrderHistoryTab() {
+function OrderHistoryTab({ mode }: { mode: 'paper' | 'live' }) {
   const [orders, setOrders] = useState<any[]>([]);
   useEffect(() => {
-    api.futures.ordersHistory({ limit: 50 }).then(d => setOrders(d.orders || [])).catch(() => {});
-  }, []);
+    api.futures.ordersHistory({ limit: 50, mode }).then(d => setOrders(d.orders || [])).catch(() => {});
+  }, [mode]);
   if (orders.length === 0) {
     return <div className="text-center text-slate-500 py-8 text-sm">No order history</div>;
   }

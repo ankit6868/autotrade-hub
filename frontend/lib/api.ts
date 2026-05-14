@@ -327,10 +327,20 @@ export const api = {
         method: 'POST',
         body: JSON.stringify({ mode }),
       }),
-    manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5, leverage?: number, mode?: 'paper' | 'live') =>
+    manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5, leverage?: number, mode?: 'paper' | 'live', costUsdt?: number) =>
       request<any>('/api/futures/manual-entry', {
         method: 'POST',
-        body: JSON.stringify({ pair, direction, stake_pct: stakePct, ...(leverage ? { leverage } : {}), ...(mode ? { mode } : {}) }),
+        // cost_usdt is the user's typed margin in USDT. Backend prefers it
+        // over stake_pct for live mode (stake_pct gets misinterpreted against
+        // the engine's paper wallet, not the real KuCoin balance). Paper
+        // mode keeps using stake_pct since there's no real exchange call.
+        body: JSON.stringify({
+          pair, direction,
+          stake_pct: stakePct,
+          ...(costUsdt && costUsdt > 0 ? { cost_usdt: costUsdt } : {}),
+          ...(leverage ? { leverage } : {}),
+          ...(mode ? { mode } : {}),
+        }),
       }),
     orderbook: (symbol: string) => request<any>(`/api/futures/orderbook/${symbol}`),
     recentTrades: (symbol: string) => request<any>(`/api/futures/trades/${symbol}`),
@@ -339,11 +349,11 @@ export const api = {
       request<any>('/api/futures/order', { method: 'POST', body: JSON.stringify(data) }),
     cancelOrder: (orderId: string) =>
       request<any>(`/api/futures/order/${orderId}`, { method: 'DELETE' }),
-    orders: (params?: { symbol?: string; status?: string }) => {
+    orders: (params?: { symbol?: string; status?: string; mode?: 'paper' | 'live' }) => {
       const qs = params ? '?' + new URLSearchParams(params as Record<string, string>).toString() : '';
       return request<any>(`/api/futures/orders${qs}`);
     },
-    ordersHistory: (params?: { symbol?: string; limit?: number }) => {
+    ordersHistory: (params?: { symbol?: string; limit?: number; mode?: 'paper' | 'live' }) => {
       const qs = params ? '?' + new URLSearchParams(params as Record<string, string>).toString() : '';
       return request<any>(`/api/futures/orders/history${qs}`);
     },

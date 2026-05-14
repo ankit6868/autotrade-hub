@@ -866,6 +866,11 @@ def futures_manual_entry(
     pair          = req.get("pair", "BTC/USDT")
     direction     = req.get("direction", "long").lower()
     stake_pct     = float(req.get("stake_pct", 5.0))
+    # Frontend can pass cost_usdt directly (preferred for live mode — the
+    # stake_pct path multiplies against engine.balance which is the paper
+    # wallet default of 1000 USDT, NOT the user's real KuCoin balance, so
+    # $5 becomes $48 and KuCoin rejects with "insufficient available margin").
+    req_cost_usdt = req.get("cost_usdt")
     req_leverage  = req.get("leverage")
     req_mode      = req.get("mode")  # explicit mode from frontend
 
@@ -890,9 +895,20 @@ def futures_manual_entry(
     except Exception as e:
         return {"error": f"Price fetch failed: {e}"}
 
-    # User's *intended* margin in USDT. Frontend computes stake_pct from the
-    # user's cost-USDT input, so multiply back to get the raw number.
-    user_cost = balance * (stake_pct / 100)
+    # User's *intended* margin in USDT.
+    # Priority 1: explicit cost_usdt from the frontend (live market orders).
+    # The stake_pct path is broken for live: it multiplies against
+    # engine.balance, which is the paper-wallet default of 1000 USDT when
+    # no live bot is running, NOT the user's real KuCoin balance. So $5
+    # typed becomes $48 sent, KuCoin rejects "insufficient available margin".
+    # Priority 2: stake_pct × engine.balance (paper mode + legacy callers).
+    if req_cost_usdt is not None:
+        try:
+            user_cost = float(req_cost_usdt)
+        except (TypeError, ValueError):
+            user_cost = balance * (stake_pct / 100)
+    else:
+        user_cost = balance * (stake_pct / 100)
     # `stake` is what we eventually store on the position. For live mode it
     # gets overwritten with the REAL margin KuCoin will lock (after lot-size
     # rounding); for paper mode it stays equal to user_cost.
@@ -1507,9 +1523,10 @@ def place_futures_order(
         cost_usdt=cost_usdt,
     )
 
-    # Persist to DB
+    # Persist to DB — include `mode` so paper limit orders don't leak into
+    # the Live tab's Open Orders panel and vice versa.
     order_rec = FuturesOrder(
-        user_id=user_id, symbol=symbol, side=side, order_type=order_type,
+        user_id=user_id, mode=mode, symbol=symbol, side=side, order_type=order_type,
         size=size, price=price, stop_price=stop_price,
         leverage=lev, margin_mode="isolated",
         client_oid=result.get("order_id"), status="pending",
@@ -1597,23 +1614,28 @@ def cancel_futures_order(
 def get_futures_orders(
     symbol: str = None,
     status: str = "pending",
+    mode: str = None,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Get pending or filled futures orders. For live mode, reconciles
-    DB rows against KuCoin's actual order status — limit orders that
-    filled (e.g. buy-above-market) get flipped to 'filled' here so they
-    stop showing in the Open Orders tab while a real position is open."""
+    """Get pending or filled futures orders, filtered by mode for strict
+    paper/live isolation. The Live Open Orders tab passes mode=live so paper
+    limit orders never leak in, and vice versa.
+
+    For live mode, also reconciles DB rows against KuCoin's actual order
+    status — limit orders that filled (e.g. buy-above-market) get flipped
+    to 'filled' here so they stop showing in the Open Orders tab while a
+    real position is open."""
     eng = futures_engine_registry.for_user(user_id)
     # Combine engine pending + DB records
     engine_orders = eng.get_pending_orders(symbol)
 
-    # ── Live-mode reconcile: ask KuCoin if our 'pending' rows really are
-    # still pending. KuCoin only returns truly-active orders, so any of our
-    # rows with an exchange_order_id NOT in that list has either filled or
-    # been cancelled. We flip those to 'filled' (good enough — the next
-    # position fetch will pull the real exit details if it then closes).
-    if (status == "pending" or status is None) and _ensure_live_credentials(eng, user_id, db)[0]:
+    # ── Live-mode reconcile: ask KuCoin if our 'pending' LIVE rows really
+    # are still pending. KuCoin only returns truly-active orders, so any of
+    # our rows with an exchange_order_id NOT in that list has either filled
+    # or been cancelled. Paper orders never had an exchange_order_id so
+    # they're naturally excluded from this reconcile.
+    if (status == "pending" or status is None) and mode != "paper" and _ensure_live_credentials(eng, user_id, db)[0]:
         try:
             from backend.services.native_trading_engine import _kucoin_get_signed
             from backend.services.futures_engine import KUCOIN_FUTURES_BASE
@@ -1629,6 +1651,7 @@ def get_futures_orders(
                     select(FuturesOrder).where(
                         FuturesOrder.user_id == user_id,
                         FuturesOrder.status == "pending",
+                        FuturesOrder.mode == "live",
                         FuturesOrder.exchange_order_id.isnot(None),
                     )
                 ).scalars().all()
@@ -1650,6 +1673,8 @@ def get_futures_orders(
         query = query.where(FuturesOrder.status == status)
     if symbol:
         query = query.where(FuturesOrder.symbol == symbol)
+    if mode in ("paper", "live"):
+        query = query.where(FuturesOrder.mode == mode)
     query = query.order_by(desc(FuturesOrder.created_at)).limit(100)
 
     db_orders = [
@@ -1664,6 +1689,7 @@ def get_futures_orders(
             "stop_price": o.stop_price,
             "leverage": o.leverage,
             "margin_mode": o.margin_mode,
+            "mode": o.mode,
             "status": o.status,
             "filled_size": o.filled_size,
             "filled_price": o.filled_price,
@@ -1674,17 +1700,26 @@ def get_futures_orders(
         for o in db.execute(query).scalars().all()
     ]
 
-    return {"orders": engine_orders if status == "pending" else db_orders}
+    # Engine orders only make sense for the current engine mode; if the
+    # caller asked for a specific mode, filter accordingly. The engine has
+    # one _mode at a time so this is a simple equality check.
+    if status == "pending":
+        if mode is None or (eng._mode or "paper") == mode:
+            return {"orders": engine_orders}
+        # Mode mismatch — engine orders don't apply here.
+        return {"orders": []}
+    return {"orders": db_orders}
 
 
 @router.get("/orders/history")
 def get_futures_order_history(
     symbol: str = None,
     limit: int = 50,
+    mode: str = None,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Get filled/cancelled order history."""
+    """Get filled/cancelled order history, filtered by mode."""
     query = (
         select(FuturesOrder)
         .where(
@@ -1696,6 +1731,8 @@ def get_futures_order_history(
     )
     if symbol:
         query = query.where(FuturesOrder.symbol == symbol)
+    if mode in ("paper", "live"):
+        query = query.where(FuturesOrder.mode == mode)
 
     orders = [
         {
@@ -1703,6 +1740,7 @@ def get_futures_order_history(
             "symbol": o.symbol, "side": o.side, "order_type": o.order_type,
             "size": o.size, "price": o.price, "filled_size": o.filled_size,
             "filled_price": o.filled_price, "fee": o.fee, "status": o.status,
+            "mode": o.mode,
             "created_at": str(o.created_at), "filled_at": str(o.filled_at) if o.filled_at else None,
         }
         for o in db.execute(query).scalars().all()

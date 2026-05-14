@@ -152,12 +152,14 @@ export default function ManualOrderPanel({
           ? (costUsdt_ / availableBalance) * 100
           : 5;
         if (stakePct <= 0) { setError('Enter an amount'); setSubmitting(false); return; }
-        const r = await api.futures.manualEntry(pair, direction, Math.min(stakePct, 100), leverage, mode);
+        // Pass cost_usdt explicitly so live mode uses the user's actual
+        // typed margin (not stake_pct × engine.balance which defaults to
+        // 1000 USDT paper when no live bot is running, causing "Order
+        // quantity is too high, insufficient available margin" rejections
+        // from KuCoin).
+        const r = await api.futures.manualEntry(pair, direction, Math.min(stakePct, 100), leverage, mode, costUsdt_);
         if (r.error) setError(r.error);
         else {
-          // Backend returns real margin/notional after lot-size rounding so
-          // the user sees what KuCoin actually locked (not their typed cost,
-          // which can differ when below the symbol's minimum lot size).
           const marginStr = r.margin != null ? ` · margin ${Number(r.margin).toFixed(2)} USDT` : '';
           setSuccess(`${direction.toUpperCase()} market order placed at ${r.entry}${marginStr}`);
           onOrderPlaced();
