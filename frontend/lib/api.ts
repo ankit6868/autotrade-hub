@@ -49,6 +49,43 @@ export function setTokenProvider(fn: (() => Promise<string | null>) | null) {
   _getToken = fn;
 }
 
+// Retry policy. Mobile-data clients often abort TCP after ~15s, but Railway's
+// first response after the container scales from zero takes 10-30s. The retry
+// keeps the user-perceived latency in check while still surviving cold starts.
+const FETCH_TIMEOUT_MS = 45_000;
+const RETRY_BACKOFF_MS = [300, 1200, 3000];  // 3 retries, ~4.5s total
+
+async function _fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: ctrl.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// "Network-level error" = DNS/TCP/TLS/CORS-preflight failure or our own
+// abort. These are the ones worth retrying; an HTTP 4xx/5xx is the server's
+// considered response and retrying won't help.
+function _isRetryableNetworkError(e: unknown): boolean {
+  if (e instanceof TypeError) return true;                           // fetch network fail
+  if (e && typeof e === 'object' && 'name' in e) {
+    const name = (e as { name?: string }).name;
+    if (name === 'AbortError' || name === 'TimeoutError') return true;
+  }
+  return false;
+}
+
+async function _tryOnce(base: string, path: string, options: RequestInit) {
+  const res = await _fetchWithTimeout(`${base}${path}`, options, FETCH_TIMEOUT_MS);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 async function request<T = any>(path: string, options?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -62,35 +99,67 @@ async function request<T = any>(path: string, options?: RequestInit): Promise<T>
       // Anonymous request — backend allows when Clerk isn't configured.
     }
   }
+  const finalOpts: RequestInit = { ...options, headers };
 
-  // First try: same-origin (Vercel rewrite → Railway). This avoids carrier
-  // blocks on *.railway.app domains.
-  try {
-    const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(text || `HTTP ${res.status}`);
+  // Try same-origin (Vercel rewrite → Railway) up to N times with backoff.
+  // Retries handle: Railway cold-start, transient edge routing flaps, and
+  // mobile-carrier TCP resets. Each retry has the full FETCH_TIMEOUT_MS budget.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt++) {
+    try {
+      return await _tryOnce(API_BASE, path, finalOpts) as T;
+    } catch (e) {
+      lastErr = e;
+      if (!_isRetryableNetworkError(e)) throw e;          // hard failure — surface immediately
+      if (attempt < RETRY_BACKOFF_MS.length) {
+        await new Promise(r => setTimeout(r, RETRY_BACKOFF_MS[attempt]));
+      }
     }
-    return res.json();
-  } catch (e: unknown) {
-    // Network-level failure (DNS, TCP, TLS, carrier block). Only retry on
-    // TypeError — actual HTTP error responses already threw above with a
-    // body, no point retrying those.
-    const isNetworkError = e instanceof TypeError;
-    const sameAsLongBase = API_BASE === LONG_REQUEST_BASE;
-    if (!isNetworkError || sameAsLongBase || !LONG_REQUEST_BASE) {
-      throw e;
-    }
-    // Fall back to direct Railway in case Vercel itself is unreachable.
-    // Rare, but useful belt-and-braces against carrier blocks on
-    // *.vercel.app domains too.
-    const res = await fetch(`${LONG_REQUEST_BASE}${path}`, { ...options, headers });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(text || `HTTP ${res.status}`);
-    }
-    return res.json();
   }
+
+  // All same-origin attempts exhausted. Fall back to direct Railway once —
+  // useful if Vercel itself can't reach the backend, e.g. a regional outage.
+  if (LONG_REQUEST_BASE && LONG_REQUEST_BASE !== API_BASE) {
+    try {
+      return await _tryOnce(LONG_REQUEST_BASE, path, finalOpts) as T;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+
+  // Out of options — replace the cryptic "TypeError: Load failed" with
+  // something the user can act on.
+  if (_isRetryableNetworkError(lastErr)) {
+    throw new Error(
+      'Could not reach the backend. The server may be waking up — try again ' +
+      'in a few seconds. If this keeps happening switch networks (mobile data ↔ WiFi).'
+    );
+  }
+  throw lastErr;
+}
+
+// Fire-and-forget warm-up: wakes Railway when the user first lands on the
+// app so the *real* first request (Setup → Test Connection, etc.) doesn't
+// pay the cold-start penalty. Cheap unauthenticated GET.
+export function warmupBackend() {
+  if (typeof window === 'undefined') return;
+  _fetchWithTimeout(`${API_BASE}/api/health`, { method: 'GET' }, 10_000)
+    .catch(() => {
+      // ignore — if same-origin fails, try direct Railway so the container
+      // wakes either way.
+      if (LONG_REQUEST_BASE && LONG_REQUEST_BASE !== API_BASE) {
+        _fetchWithTimeout(`${LONG_REQUEST_BASE}/api/health`, { method: 'GET' }, 10_000)
+          .catch(() => { /* ignore */ });
+      }
+    });
+}
+
+if (typeof window !== 'undefined') {
+  // Kick off warm-up immediately on module load.
+  warmupBackend();
+  // Re-ping every 4 minutes while the tab is open so Railway never gets a
+  // chance to idle-scale back to zero between user actions.
+  setInterval(warmupBackend, 4 * 60_000);
 }
 
 export const api = {
