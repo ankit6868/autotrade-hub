@@ -1,19 +1,45 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-// In production on Vercel, call the Railway backend directly to avoid
-// Vercel's edge-proxy ROUTER_EXTERNAL_TARGET_ERROR on uploads / long requests.
-// In local dev, use same-origin (Next.js rewrites proxy to localhost:8000).
+// All regular API calls go same-origin so the browser only ever talks to the
+// Vercel domain. Vercel's `rewrites` in vercel.json proxy /api/* to Railway
+// server-side. Why this matters:
+//
+//   • Some mobile carriers (notably Indian ones — Jio, Airtel, Vi) block or
+//     throttle the *.up.railway.app domain on their LTE networks. Direct
+//     calls fail with Safari's generic "TypeError: Load failed" before
+//     reaching the backend at all. WiFi works fine because the route is
+//     different. Routing through autotrade-hub.vercel.app sidesteps the
+//     carrier's block list entirely.
+//   • Smaller TLS handshake — Vercel CDN is much closer to the user than
+//     Railway's Singapore region.
+//
+// The one exception is `strategy.upload`: large multipart bodies can hit
+// Vercel's edge-proxy ROUTER_EXTERNAL_TARGET_ERROR. That function uses
+// LONG_REQUEST_BASE (direct Railway) below.
 const RAILWAY_BACKEND = 'https://autotrade-backend-production.up.railway.app';
 
 function resolveApiBase(): string {
+  // Explicit override always wins (Docker, custom domain, etc.).
+  if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+  // Same-origin everywhere else — Vercel rewrites + Next dev rewrites both
+  // handle it.
+  return '';
+}
+
+const API_BASE = resolveApiBase();
+
+// Direct Railway URL for endpoints that can't go through Vercel's edge
+// proxy (large bodies, long-running requests). Falls back to same-origin
+// in local dev so Next's rewrite still works.
+function resolveLongRequestBase(): string {
   if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
   if (typeof window !== 'undefined' && window.location.hostname.includes('vercel.app')) {
     return RAILWAY_BACKEND;
   }
-  return '';  // same-origin — Next.js dev rewrites handle it
+  return '';
 }
 
-const API_BASE = resolveApiBase();
+const LONG_REQUEST_BASE = resolveLongRequestBase();
 
 // Set by AuthBridge once Clerk is loaded; lets us attach the user's JWT to
 // every backend request without dragging React context into this module.
@@ -36,12 +62,35 @@ async function request<T = any>(path: string, options?: RequestInit): Promise<T>
       // Anonymous request — backend allows when Clerk isn't configured.
     }
   }
-  const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
+
+  // First try: same-origin (Vercel rewrite → Railway). This avoids carrier
+  // blocks on *.railway.app domains.
+  try {
+    const res = await fetch(`${API_BASE}${path}`, { ...options, headers });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `HTTP ${res.status}`);
+    }
+    return res.json();
+  } catch (e: unknown) {
+    // Network-level failure (DNS, TCP, TLS, carrier block). Only retry on
+    // TypeError — actual HTTP error responses already threw above with a
+    // body, no point retrying those.
+    const isNetworkError = e instanceof TypeError;
+    const sameAsLongBase = API_BASE === LONG_REQUEST_BASE;
+    if (!isNetworkError || sameAsLongBase || !LONG_REQUEST_BASE) {
+      throw e;
+    }
+    // Fall back to direct Railway in case Vercel itself is unreachable.
+    // Rare, but useful belt-and-braces against carrier blocks on
+    // *.vercel.app domains too.
+    const res = await fetch(`${LONG_REQUEST_BASE}${path}`, { ...options, headers });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `HTTP ${res.status}`);
+    }
+    return res.json();
   }
-  return res.json();
 }
 
 export const api = {
@@ -65,7 +114,9 @@ export const api = {
           if (token) headers.Authorization = `Bearer ${token}`;
         } catch { /* anonymous */ }
       }
-      const res = await fetch(`${API_BASE}/api/strategy/upload`, { method: 'POST', body: formData, headers });
+      // Upload uses direct Railway URL — Vercel edge proxy throws
+      // ROUTER_EXTERNAL_TARGET_ERROR on multipart bodies > a few MB.
+      const res = await fetch(`${LONG_REQUEST_BASE}/api/strategy/upload`, { method: 'POST', body: formData, headers });
       const raw = await res.text();
       // Try to parse as JSON first
       try {
