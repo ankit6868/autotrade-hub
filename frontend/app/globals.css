@@ -338,3 +338,11 @@ body > * {
   body[data-sidebar-open='true']  main.app-main { margin-left: 16rem; }
   body[data-sidebar-open='false'] main.app-main { margin-left: 0; }
 }
+
+/* Fixed-positioned pages (e.g. Futures Terminal) need `left` instead of
+   margin-left to track the sidebar. Class `app-fixed-page` opts into the
+   same toggle the regular main content uses. */
+@media (min-width: 768px) {
+  body[data-sidebar-open='true']  .app-fixed-page { left: 16rem; }
+  body[data-sidebar-open='false'] .app-fixed-page { left: 0; }
+}

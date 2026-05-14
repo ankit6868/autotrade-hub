@@ -5,10 +5,22 @@ import { api } from '@/lib/api';
 interface Props {
   mode: 'paper' | 'live';
   pair?: string;
+  // Optional collapse control. When provided, the parent decides whether the
+  // panel is expanded. When omitted, the panel manages its own local state
+  // and toggles via the chevron in its header.
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
 }
 
-export default function AssetOverview({ mode, pair }: Props) {
+export default function AssetOverview({ mode, pair, collapsed: collapsedProp, onToggleCollapsed }: Props) {
   const [account, setAccount] = useState<any>(null);
+  const [localCollapsed, setLocalCollapsed] = useState(false);
+
+  // Parent-controlled vs uncontrolled: same pattern as React's <input value>.
+  const collapsed = collapsedProp !== undefined ? collapsedProp : localCollapsed;
+  const toggleCollapsed = onToggleCollapsed
+    ? onToggleCollapsed
+    : () => setLocalCollapsed(v => !v);
 
   useEffect(() => {
     const fetchData = async () => {
@@ -26,10 +38,7 @@ export default function AssetOverview({ mode, pair }: Props) {
   const isLive = account?.source === 'kucoin_lead_trading';
 
   return (
-    // No border-t — the parent layout owns the surrounding borders now
-    // (Asset Overview lives in the bottom row's right cell, so the row
-    // already has its own top border).
-    <div className="px-3 py-3 h-full">
+    <div className="px-3 py-3 h-full overflow-y-auto">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <h4 className="text-xs font-bold text-white">Asset Overview</h4>
@@ -40,13 +49,34 @@ export default function AssetOverview({ mode, pair }: Props) {
             <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-400 font-medium">Paper</span>
           )}
         </div>
-        <div className="flex items-center gap-2">
-          <button onClick={() => api.futures.account(mode).then(d => setAccount(d)).catch(() => {})} className="text-slate-500 hover:text-white">
+        <div className="flex items-center gap-1">
+          {/* Refresh */}
+          <button
+            onClick={() => api.futures.account(mode).then(d => setAccount(d)).catch(() => {})}
+            aria-label="Refresh balance"
+            className="text-slate-500 hover:text-white p-1 rounded hover:bg-white/5"
+          >
             <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" /></svg>
+          </button>
+          {/* Collapse/Expand. When collapsed, the parent shrinks the row so
+              the Manual/Bot panel above has more headroom (see futures-trade
+              page.tsx). */}
+          <button
+            onClick={toggleCollapsed}
+            aria-label={collapsed ? 'Expand Asset Overview' : 'Collapse Asset Overview'}
+            aria-expanded={!collapsed}
+            className="text-slate-500 hover:text-white p-1 rounded hover:bg-white/5"
+          >
+            <svg
+              className={`w-3.5 h-3.5 transition-transform ${collapsed ? 'rotate-180' : ''}`}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
           </button>
         </div>
       </div>
-
+      {!collapsed && (
       <div className="space-y-2 text-[11px]">
         {/* Futures section */}
         <div>
@@ -117,6 +147,7 @@ export default function AssetOverview({ mode, pair }: Props) {
             Users who want to move USDT between spot and futures still do it
             on KuCoin's own dashboard. */}
       </div>
+      )}
     </div>
   );
 }
