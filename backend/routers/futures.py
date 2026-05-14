@@ -2146,11 +2146,15 @@ def set_position_tp_sl(
     if not matched_pos:
         if not _ensure_live_credentials(eng, user_id, db)[0]:
             return {"error": f"No open position for {pair}. Connect a Lead Trading API key in Setup to enable TP/SL on KuCoin-only positions."}
+        # Use /api/v1/positions (LIST) + filter, NOT /api/v1/position?symbol=X
+        # (SINGLE). The single-position endpoint returns qty=0 for Lead
+        # Trading positions even when they're real and visible in the LIST
+        # endpoint (which is what powers the reconcile that surfaces them
+        # in the UI). Same bug we fixed for force-close.
         try:
             pos_resp = _kucoin_get_signed(
-                "/api/v1/position",
+                "/api/v1/positions",
                 eng._api_key, eng._api_sec, eng._api_pass,
-                params={"symbol": kc_symbol},
                 base_url=KUCOIN_FUTURES_BASE,
             )
         except Exception as e:
@@ -2158,8 +2162,15 @@ def set_position_tp_sl(
             return {"error": f"Could not read your KuCoin position: {e}"}
         if str(pos_resp.get("code")) != "200000":
             return {"error": f"KuCoin rejected position lookup: {pos_resp.get('msg', pos_resp)}"}
-        pdata = pos_resp.get("data") or {}
-        qty = int(pdata.get("currentQty", 0) or 0)
+        pdata: dict = {}
+        qty = 0
+        for _p in (pos_resp.get("data") or []):
+            if (_p.get("symbol") or "").upper() == kc_symbol.upper():
+                _q = int(_p.get("currentQty", 0) or 0)
+                if _q != 0:
+                    pdata = _p
+                    qty = _q
+                    break
         if qty == 0:
             return {"error": f"No open position for {pair} on KuCoin Lead Trading either. Open one before setting TP/SL."}
         kc_direction = "long" if qty > 0 else "short"
