@@ -24,17 +24,53 @@ const nav = [
   { href: '/history',            label: 'History',            icon: '📈',  section: null },
 ];
 
+// Persist desktop sidebar state across page navigations so the user's
+// "I prefer it collapsed" choice sticks. Mobile is always controlled by the
+// toggle and resets to closed on route change (because route navigation in
+// the overlay UX should auto-close the menu — different intent).
+const SIDEBAR_LS_KEY = 'autotrade-sidebar-open';
+
+function readPersistedOpen(): boolean {
+  if (typeof window === 'undefined') return true;
+  // Default to OPEN on desktop, CLOSED on mobile.
+  const stored = window.localStorage.getItem(SIDEBAR_LS_KEY);
+  if (stored === 'true') return true;
+  if (stored === 'false') return false;
+  return window.matchMedia('(min-width: 768px)').matches;
+}
+
 export default function Sidebar() {
   const pathname = usePathname();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(false);   // SSR-safe initial value; hydrated below
 
+  // Hydrate from localStorage on first client render
   useEffect(() => {
-    setOpen(false);
-  }, [pathname]);
+    setOpen(readPersistedOpen());
+  }, []);
 
+  // Persist + sync the body data attribute on every state change so the
+  // main content's CSS (see globals.css) can reflow alongside the sidebar.
   useEffect(() => {
     if (typeof document === 'undefined') return;
-    document.body.style.overflow = open ? 'hidden' : '';
+    document.body.dataset.sidebarOpen = open ? 'true' : 'false';
+    try { window.localStorage.setItem(SIDEBAR_LS_KEY, String(open)); } catch { /* private mode */ }
+  }, [open]);
+
+  // On mobile, close the menu after navigating. On desktop we leave the
+  // user's choice intact — closing on every click would defeat the purpose
+  // of a persistent collapse.
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const isMobile = window.matchMedia('(max-width: 767px)').matches;
+    if (isMobile) setOpen(false);
+  }, [pathname]);
+
+  // Lock body scroll only when the sidebar is overlaying content (mobile).
+  // On desktop it lives in normal layout flow so no scroll-lock needed.
+  useEffect(() => {
+    if (typeof document === 'undefined' || typeof window === 'undefined') return;
+    const isDesktop = window.matchMedia('(min-width: 768px)').matches;
+    document.body.style.overflow = open && !isDesktop ? 'hidden' : '';
     return () => {
       document.body.style.overflow = '';
     };
@@ -50,10 +86,45 @@ export default function Sidebar() {
 
   return (
     <>
-      {/* Mobile top bar */}
+      {/* Floating hamburger button — always visible (mobile + desktop) so
+          users can collapse/expand the sidebar at will. Sits in the top-left
+          corner; when the sidebar is OPEN on desktop, this button still
+          works to close it (and is visible above the sidebar via z-60). */}
+      <button
+        type="button"
+        aria-label={open ? 'Close menu' : 'Open menu'}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className={[
+          'fixed top-3 left-3 z-[60] inline-flex items-center justify-center',
+          'h-9 w-9 rounded-lg text-slate-200',
+          'bg-[#0f1830]/80 backdrop-blur border border-white/[0.08]',
+          'hover:bg-[#162045] hover:text-white active:scale-95 transition',
+          'shadow-lg shadow-black/30',
+        ].join(' ')}
+        style={{ marginTop: 'env(safe-area-inset-top)' }}
+      >
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          {open ? (
+            <>
+              <line x1="18" y1="6" x2="6" y2="18" />
+              <line x1="6" y1="6" x2="18" y2="18" />
+            </>
+          ) : (
+            <>
+              <line x1="3" y1="6" x2="21" y2="6" />
+              <line x1="3" y1="12" x2="21" y2="12" />
+              <line x1="3" y1="18" x2="21" y2="18" />
+            </>
+          )}
+        </svg>
+      </button>
+
+      {/* Mobile top bar (brand + spacer next to the hamburger). Stays mobile
+          only — desktop uses just the floating hamburger. */}
       <header
         suppressHydrationWarning
-        className="md:hidden fixed top-0 inset-x-0 h-14 z-40 flex items-center justify-between px-4 border-b border-white/[0.06]"
+        className="md:hidden fixed top-0 inset-x-0 h-14 z-40 flex items-center justify-center px-4 border-b border-white/[0.06]"
         style={{
           paddingTop: 'env(safe-area-inset-top)',
           background: 'rgba(10, 14, 28, 0.7)',
@@ -61,34 +132,12 @@ export default function Sidebar() {
           WebkitBackdropFilter: 'blur(18px) saturate(160%)',
         }}
       >
-        <button
-          aria-label={open ? 'Close menu' : 'Open menu'}
-          aria-expanded={open}
-          onClick={() => setOpen((v) => !v)}
-          className="p-2 -ml-2 rounded-lg text-slate-200 hover:bg-white/5 active:scale-95 transition"
-        >
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-            {open ? (
-              <>
-                <line x1="18" y1="6" x2="6" y2="18" />
-                <line x1="6" y1="6" x2="18" y2="18" />
-              </>
-            ) : (
-              <>
-                <line x1="3" y1="6" x2="21" y2="6" />
-                <line x1="3" y1="12" x2="21" y2="12" />
-                <line x1="3" y1="18" x2="21" y2="18" />
-              </>
-            )}
-          </svg>
-        </button>
         <Link href="/" className="flex items-center gap-2">
           <span className="text-base font-semibold text-white tracking-tight">AutoTrade Hub</span>
         </Link>
-        <div className="w-9" />
       </header>
 
-      {/* Backdrop */}
+      {/* Backdrop — mobile only (desktop just reflows main content) */}
       {open && (
         <div
           className="md:hidden fixed inset-0 z-40 bg-black/60 backdrop-blur-sm animate-fade-in"
@@ -97,7 +146,9 @@ export default function Sidebar() {
         />
       )}
 
-      {/* Sidebar */}
+      {/* Sidebar. The `md:translate-x-0` override is gone — now the
+          translate is purely driven by `open`, so toggling collapses the
+          sidebar on desktop too. */}
       <aside
         suppressHydrationWarning
         className={[
@@ -105,7 +156,6 @@ export default function Sidebar() {
           'border-r border-white/[0.06]',
           'transform transition-transform duration-300 ease-out will-change-transform',
           open ? 'translate-x-0' : '-translate-x-full',
-          'md:translate-x-0',
         ].join(' ')}
         style={{
           paddingTop: 'env(safe-area-inset-top)',
@@ -116,8 +166,10 @@ export default function Sidebar() {
           boxShadow: 'inset -1px 0 0 rgba(255,255,255,0.04)',
         }}
       >
-        {/* Brand */}
-        <div className="px-5 py-5 border-b border-white/[0.06] flex items-center justify-between">
+        {/* Brand. Left padding bumped (pl-16) so the brand stays clear of
+            the floating hamburger button that overlaps the top-left corner
+            when the sidebar is open. */}
+        <div className="pl-16 pr-5 py-5 border-b border-white/[0.06] flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2.5 group">
             <span
               className="inline-flex h-10 w-10 items-center justify-center rounded-2xl text-white text-lg shadow-glow group-hover:scale-105 transition-transform"
@@ -133,10 +185,12 @@ export default function Sidebar() {
               <p className="text-[11px] text-slate-400 leading-tight">Free AI Trading</p>
             </div>
           </Link>
+          {/* Internal close button removed — the floating hamburger at the
+              top-left handles open AND close on both viewports. */}
           <button
             aria-label="Close menu"
             onClick={() => setOpen(false)}
-            className="md:hidden p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition"
+            className="hidden p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 transition"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="18" y1="6" x2="6" y2="18" />

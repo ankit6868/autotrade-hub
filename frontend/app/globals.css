@@ -329,3 +329,12 @@ body > * {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Sidebar collapse — drives main content's margin via a body data attribute
+   so the Sidebar component can toggle open/close from anywhere without
+   needing React context or prop drilling. Mobile gets no margin in either
+   state because the sidebar overlays the page there. */
+@media (min-width: 768px) {
+  body[data-sidebar-open='true']  main.app-main { margin-left: 16rem; }
+  body[data-sidebar-open='false'] main.app-main { margin-left: 0; }
+}

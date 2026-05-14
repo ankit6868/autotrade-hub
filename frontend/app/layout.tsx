@@ -41,12 +41,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <AuthBridge />
           <AuthGate>
             <Sidebar />
+            {/* main content margin reflows with the sidebar's open/closed
+                state. Sidebar.tsx sets data-sidebar-open on <body>; matching
+                CSS in globals.css drives the desktop margin (16rem when open,
+                0 when closed). Mobile keeps no margin (sidebar overlays). */}
             <main
               className="
-                relative z-10 min-h-screen
-                md:ml-64
+                app-main relative z-10 min-h-screen
                 pt-16 md:pt-0
                 pb-8
+                transition-[margin-left] duration-300 ease-out
               "
             >
               <div className="container-app px-3 xs:px-4 sm:px-6 lg:px-8 2xl:px-10">
