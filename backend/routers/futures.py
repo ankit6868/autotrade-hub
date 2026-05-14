@@ -1261,46 +1261,63 @@ async def futures_force_close(
                 kc_symbol = normalize_futures_symbol(
                     pair.replace("/", "").replace("USDT", "USDTM")
                 )
-                # Get the live position for this symbol
+                # Get the live position for this symbol.
+                # NOTE: We use /api/v1/positions (LIST) and filter, not
+                # /api/v1/position?symbol=X (SINGLE). The single-position
+                # endpoint returns qty=0 for Lead Trading positions even
+                # when they're real and visible in the LIST endpoint
+                # (which is what powers the reconcile that surfaces them
+                # in the UI). Using the LIST guarantees we see the same
+                # positions the user sees.
                 from backend.services.native_trading_engine import _kucoin_get_signed
                 pos_resp = _kucoin_get_signed(
-                    "/api/v1/position",
+                    "/api/v1/positions",
                     eng._api_key, eng._api_sec, eng._api_pass,
-                    params={"symbol": kc_symbol},
                     base_url=KUCOIN_FUTURES_BASE,
                 )
+                pdata: dict = {}
+                qty = 0
                 if str(pos_resp.get("code")) == "200000":
-                    pdata = pos_resp.get("data") or {}
-                    qty = int(pdata.get("currentQty", 0))
-                    if qty != 0:
-                        direction = "long" if qty > 0 else "short"
-                        side          = "sell" if direction == "long" else "buy"
-                        position_side = "LONG" if direction == "long" else "SHORT"
-                        contracts     = abs(qty)
-                        lev_use       = int(pdata.get("realLeverage") or pdata.get("leverage") or 1)
-                        body = {
-                            "clientOid":   f"atf-kucoin-close-{int(_time.time()*1000)}",
-                            "side":         side,
-                            "symbol":       kc_symbol,
-                            "type":         "market",
-                            "size":         contracts,
-                            "leverage":     min(LEAD_MAX_LEVERAGE, lev_use),
-                            "marginMode":   (pdata.get("marginMode") or "ISOLATED").upper(),
-                            "positionSide": position_side,
-                            "reduceOnly":   True,
-                        }
-                        resp = _kucoin_post_signed(
-                            "/api/v1/copy-trade/futures/orders", body,
-                            eng._api_key, eng._api_sec, eng._api_pass,
-                            base_url=KUCOIN_FUTURES_BASE,
-                        )
-                        if str(resp.get("code")) == "200000":
-                            kucoin_only_closed = 1
-                            log.info("[%s] Closed KuCoin-only position for %s qty=%s",
-                                     user_id, pair, qty)
-                        else:
-                            log.warning("[%s] Failed to close KuCoin-only position for %s: %s",
-                                        user_id, pair, resp)
+                    for _p in (pos_resp.get("data") or []):
+                        if (_p.get("symbol") or "").upper() == kc_symbol.upper():
+                            _q = int(_p.get("currentQty", 0) or 0)
+                            if _q != 0:
+                                pdata = _p
+                                qty = _q
+                                break
+                if qty != 0:
+                    direction = "long" if qty > 0 else "short"
+                    side          = "sell" if direction == "long" else "buy"
+                    position_side = "LONG" if direction == "long" else "SHORT"
+                    contracts     = abs(qty)
+                    lev_use       = int(pdata.get("realLeverage") or pdata.get("leverage") or 1)
+                    body = {
+                        "clientOid":   f"atf-kucoin-close-{int(_time.time()*1000)}",
+                        "side":         side,
+                        "symbol":       kc_symbol,
+                        "type":         "market",
+                        "size":         contracts,
+                        "leverage":     min(LEAD_MAX_LEVERAGE, lev_use),
+                        "marginMode":   (pdata.get("marginMode") or "ISOLATED").upper(),
+                        "positionSide": position_side,
+                        "reduceOnly":   True,
+                    }
+                    resp = _kucoin_post_signed(
+                        "/api/v1/copy-trade/futures/orders", body,
+                        eng._api_key, eng._api_sec, eng._api_pass,
+                        base_url=KUCOIN_FUTURES_BASE,
+                    )
+                    if str(resp.get("code")) == "200000":
+                        kucoin_only_closed = 1
+                        log.info("[%s] Closed KuCoin-only position for %s qty=%s",
+                                 user_id, pair, qty)
+                    else:
+                        log.warning("[%s] Failed to close KuCoin-only position for %s: %s",
+                                    user_id, pair, resp)
+                        return {"error": f"KuCoin rejected close: {resp.get('msg') or resp}"}
+                else:
+                    log.info("[%s] /api/v1/positions returned no open qty for %s (code=%s)",
+                             user_id, kc_symbol, pos_resp.get("code"))
             except Exception as e:
                 log.error("[%s] KuCoin-only close attempt failed: %s", user_id, e)
 
