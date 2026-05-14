@@ -118,6 +118,7 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
             closingPair={closingPair}
             onClose={closePosition}
             onCloseAll={closeAllPositions}
+            onRefresh={refreshAll}
           />
         )}
         {tab === 'open_orders' && (
@@ -143,10 +144,15 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
   );
 }
 
-function PositionsTab({ positions, closingPair, onClose, onCloseAll }: {
+function PositionsTab({ positions, closingPair, onClose, onCloseAll, onRefresh }: {
   positions: any[]; closingPair: string | null;
   onClose: (pair: string) => void; onCloseAll: () => void;
+  onRefresh?: () => void;
 }) {
+  // TP/SL editor state — opens an inline modal for the selected position.
+  const [tpslPair, setTpslPair] = useState<string | null>(null);
+  const tpslPosition = positions.find(p => p.pair === tpslPair) || null;
+
   if (positions.length === 0) {
     return <div className="text-center text-slate-500 py-8 text-sm">No open positions</div>;
   }
@@ -168,6 +174,7 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll }: {
             <th className="text-right px-2 py-1">Est. Liq.</th>
             <th className="text-right px-2 py-1">Margin</th>
             <th className="text-right px-2 py-1">Unrealized PNL (ROI)</th>
+            <th className="text-right px-2 py-1">TP / SL</th>
             <th className="text-right px-2 py-1">Risk Ratio</th>
             <th className="text-center px-2 py-1">Actions</th>
           </tr>
@@ -216,6 +223,22 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll }: {
                     ({roi >= 0 ? '+' : ''}{roi.toFixed(2)}%)
                   </div>
                 </td>
+                <td className="text-right px-2 py-2">
+                  <div className="text-[10px] tabular-nums">
+                    <div className={p.tp_price ? 'text-emerald-400' : 'text-slate-500'}>
+                      TP: {p.tp_price ? Number(p.tp_price).toFixed(2) : '—'}
+                    </div>
+                    <div className={p.stoploss_price ? 'text-red-400' : 'text-slate-500'}>
+                      SL: {p.stoploss_price ? Number(p.stoploss_price).toFixed(2) : '—'}
+                    </div>
+                    <button
+                      onClick={() => setTpslPair(p.pair)}
+                      className="text-[9px] text-brand-400 hover:text-brand-300 underline mt-0.5"
+                    >
+                      Edit
+                    </button>
+                  </div>
+                </td>
                 <td className="text-right px-2 py-2 text-slate-400">{riskRatio}%</td>
                 <td className="text-center px-2 py-2">
                   <div className="flex items-center justify-center gap-1">
@@ -240,6 +263,120 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll }: {
           })}
         </tbody>
       </table>
+      {tpslPosition && (
+        <TpSlEditor
+          position={tpslPosition}
+          onClose={() => setTpslPair(null)}
+          onSaved={() => { setTpslPair(null); onRefresh?.(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// Inline modal for setting Take Profit / Stop Loss on an existing position.
+// Works for both paper (engine state only) and live (also places reduceOnly
+// TP/SL stop orders on KuCoin Lead Trading via /api/futures/position/tp-sl).
+function TpSlEditor({ position, onClose, onSaved }: {
+  position: any; onClose: () => void; onSaved: () => void;
+}) {
+  const entry = position.entry_price || 0;
+  const isLong = (position.side || position.direction) === 'long';
+  const [tp, setTp] = useState<string>(position.tp_price ? String(position.tp_price) : '');
+  const [sl, setSl] = useState<string>(position.stoploss_price ? String(position.stoploss_price) : '');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string>('');
+
+  async function save() {
+    setSubmitting(true);
+    setError('');
+    const tpNum = tp ? parseFloat(tp) : undefined;
+    const slNum = sl ? parseFloat(sl) : undefined;
+    // Basic sanity: TP must be on the profitable side, SL on the loss side.
+    if (tpNum) {
+      if (isLong && tpNum <= entry) {
+        setError('Long TP must be ABOVE entry price.'); setSubmitting(false); return;
+      }
+      if (!isLong && tpNum >= entry) {
+        setError('Short TP must be BELOW entry price.'); setSubmitting(false); return;
+      }
+    }
+    if (slNum) {
+      if (isLong && slNum >= entry) {
+        setError('Long SL must be BELOW entry price.'); setSubmitting(false); return;
+      }
+      if (!isLong && slNum <= entry) {
+        setError('Short SL must be ABOVE entry price.'); setSubmitting(false); return;
+      }
+    }
+    try {
+      const r = await api.futures.setTpSl({
+        pair: position.pair,
+        ...(tpNum ? { tp_price: tpNum } : {}),
+        ...(slNum ? { sl_price: slNum } : {}),
+      });
+      if (r?.error) {
+        setError(r.error);
+        setSubmitting(false);
+        return;
+      }
+      onSaved();
+    } catch (e) {
+      setError(String(e));
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
+      <div
+        onClick={e => e.stopPropagation()}
+        className="bg-[#0d1424] border border-[#243153] rounded-xl p-5 w-full max-w-sm shadow-2xl"
+      >
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-semibold text-white">Take Profit / Stop Loss</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-lg leading-none">×</button>
+        </div>
+        <div className="text-[11px] text-slate-400 mb-3">
+          {position.pair} · {isLong ? 'LONG' : 'SHORT'} · Entry {entry.toFixed(2)}
+        </div>
+
+        <label className="block text-[11px] text-slate-400 mb-1">Take Profit (USDT)</label>
+        <input
+          type="number" step="any" value={tp} onChange={e => setTp(e.target.value)}
+          placeholder={isLong ? '> ' + entry.toFixed(2) : '< ' + entry.toFixed(2)}
+          className="w-full bg-[#06091a] border border-[#243153] rounded-lg px-3 py-2 text-sm text-white mb-3 focus:outline-none focus:border-emerald-500"
+        />
+
+        <label className="block text-[11px] text-slate-400 mb-1">Stop Loss (USDT)</label>
+        <input
+          type="number" step="any" value={sl} onChange={e => setSl(e.target.value)}
+          placeholder={isLong ? '< ' + entry.toFixed(2) : '> ' + entry.toFixed(2)}
+          className="w-full bg-[#06091a] border border-[#243153] rounded-lg px-3 py-2 text-sm text-white mb-3 focus:outline-none focus:border-red-500"
+        />
+
+        {error && <div className="text-[11px] text-red-400 mb-2">{error}</div>}
+
+        <div className="flex gap-2 mt-2">
+          <button
+            onClick={onClose}
+            className="flex-1 px-3 py-2 rounded-lg bg-slate-800 text-slate-300 text-sm hover:bg-slate-700"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            disabled={submitting}
+            className="flex-1 px-3 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium hover:bg-emerald-400 disabled:opacity-50"
+          >
+            {submitting ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+
+        <div className="text-[10px] text-slate-500 mt-3">
+          For live positions, TP/SL is also placed on KuCoin Lead Trading as reduceOnly stop orders.
+        </div>
+      </div>
     </div>
   );
 }
