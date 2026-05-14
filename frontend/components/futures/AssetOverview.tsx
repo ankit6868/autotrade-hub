@@ -26,7 +26,10 @@ export default function AssetOverview({ mode, pair }: Props) {
   const isLive = account?.source === 'kucoin_lead_trading';
 
   return (
-    <div className="px-3 py-3 border-t border-white/[0.06]">
+    // No border-t — the parent layout owns the surrounding borders now
+    // (Asset Overview lives in the bottom row's right cell, so the row
+    // already has its own top border).
+    <div className="px-3 py-3 h-full">
       <div className="flex items-center justify-between mb-2">
         <div className="flex items-center gap-2">
           <h4 className="text-xs font-bold text-white">Asset Overview</h4>

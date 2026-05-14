@@ -118,24 +118,25 @@ export default function FuturesTerminal() {
         </div>
       </div>
 
-      {/* Main layout — KuCoin-style. Top row has three side-by-side
-          columns (Chart | OrderBook | Manual panel), each constrained to
-          the same height so the OrderBook doesn't stretch beyond the
-          chart. The Positions panel below spans the full width like
-          KuCoin's terminal, so users get a wide Open Orders / Positions /
-          History view instead of a squashed one. */}
+      {/* Main layout — KuCoin-style two-row grid.
+          ┌─ Chart ───────┬─ OrderBook ─┬─ Manual/Bot ─┐
+          │               │             │              │  TOP ROW
+          ├───────────────┴─────────────┼──────────────┤
+          │ Positions / Orders / History│ Asset Overview│ BOTTOM ROW
+          └─────────────────────────────┴──────────────┘
+          The right column (Manual/Bot on top, Asset Overview underneath)
+          uses fixed widths matched between the two rows so the columns
+          line up vertically — Manual/Bot column ends exactly where the
+          chart ends, Asset Overview sits under Manual/Bot. */}
       <div className="flex-1 flex flex-col overflow-hidden">
-        {/* Top row: chart + order book + manual/bot panel */}
+        {/* Top row */}
         <div className="flex-1 flex min-h-0 overflow-hidden">
-          {/* Chart column — grows to fill remaining horizontal space */}
+          {/* Chart column — grows */}
           <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
             <KuCoinFuturesChart pair={pair} defaultInterval="15m" />
           </div>
 
-          {/* Order Book / Recent Trades column. Fixed width and bounded
-              to the chart row's height — internal content scrolls within
-              `flex-1 overflow-hidden` so the long order list never pushes
-              the layout to full page height. */}
+          {/* Order Book / Recent Trades column */}
           <div className="w-[220px] xl:w-[250px] border-l border-white/[0.06] bg-[#0d1117] flex-col hidden lg:flex overflow-hidden">
             <div className="flex border-b border-white/[0.06] shrink-0">
               <button
@@ -164,10 +165,9 @@ export default function FuturesTerminal() {
             </div>
           </div>
 
-          {/* Right column: Manual / Bot trading + Asset Overview at the
-              bottom (KuCoin layout). Asset Overview lives ONLY here now —
-              the old duplicate inside the bottom positions strip has been
-              removed so the page never has two copies of the same panel. */}
+          {/* Right column: Manual / Bot trading only — ends at the chart
+              bottom. Asset Overview moved to the bottom row's right cell
+              so the Manual form has its full height for the order entry. */}
           <div className="w-[300px] xl:w-[340px] border-l border-white/[0.06] bg-[#0d1117] flex-col hidden lg:flex overflow-hidden">
             <div className="flex border-b border-white/[0.06] shrink-0">
               <button
@@ -188,7 +188,6 @@ export default function FuturesTerminal() {
               </button>
             </div>
 
-            {/* Manual/Bot panel — scrolls internally if needed */}
             <div className="flex-1 overflow-y-auto min-h-0">
               {rightPanel === 'manual' ? (
                 <ManualOrderPanel
@@ -219,25 +218,24 @@ export default function FuturesTerminal() {
                 />
               )}
             </div>
-
-            {/* Asset Overview pinned to the bottom of the right column —
-                always visible (no xl:hidden trick), matches KuCoin's
-                trade page where the panel sits directly under the order
-                form. `shrink-0` keeps it from being squeezed by the
-                Manual panel above. */}
-            <div className="shrink-0 max-h-[40%] overflow-y-auto">
-              <AssetOverview mode={mode} pair={pair} />
-            </div>
           </div>
         </div>
 
-        {/* Bottom row: Positions panel — now spans the full page width
-            (was previously stuck under just the chart column). Gives the
-            tab strip (Open Orders / Positions / Assets / Order History /
-            Trade History / Position History / Trading Algorithm) the
-            horizontal room it needs without overflowing. */}
-        <div className="h-[240px] border-t border-white/[0.06] bg-[#0d1117] overflow-hidden">
-          <PositionsPanel mode={mode} onRefresh={refreshAccount} refreshTrigger={refreshTrigger} />
+        {/* Bottom row — two cells side-by-side. Widths mirror the top
+            row's columns so the Asset Overview cell sits directly under
+            the Manual/Bot column. */}
+        <div className="h-[260px] border-t border-white/[0.06] bg-[#0d1117] overflow-hidden flex">
+          {/* Left cell: Positions / Open Orders / History — spans Chart +
+              OrderBook columns of the top row. */}
+          <div className="flex-1 min-w-0 overflow-hidden border-r border-white/[0.06]">
+            <PositionsPanel mode={mode} onRefresh={refreshAccount} refreshTrigger={refreshTrigger} />
+          </div>
+          {/* Right cell: Asset Overview — same width as the Manual/Bot
+              column above so the two stack visually. Hidden on small
+              screens (<lg) to match the Manual/Bot column's lg:flex. */}
+          <div className="w-[300px] xl:w-[340px] overflow-y-auto hidden lg:block">
+            <AssetOverview mode={mode} pair={pair} />
+          </div>
         </div>
       </div>
     </div>
