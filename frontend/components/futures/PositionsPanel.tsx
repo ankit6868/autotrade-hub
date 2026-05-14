@@ -55,10 +55,18 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
   async function closePosition(pair: string) {
     setClosingPair(pair);
     try {
-      await api.futures.forceClose(pair, mode);
+      const res = await api.futures.forceClose(pair, mode);
+      // Backend returns { error } when KuCoin refuses the close — show it
+      // so the user understands why the position is still visible and can
+      // act on the real reason (e.g. margin-mode mismatch, lot size).
+      if (res?.error) {
+        alert(res.error);
+      }
       refreshAll();
       onRefresh?.();
-    } catch { /* */ }
+    } catch (e) {
+      alert(`Close failed: ${e}`);
+    }
     setClosingPair(null);
   }
 
