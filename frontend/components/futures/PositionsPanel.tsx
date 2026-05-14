@@ -64,9 +64,17 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
 
   async function cancelOrder(orderId: string) {
     try {
-      await api.futures.cancelOrder(orderId);
+      const res = await api.futures.cancelOrder(orderId);
+      if (res?.error) {
+        // Backend returns a structured error when KuCoin refuses the
+        // cancel — surface it to the user so they know the order is
+        // still alive on the exchange.
+        alert(res.error);
+      }
       refreshAll();
-    } catch { /* */ }
+    } catch (e) {
+      alert(`Cancel failed: ${e}`);
+    }
   }
 
   async function closeAllPositions() {
@@ -608,6 +616,20 @@ function TpSlEditor({ position, onClose, onSaved }: {
   );
 }
 
+// Translate KuCoin's internal futures symbol back to the human pair so the
+// Open Orders table reads "BTC/USDT" instead of the awkward "XBTUSDTM".
+//   XBTUSDTM → BTC/USDT
+//   ETHUSDTM → ETH/USDT
+//   …
+// Falls through to the raw symbol if it doesn't follow the pattern.
+function _displayPair(symbol: string | undefined): string {
+  if (!symbol) return '—';
+  let s = symbol;
+  if (s.toUpperCase().startsWith('XBT')) s = 'BTC' + s.slice(3);
+  if (s.toUpperCase().endsWith('USDTM')) s = s.slice(0, -5) + '/USDT';
+  return s;
+}
+
 function OrdersTab({ orders, onCancel }: { orders: any[]; onCancel: (id: string) => void }) {
   if (orders.length === 0) {
     return <div className="text-center text-slate-500 py-8 text-sm">No open orders</div>;
@@ -628,7 +650,7 @@ function OrdersTab({ orders, onCancel }: { orders: any[]; onCancel: (id: string)
       <tbody>
         {orders.map((o, i) => (
           <tr key={i} className="border-t border-white/[0.04]">
-            <td className="px-2 py-2 text-white">{o.symbol}</td>
+            <td className="px-2 py-2 text-white">{_displayPair(o.symbol)}</td>
             <td className="px-2 py-2 text-slate-300 capitalize">{o.order_type}</td>
             <td className={`px-2 py-2 capitalize ${o.side === 'buy' ? 'text-emerald-400' : 'text-red-400'}`}>{o.side}</td>
             <td className="text-right px-2 py-2 text-slate-300">{o.price ?? '--'}</td>
@@ -673,7 +695,7 @@ function OrderHistoryTab({ mode }: { mode: 'paper' | 'live' }) {
       <tbody>
         {orders.map((o, i) => (
           <tr key={i} className="border-t border-white/[0.04]">
-            <td className="px-2 py-2 text-white">{o.symbol}</td>
+            <td className="px-2 py-2 text-white">{_displayPair(o.symbol)}</td>
             <td className="px-2 py-2 text-slate-300 capitalize">{o.order_type}</td>
             <td className={`px-2 py-2 capitalize ${o.side === 'buy' ? 'text-emerald-400' : 'text-red-400'}`}>{o.side}</td>
             <td className="text-right px-2 py-2 text-slate-300">{o.price ?? '--'}</td>

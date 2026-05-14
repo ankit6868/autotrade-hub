@@ -1575,10 +1575,18 @@ def cancel_futures_order(
     ).scalar_one_or_none()
     is_live_order = bool(db_order and db_order.exchange_order_id)
 
+    # Track whether the KuCoin DELETE actually succeeded. Previously the
+    # DB row was always marked `cancelled` regardless, so the UI showed
+    # "cancelled" while the order was still alive on KuCoin — exactly the
+    # bug the user reported. Now we only flip the DB status when KuCoin
+    # confirms the cancel (or when the order is paper-only).
+    kucoin_cancelled = not is_live_order   # paper orders need no exchange call
+    kucoin_error: str | None = None
     if is_live_order:
         ok, err = _ensure_live_credentials(eng, user_id, db)
         if not ok:
             log.warning("[%s] cancel-order skipped Lead Trading call: %s", user_id, err)
+            kucoin_error = err
         else:
             try:
                 from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
@@ -1592,9 +1600,30 @@ def cancel_futures_order(
                 req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
                 with urllib.request.urlopen(req_obj, timeout=15) as resp:
                     cancel_resp = _json.loads(resp.read().decode())
-                log.info("[%s] Lead Trading cancel order ok: %s", user_id, cancel_resp)
+                code = str(cancel_resp.get("code", ""))
+                if code == "200000":
+                    kucoin_cancelled = True
+                    log.info("[%s] Lead Trading cancel order ok: %s", user_id, cancel_resp)
+                else:
+                    kucoin_error = cancel_resp.get("msg") or f"KuCoin code {code}"
+                    log.warning("[%s] Lead Trading cancel rejected: %s", user_id, cancel_resp)
             except Exception as e:
+                kucoin_error = str(e)
                 log.error("[%s] Lead Trading cancel failed: %s", user_id, e)
+
+    # If the live cancel failed, surface the error and DON'T mark the row
+    # cancelled — leaves it pending so the UI keeps showing it, the user
+    # can retry, and KuCoin remains the source of truth.
+    if is_live_order and not kucoin_cancelled:
+        return {
+            "error": (
+                f"KuCoin Lead Trading could not cancel the order: {kucoin_error}. "
+                "The order is still active on KuCoin — please retry or cancel "
+                "directly from the KuCoin tab."
+            ),
+            "order_id": order_id,
+            "kucoin_cancelled": False,
+        }
 
     result = eng.cancel_pending_order(order_id)
 
@@ -1606,8 +1635,9 @@ def cancel_futures_order(
     )
     db.commit()
 
-    log_event(db, user_id, "futures.cancel_order", request, payload={"order_id": order_id})
-    return result
+    log_event(db, user_id, "futures.cancel_order", request,
+              payload={"order_id": order_id, "kucoin_cancelled": kucoin_cancelled})
+    return {**(result or {}), "kucoin_cancelled": kucoin_cancelled, "order_id": order_id}
 
 
 @router.get("/orders")
@@ -1627,8 +1657,11 @@ def get_futures_orders(
     to 'filled' here so they stop showing in the Open Orders tab while a
     real position is open."""
     eng = futures_engine_registry.for_user(user_id)
-    # Combine engine pending + DB records
-    engine_orders = eng.get_pending_orders(symbol)
+    # NOTE: `eng.get_pending_orders()` is intentionally NOT used here.
+    # Engine in-memory pending orders are kept for the paper-mode matching
+    # loop, but the API responds from the FuturesOrder DB rows so the
+    # `mode` column drives strict paper/live separation. See the long
+    # comment near the return statement below.
 
     # ── Live-mode reconcile: ask KuCoin if our 'pending' LIVE rows really
     # are still pending. KuCoin only returns truly-active orders, so any of
@@ -1700,14 +1733,18 @@ def get_futures_orders(
         for o in db.execute(query).scalars().all()
     ]
 
-    # Engine orders only make sense for the current engine mode; if the
-    # caller asked for a specific mode, filter accordingly. The engine has
-    # one _mode at a time so this is a simple equality check.
-    if status == "pending":
-        if mode is None or (eng._mode or "paper") == mode:
-            return {"orders": engine_orders}
-        # Mode mismatch — engine orders don't apply here.
-        return {"orders": []}
+    # Always return DB orders — the previous logic returned `engine_orders`
+    # for pending status, gated by `eng._mode == mode`. That was buggy:
+    #   - User places a live limit order → DB row gets mode='live' ✓
+    #   - But `eng._mode` is 'paper' (default — no live bot running)
+    #   - Live tab queries ?mode=live → eng._mode != 'live' → returned []
+    #   - Paper tab queries ?mode=paper → eng._mode == 'paper' → returned
+    #     engine_orders which CONTAINED the live order
+    #   ⇒ live limit orders leaked into the Paper tab.
+    # All orders are persisted to FuturesOrder on creation (see
+    # place_futures_order), so the DB rows are the single source of truth.
+    # The mode filter above (`FuturesOrder.mode == mode`) does the right
+    # paper/live separation directly off the column.
     return {"orders": db_orders}
 
 
