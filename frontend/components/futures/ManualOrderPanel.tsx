@@ -124,14 +124,27 @@ export default function ManualOrderPanel({
   const amountNum = costMode
     ? (parseFloat(costUsdt) || 0) / effectiveRef
     : (parseFloat(amount) || 0);
-  // The "Cost (USDT)" field IS the margin — the USDT amount that will be
-  // locked from the user's wallet when the order fills. The notional position
-  // value is cost × leverage. The previous code divided cost by leverage to
-  // get "Margin", which was the wrong direction and produced confusing
-  // displays ("you typed 5 USDT, margin 0.25 USDT" was the bug).
+  // The "Margin (USDT)" field IS the margin — the USDT amount the user
+  // wants to commit. The actual order, after KuCoin's lot-size rounding
+  // (1 lot = lotSize × price notional, minimum 1 lot), often locks LESS
+  // than the user typed because contracts are integer. Mirror KuCoin's
+  // approach: show the user's typed value AND the actual values that will
+  // hit the exchange. This avoids the "I typed 5 but Margin says 4.08
+  // locked, what happened?" surprise.
   const costUsdt_ = costMode ? (parseFloat(costUsdt) || 0) : amountNum * effectiveRef;
-  const marginCost = costUsdt_;                 // cost === margin locked
-  const notionalValue = costUsdt_ * leverage;   // position size on the exchange
+  const typedMargin = costUsdt_;                       // what user typed
+  const typedNotional = costUsdt_ * leverage;          // typed × leverage
+  // Actual order after lot-size rounding (floor of notional / 1-lot value,
+  // min 1 lot). lotSize and effectiveRef defined above the cost vars.
+  const oneLotNotional = lotSize * effectiveRef;       // value of 1 contract
+  const actualContracts = oneLotNotional > 0
+    ? Math.max(1, Math.floor(typedNotional / oneLotNotional))
+    : 0;
+  const actualNotional = actualContracts * oneLotNotional;
+  const actualMargin = leverage > 0 ? actualNotional / leverage : 0;
+  // For backwards compat with downstream UI that references these names:
+  const marginCost = actualMargin;          // what KuCoin will actually lock
+  const notionalValue = actualNotional;     // what KuCoin will actually open
 
   const refPrice = priceNum > 0 ? priceNum : (lastPrice || 0);
   const maxLongAmount = refPrice > 0 ? (availableBalance * leverage) / refPrice : 0;
@@ -879,45 +892,73 @@ export default function ManualOrderPanel({
         )}
       </div>
 
-      {/* Buy/Long + Sell/Short buttons */}
+      {/* Buy/Long + Sell/Short buttons. The "≈ X USDT" subtitle mirrors
+          KuCoin's button — it's the NOTIONAL (position size) that will
+          actually be opened after lot-size rounding, not what was typed.
+          For a market order at 20× with Margin=5 typed, KuCoin shows
+          "Open Long ≈ 81.54 USDT" and that's what the user actually
+          gets — the typed 5 maps to ~$4 actual margin because 1 lot
+          (0.001 BTC) is the minimum order. */}
       <div className="px-3 py-2 space-y-2 border-t border-white/[0.06]">
         <div className="grid grid-cols-2 gap-2">
           <button
             disabled={submitting}
             onClick={() => placeOrder('buy')}
-            className="py-2.5 rounded-lg bg-emerald-500 text-white text-sm font-bold hover:bg-emerald-400 disabled:opacity-50 transition-colors active:scale-[0.98]"
+            className="py-2 rounded-lg bg-emerald-500 text-white text-sm font-bold hover:bg-emerald-400 disabled:opacity-50 transition-colors active:scale-[0.98] flex flex-col items-center justify-center"
           >
-            {submitting ? '...' : 'Buy/Long'}
+            <span>{submitting ? '...' : 'Buy/Long'}</span>
+            {actualNotional > 0 && (
+              <span className="text-[10px] font-normal opacity-90">
+                ≈ {actualNotional.toFixed(2)} USDT
+              </span>
+            )}
           </button>
           <button
             disabled={submitting}
             onClick={() => placeOrder('sell')}
-            className="py-2.5 rounded-lg bg-red-500 text-white text-sm font-bold hover:bg-red-400 disabled:opacity-50 transition-colors active:scale-[0.98]"
+            className="py-2 rounded-lg bg-red-500 text-white text-sm font-bold hover:bg-red-400 disabled:opacity-50 transition-colors active:scale-[0.98] flex flex-col items-center justify-center"
           >
-            {submitting ? '...' : 'Sell/Short'}
+            <span>{submitting ? '...' : 'Sell/Short'}</span>
+            {actualNotional > 0 && (
+              <span className="text-[10px] font-normal opacity-90">
+                ≈ {actualNotional.toFixed(2)} USDT
+              </span>
+            )}
           </button>
         </div>
 
-        {/* Order summary — what the user will actually get when this fills.
-            Margin = USDT locked from wallet (= what they typed in Cost).
-            Notional = position value on the exchange = Margin × leverage. */}
+        {/* Order summary — what the user will ACTUALLY get when this fills.
+            Both numbers are POST lot-size rounding, matching KuCoin's UX.
+            If the user typed more margin than 1 contract requires, the
+            excess won't be used — we show the gap so they know. */}
         <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] text-slate-500 mt-1">
           <div>Margin</div>
+          <div>Margin</div>
           <div className="text-right text-slate-300 tabular-nums">
-            {marginCost > 0 ? marginCost.toFixed(2) : '0.00'} USDT
+            {actualMargin > 0 ? actualMargin.toFixed(2) : '0.00'} USDT
           </div>
           <div>Notional ({leverage}× leverage)</div>
           <div className="text-right text-slate-300 tabular-nums">
-            {notionalValue > 0 ? notionalValue.toFixed(2) : '0.00'} USDT
+            {actualNotional > 0 ? actualNotional.toFixed(2) : '0.00'} USDT
           </div>
-          {refPrice > 0 && costUsdt_ > 0 && lotSize > 0 && (
+          {actualContracts > 0 && costUsdt_ > 0 && (
             <>
               <div>≈ Contracts</div>
               <div className="text-right text-slate-400 tabular-nums">
-                {Math.max(1, Math.floor(notionalValue / (lotSize * refPrice)))}
-                {' '}({(Math.max(1, Math.floor(notionalValue / (lotSize * refPrice))) * lotSize).toFixed(6)} {baseCoin})
+                {actualContracts} ({(actualContracts * lotSize).toFixed(6)} {baseCoin})
               </div>
             </>
+          )}
+          {/* If lot rounding leaves more than 5% of the typed margin unused,
+              tell the user so they're not surprised when KuCoin locks less
+              than they typed. */}
+          {typedMargin > 0 && actualMargin > 0 && (typedMargin - actualMargin) / typedMargin > 0.05 && (
+            <div className="col-span-2 text-[9px] text-slate-500 italic pt-1 border-t border-white/[0.04] mt-1">
+              You typed {typedMargin.toFixed(2)} USDT — KuCoin will lock only
+              {' '}{actualMargin.toFixed(2)} USDT because 1 contract is the
+              {' '}minimum order size. To use more, type a larger Margin or
+              pick a lower leverage.
+            </div>
           )}
         </div>
       </div>
