@@ -110,13 +110,9 @@ export default function AssetOverview({ mode, pair }: Props) {
             )}
           </div>
         </div>
-
-        {/* Transfer button */}
-        <div className="pt-2">
-          <button className="w-full py-1.5 rounded text-[11px] font-medium bg-[#1e222d] text-slate-300 border border-white/[0.06] hover:bg-white/[0.06] transition-colors">
-            Transfer
-          </button>
-        </div>
+        {/* Transfer button removed — wasn't wired to any backend action.
+            Users who want to move USDT between spot and futures still do it
+            on KuCoin's own dashboard. */}
       </div>
     </div>
   );

@@ -118,119 +118,126 @@ export default function FuturesTerminal() {
         </div>
       </div>
 
-      {/* Main layout */}
-      <div className="flex-1 flex overflow-hidden">
-        {/* Left: Chart + Positions */}
-        <div className="flex-1 flex flex-col min-w-0">
-          {/* Chart area — KuCoin Futures OHLCV chart */}
-          <div className="flex-1 flex min-h-0">
-            <div className="flex-1 min-w-0">
-              <KuCoinFuturesChart pair={pair} defaultInterval="15m" />
+      {/* Main layout — KuCoin-style. Top row has three side-by-side
+          columns (Chart | OrderBook | Manual panel), each constrained to
+          the same height so the OrderBook doesn't stretch beyond the
+          chart. The Positions panel below spans the full width like
+          KuCoin's terminal, so users get a wide Open Orders / Positions /
+          History view instead of a squashed one. */}
+      <div className="flex-1 flex flex-col overflow-hidden">
+        {/* Top row: chart + order book + manual/bot panel */}
+        <div className="flex-1 flex min-h-0 overflow-hidden">
+          {/* Chart column — grows to fill remaining horizontal space */}
+          <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+            <KuCoinFuturesChart pair={pair} defaultInterval="15m" />
+          </div>
+
+          {/* Order Book / Recent Trades column. Fixed width and bounded
+              to the chart row's height — internal content scrolls within
+              `flex-1 overflow-hidden` so the long order list never pushes
+              the layout to full page height. */}
+          <div className="w-[220px] xl:w-[250px] border-l border-white/[0.06] bg-[#0d1117] flex-col hidden lg:flex overflow-hidden">
+            <div className="flex border-b border-white/[0.06] shrink-0">
+              <button
+                onClick={() => setMiddlePanel('orderbook')}
+                className={`flex-1 py-2 text-[11px] font-medium ${
+                  middlePanel === 'orderbook' ? 'text-white border-b-2 border-emerald-500' : 'text-slate-400'
+                }`}
+              >
+                Order Book
+              </button>
+              <button
+                onClick={() => setMiddlePanel('recent_trades')}
+                className={`flex-1 py-2 text-[11px] font-medium ${
+                  middlePanel === 'recent_trades' ? 'text-white border-b-2 border-emerald-500' : 'text-slate-400'
+                }`}
+              >
+                Recent Trades
+              </button>
+            </div>
+            <div className="flex-1 overflow-hidden min-h-0">
+              {middlePanel === 'orderbook' ? (
+                <OrderBook symbol={pair} onPriceClick={handlePriceClick} />
+              ) : (
+                <RecentTrades symbol={pair} />
+              )}
             </div>
           </div>
 
-          {/* Bottom: Positions Panel */}
-          <div className="h-[240px] border-t border-white/[0.06] bg-[#0d1117] overflow-hidden flex">
-            <div className="flex-1 overflow-hidden">
-              <PositionsPanel mode={mode} onRefresh={refreshAccount} refreshTrigger={refreshTrigger} />
+          {/* Right column: Manual / Bot trading + Asset Overview at the
+              bottom (KuCoin layout). Asset Overview lives ONLY here now —
+              the old duplicate inside the bottom positions strip has been
+              removed so the page never has two copies of the same panel. */}
+          <div className="w-[300px] xl:w-[340px] border-l border-white/[0.06] bg-[#0d1117] flex-col hidden lg:flex overflow-hidden">
+            <div className="flex border-b border-white/[0.06] shrink-0">
+              <button
+                onClick={() => setRightPanel('manual')}
+                className={`flex-1 py-2 text-xs font-bold ${
+                  rightPanel === 'manual' ? 'text-white border-b-2 border-emerald-500' : 'text-slate-400'
+                }`}
+              >
+                Manual
+              </button>
+              <button
+                onClick={() => setRightPanel('bot')}
+                className={`flex-1 py-2 text-xs font-bold ${
+                  rightPanel === 'bot' ? 'text-white border-b-2 border-emerald-500' : 'text-slate-400'
+                }`}
+              >
+                Bot
+              </button>
             </div>
-            {/* Asset Overview embedded in positions area on large screens */}
-            <div className="hidden xl:block w-[280px] border-l border-white/[0.06] overflow-y-auto">
+
+            {/* Manual/Bot panel — scrolls internally if needed */}
+            <div className="flex-1 overflow-y-auto min-h-0">
+              {rightPanel === 'manual' ? (
+                <ManualOrderPanel
+                  symbol={futSymbol}
+                  pair={pair}
+                  mode={mode}
+                  leverage={leverage}
+                  marginMode={marginMode}
+                  availableBalance={account?.available_balance ?? account?.balance ?? 1000}
+                  lastPrice={lastPrice}
+                  onLeverageChange={handleLeverageChange}
+                  onMarginModeChange={handleMarginModeChange}
+                  onOrderPlaced={() => {
+                    refreshAccount();
+                    // Re-fetch leverage/margin-mode from KuCoin — Cross orders
+                    // can land at a different leverage than the UI selector
+                    // showed when the user clicked Buy/Sell.
+                    fetchLeverage();
+                    setRefreshTrigger(n => n + 1);
+                  }}
+                />
+              ) : (
+                <BotPanel
+                  pair={pair}
+                  mode={mode}
+                  paperBalance={account?.available_balance ?? account?.balance ?? 1000}
+                  onBotCreated={refreshAccount}
+                />
+              )}
+            </div>
+
+            {/* Asset Overview pinned to the bottom of the right column —
+                always visible (no xl:hidden trick), matches KuCoin's
+                trade page where the panel sits directly under the order
+                form. `shrink-0` keeps it from being squeezed by the
+                Manual panel above. */}
+            <div className="shrink-0 max-h-[40%] overflow-y-auto">
               <AssetOverview mode={mode} pair={pair} />
             </div>
           </div>
         </div>
 
-        {/* Middle: Order Book / Recent Trades column */}
-        <div className="w-[220px] xl:w-[250px] border-l border-white/[0.06] bg-[#0d1117] flex-col hidden lg:flex">
-          {/* Toggle */}
-          <div className="flex border-b border-white/[0.06]">
-            <button
-              onClick={() => setMiddlePanel('orderbook')}
-              className={`flex-1 py-2 text-[11px] font-medium ${
-                middlePanel === 'orderbook' ? 'text-white border-b-2 border-emerald-500' : 'text-slate-400'
-              }`}
-            >
-              Order Book
-            </button>
-            <button
-              onClick={() => setMiddlePanel('recent_trades')}
-              className={`flex-1 py-2 text-[11px] font-medium ${
-                middlePanel === 'recent_trades' ? 'text-white border-b-2 border-emerald-500' : 'text-slate-400'
-              }`}
-            >
-              Recent Trades
-            </button>
-          </div>
-
-          {/* Content */}
-          <div className="flex-1 overflow-hidden">
-            {middlePanel === 'orderbook' ? (
-              <OrderBook symbol={pair} onPriceClick={handlePriceClick} />
-            ) : (
-              <RecentTrades symbol={pair} />
-            )}
-          </div>
-        </div>
-
-        {/* Right: Manual / Bot panel */}
-        <div className="w-[300px] xl:w-[340px] border-l border-white/[0.06] bg-[#0d1117] flex-col hidden lg:flex">
-          {/* Manual | Bot tabs */}
-          <div className="flex border-b border-white/[0.06]">
-            <button
-              onClick={() => setRightPanel('manual')}
-              className={`flex-1 py-2 text-xs font-bold ${
-                rightPanel === 'manual' ? 'text-white border-b-2 border-emerald-500' : 'text-slate-400'
-              }`}
-            >
-              Manual
-            </button>
-            <button
-              onClick={() => setRightPanel('bot')}
-              className={`flex-1 py-2 text-xs font-bold ${
-                rightPanel === 'bot' ? 'text-white border-b-2 border-emerald-500' : 'text-slate-400'
-              }`}
-            >
-              Bot
-            </button>
-          </div>
-
-          {/* Panel content */}
-          <div className="flex-1 overflow-hidden">
-            {rightPanel === 'manual' ? (
-              <ManualOrderPanel
-                symbol={futSymbol}
-                pair={pair}
-                mode={mode}
-                leverage={leverage}
-                marginMode={marginMode}
-                availableBalance={account?.available_balance ?? account?.balance ?? 1000}
-                lastPrice={lastPrice}
-                onLeverageChange={handleLeverageChange}
-                onMarginModeChange={handleMarginModeChange}
-                onOrderPlaced={() => {
-                  refreshAccount();
-                  // Re-fetch leverage/margin-mode from KuCoin — Cross orders
-                  // can land at a different leverage than the UI selector
-                  // showed when the user clicked Buy/Sell.
-                  fetchLeverage();
-                  setRefreshTrigger(n => n + 1);
-                }}
-              />
-            ) : (
-              <BotPanel
-                pair={pair}
-                mode={mode}
-                paperBalance={account?.available_balance ?? account?.balance ?? 1000}
-                onBotCreated={refreshAccount}
-              />
-            )}
-          </div>
-
-          {/* Asset Overview - visible below xl */}
-          <div className="xl:hidden">
-            <AssetOverview mode={mode} pair={pair} />
-          </div>
+        {/* Bottom row: Positions panel — now spans the full page width
+            (was previously stuck under just the chart column). Gives the
+            tab strip (Open Orders / Positions / Assets / Order History /
+            Trade History / Position History / Trading Algorithm) the
+            horizontal room it needs without overflowing. */}
+        <div className="h-[240px] border-t border-white/[0.06] bg-[#0d1117] overflow-hidden">
+          <PositionsPanel mode={mode} onRefresh={refreshAccount} refreshTrigger={refreshTrigger} />
         </div>
       </div>
     </div>
