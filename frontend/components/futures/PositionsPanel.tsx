@@ -201,8 +201,25 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onRefresh }
                         }`}>{((p.side || p.direction) === 'long' ? 'LONG' : 'SHORT')}</span>
                         <span className="text-white font-medium">{p.pair} Perp</span>
                       </div>
-                      <div className="text-[10px] text-slate-500 mt-0.5">
-                        {p.mode === 'isolated' ? 'Isolated' : 'Cross'} {lev}x
+                      {/* Leverage is locked while a position is open — KuCoin
+                          rejects leverage changes on an active symbol. The tiny
+                          padlock icon makes that visually obvious; the
+                          tooltip explains why. Users close the position first
+                          if they want a different leverage on the next trade. */}
+                      <div
+                        className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1"
+                        title="Leverage is locked while a position is open. Close the position to change it."
+                      >
+                        <span>{p.mode === 'isolated' ? 'Isolated' : 'Cross'} {lev}x</span>
+                        <svg
+                          className="w-2.5 h-2.5 text-slate-500"
+                          viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                          strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                          <path d="M7 11V7a5 5 0 0110 0v4" />
+                        </svg>
                       </div>
                     </div>
                   </div>
@@ -277,37 +294,110 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onRefresh }
 // Inline modal for setting Take Profit / Stop Loss on an existing position.
 // Works for both paper (engine state only) and live (also places reduceOnly
 // TP/SL stop orders on KuCoin Lead Trading via /api/futures/position/tp-sl).
+// Take-Profit / Stop-Loss editor.
+//
+// Two control surfaces for each value:
+//   - A percent slider 0-100 (how far from entry, in the profitable
+//     direction for TP / unprofitable direction for SL).
+//   - A USDT price field that the user can type directly.
+//
+// They stay in sync: editing one updates the other. The slider gives quick
+// access to common levels (1%, 5%, 10%, …) without arithmetic; the field
+// lets users place TP/SL at an exact swing high / support level.
+//
+// Calculations are direction-aware:
+//   LONG  TP price = entry × (1 + pct/100)
+//   LONG  SL price = entry × (1 − pct/100)
+//   SHORT TP price = entry × (1 − pct/100)
+//   SHORT SL price = entry × (1 + pct/100)
+//
+// "Est. PnL" preview multiplies by the position's notional and shows the
+// USDT gain/loss at trigger — same UX as KuCoin's TP/SL panel.
 function TpSlEditor({ position, onClose, onSaved }: {
   position: any; onClose: () => void; onSaved: () => void;
 }) {
-  const entry = position.entry_price || 0;
+  const entry = Number(position.entry_price) || 0;
   const isLong = (position.side || position.direction) === 'long';
-  const [tp, setTp] = useState<string>(position.tp_price ? String(position.tp_price) : '');
-  const [sl, setSl] = useState<string>(position.stoploss_price ? String(position.stoploss_price) : '');
+  const leverage = Number(position.leverage) || 1;
+  const margin = Number(position.amount) || 0;       // USDT margin locked
+  const notional = margin * leverage;                 // position value
+
+  // Slider state — 0-100% (capped at 100, but in practice 1-50% is the
+  // useful range). 0 means "no TP/SL set".
+  const [tpPct, setTpPct] = useState<number>(() =>
+    position.tp_price && entry > 0
+      ? Math.abs(((position.tp_price - entry) / entry) * 100)
+      : 0
+  );
+  const [slPct, setSlPct] = useState<number>(() =>
+    position.stoploss_price && entry > 0
+      ? Math.abs(((position.stoploss_price - entry) / entry) * 100)
+      : 0
+  );
+
+  // Derived prices from percentages (single source of truth = the slider).
+  const tpPrice = tpPct > 0
+    ? (isLong ? entry * (1 + tpPct / 100) : entry * (1 - tpPct / 100))
+    : 0;
+  const slPrice = slPct > 0
+    ? (isLong ? entry * (1 - slPct / 100) : entry * (1 + slPct / 100))
+    : 0;
+
+  // Est. P&L at trigger = notional × pct/100 (leveraged gain/loss in USDT).
+  const tpPnl = tpPct > 0 ? (notional * tpPct) / 100 : 0;
+  const slPnl = slPct > 0 ? -(notional * slPct) / 100 : 0;
+  // ROI on margin = pct × leverage
+  const tpRoi = tpPct * leverage;
+  const slRoi = -slPct * leverage;
+
+  // Text-field state — only used for typed overrides. Empty means "follow
+  // the slider". Editing it updates the slider too.
+  const [tpInput, setTpInput] = useState<string>('');
+  const [slInput, setSlInput] = useState<string>('');
+
+  function handleTpInput(v: string) {
+    setTpInput(v);
+    const num = parseFloat(v);
+    if (!isFinite(num) || num <= 0 || entry <= 0) return;
+    const pct = isLong
+      ? ((num - entry) / entry) * 100
+      : ((entry - num) / entry) * 100;
+    if (pct > 0) setTpPct(Math.min(pct, 100));
+  }
+
+  function handleSlInput(v: string) {
+    setSlInput(v);
+    const num = parseFloat(v);
+    if (!isFinite(num) || num <= 0 || entry <= 0) return;
+    const pct = isLong
+      ? ((entry - num) / entry) * 100
+      : ((num - entry) / entry) * 100;
+    if (pct > 0) setSlPct(Math.min(pct, 100));
+  }
+
+  // When slider moves, sync the readout field so the user sees the price.
+  useEffect(() => {
+    if (tpPct > 0) setTpInput(tpPrice.toFixed(2));
+    else setTpInput('');
+  }, [tpPct, tpPrice]);
+
+  useEffect(() => {
+    if (slPct > 0) setSlInput(slPrice.toFixed(2));
+    else setSlInput('');
+  }, [slPct, slPrice]);
+
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>('');
 
   async function save() {
     setSubmitting(true);
     setError('');
-    const tpNum = tp ? parseFloat(tp) : undefined;
-    const slNum = sl ? parseFloat(sl) : undefined;
-    // Basic sanity: TP must be on the profitable side, SL on the loss side.
-    if (tpNum) {
-      if (isLong && tpNum <= entry) {
-        setError('Long TP must be ABOVE entry price.'); setSubmitting(false); return;
-      }
-      if (!isLong && tpNum >= entry) {
-        setError('Short TP must be BELOW entry price.'); setSubmitting(false); return;
-      }
-    }
-    if (slNum) {
-      if (isLong && slNum >= entry) {
-        setError('Long SL must be BELOW entry price.'); setSubmitting(false); return;
-      }
-      if (!isLong && slNum <= entry) {
-        setError('Short SL must be ABOVE entry price.'); setSubmitting(false); return;
-      }
+    const tpNum = tpPct > 0 ? tpPrice : undefined;
+    const slNum = slPct > 0 ? slPrice : undefined;
+    if (!tpNum && !slNum) {
+      setError('Set at least one of Take Profit or Stop Loss.');
+      setSubmitting(false);
+      return;
     }
     try {
       const r = await api.futures.setTpSl({
@@ -320,6 +410,14 @@ function TpSlEditor({ position, onClose, onSaved }: {
         setSubmitting(false);
         return;
       }
+      // Highlight which side reached KuCoin so users see live confirmation.
+      const kc = r?.kucoin || {};
+      const tpOk = kc?.tp?.code === '200000';
+      const slOk = kc?.sl?.code === '200000';
+      if (r?.source === 'kucoin' || tpOk || slOk) {
+        // Live success — let the parent refresh the positions to pick up
+        // the newly-attached TP/SL values.
+      }
       onSaved();
     } catch (e) {
       setError(String(e));
@@ -327,35 +425,162 @@ function TpSlEditor({ position, onClose, onSaved }: {
     }
   }
 
+  // Quick-set chips for common percentages.
+  const TP_CHIPS = [1, 3, 5, 10, 20];
+  const SL_CHIPS = [1, 2, 3, 5, 10];
+
   return (
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
       <div
         onClick={e => e.stopPropagation()}
-        className="bg-[#0d1424] border border-[#243153] rounded-xl p-5 w-full max-w-sm shadow-2xl"
+        className="bg-[#0d1424] border border-[#243153] rounded-xl p-5 w-full max-w-md shadow-2xl"
       >
         <div className="flex items-center justify-between mb-3">
           <h3 className="text-sm font-semibold text-white">Take Profit / Stop Loss</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-lg leading-none">×</button>
         </div>
-        <div className="text-[11px] text-slate-400 mb-3">
-          {position.pair} · {isLong ? 'LONG' : 'SHORT'} · Entry {entry.toFixed(2)}
+        <div className="text-[11px] text-slate-400 mb-4">
+          {position.pair} ·{' '}
+          <span className={isLong ? 'text-emerald-400' : 'text-red-400'}>{isLong ? 'LONG' : 'SHORT'}</span>
+          {' '}· {leverage}× · Entry <span className="text-white">{entry.toFixed(2)}</span>
         </div>
 
-        <label className="block text-[11px] text-slate-400 mb-1">Take Profit (USDT)</label>
-        <input
-          type="number" step="any" value={tp} onChange={e => setTp(e.target.value)}
-          placeholder={isLong ? '> ' + entry.toFixed(2) : '< ' + entry.toFixed(2)}
-          className="w-full bg-[#06091a] border border-[#243153] rounded-lg px-3 py-2 text-sm text-white mb-3 focus:outline-none focus:border-emerald-500"
-        />
+        {/* ─────────── Take Profit ─────────── */}
+        <div className="mb-5">
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-[11px] font-medium text-emerald-400">Take Profit</label>
+            <span className="text-[10px] text-slate-500 tabular-nums">
+              {tpPct > 0
+                ? `+${tpPct.toFixed(2)}% from entry · ROI ${tpRoi >= 0 ? '+' : ''}${tpRoi.toFixed(1)}%`
+                : 'not set'}
+            </span>
+          </div>
+          {/* Native range slider — continuous, full 0-100% range. */}
+          <div className="relative h-6 mb-2">
+            <div className="absolute top-1/2 left-0 right-0 h-[3px] bg-slate-700 -translate-y-1/2 rounded" />
+            <div
+              className="absolute top-1/2 left-0 h-[3px] bg-emerald-500 -translate-y-1/2 rounded transition-[width]"
+              style={{ width: `${tpPct}%` }}
+            />
+            <input
+              type="range" min={0} max={100} step={0.1} value={tpPct}
+              onChange={e => setTpPct(Number(e.target.value))}
+              aria-label="Take profit percentage"
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+            />
+            <div
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-emerald-500 border-2 border-white shadow pointer-events-none transition-[left]"
+              style={{ left: `${tpPct}%` }}
+            />
+          </div>
+          {/* Quick chips */}
+          <div className="flex gap-1 mb-2">
+            {TP_CHIPS.map(pct => (
+              <button
+                key={`tp-${pct}`}
+                onClick={() => setTpPct(pct)}
+                className={`flex-1 py-1 rounded text-[10px] font-medium border transition-colors ${
+                  Math.abs(tpPct - pct) < 0.05
+                    ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
+                    : 'border-white/10 text-slate-400 hover:border-emerald-500/30 hover:text-emerald-400'
+                }`}
+              >
+                {pct}%
+              </button>
+            ))}
+            <button
+              onClick={() => setTpPct(0)}
+              className="px-2 py-1 rounded text-[10px] font-medium border border-white/10 text-slate-500 hover:text-slate-300"
+              title="Clear take-profit"
+            >
+              ✕
+            </button>
+          </div>
+          {/* Trigger price input */}
+          <div className="flex gap-2 items-center">
+            <label className="text-[10px] text-slate-500 shrink-0">Trigger</label>
+            <input
+              type="number" step="any" value={tpInput}
+              onChange={e => handleTpInput(e.target.value)}
+              placeholder={isLong ? `> ${entry.toFixed(2)}` : `< ${entry.toFixed(2)}`}
+              className="flex-1 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-emerald-500 tabular-nums"
+            />
+            <span className="text-[10px] text-slate-500">USDT</span>
+          </div>
+          {tpPct > 0 && (
+            <div className="text-[10px] text-emerald-400/80 mt-1.5 tabular-nums">
+              Est. P&L at trigger: <b>+{tpPnl.toFixed(2)} USDT</b>
+            </div>
+          )}
+        </div>
 
-        <label className="block text-[11px] text-slate-400 mb-1">Stop Loss (USDT)</label>
-        <input
-          type="number" step="any" value={sl} onChange={e => setSl(e.target.value)}
-          placeholder={isLong ? '< ' + entry.toFixed(2) : '> ' + entry.toFixed(2)}
-          className="w-full bg-[#06091a] border border-[#243153] rounded-lg px-3 py-2 text-sm text-white mb-3 focus:outline-none focus:border-red-500"
-        />
+        {/* ─────────── Stop Loss ─────────── */}
+        <div className="mb-4">
+          <div className="flex items-center justify-between mb-1.5">
+            <label className="text-[11px] font-medium text-red-400">Stop Loss</label>
+            <span className="text-[10px] text-slate-500 tabular-nums">
+              {slPct > 0
+                ? `−${slPct.toFixed(2)}% from entry · ROI ${slRoi.toFixed(1)}%`
+                : 'not set'}
+            </span>
+          </div>
+          <div className="relative h-6 mb-2">
+            <div className="absolute top-1/2 left-0 right-0 h-[3px] bg-slate-700 -translate-y-1/2 rounded" />
+            <div
+              className="absolute top-1/2 left-0 h-[3px] bg-red-500 -translate-y-1/2 rounded transition-[width]"
+              style={{ width: `${slPct}%` }}
+            />
+            <input
+              type="range" min={0} max={100} step={0.1} value={slPct}
+              onChange={e => setSlPct(Number(e.target.value))}
+              aria-label="Stop loss percentage"
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+            />
+            <div
+              className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-red-500 border-2 border-white shadow pointer-events-none transition-[left]"
+              style={{ left: `${slPct}%` }}
+            />
+          </div>
+          <div className="flex gap-1 mb-2">
+            {SL_CHIPS.map(pct => (
+              <button
+                key={`sl-${pct}`}
+                onClick={() => setSlPct(pct)}
+                className={`flex-1 py-1 rounded text-[10px] font-medium border transition-colors ${
+                  Math.abs(slPct - pct) < 0.05
+                    ? 'bg-red-500/20 border-red-500/40 text-red-300'
+                    : 'border-white/10 text-slate-400 hover:border-red-500/30 hover:text-red-400'
+                }`}
+              >
+                {pct}%
+              </button>
+            ))}
+            <button
+              onClick={() => setSlPct(0)}
+              className="px-2 py-1 rounded text-[10px] font-medium border border-white/10 text-slate-500 hover:text-slate-300"
+              title="Clear stop-loss"
+            >
+              ✕
+            </button>
+          </div>
+          <div className="flex gap-2 items-center">
+            <label className="text-[10px] text-slate-500 shrink-0">Trigger</label>
+            <input
+              type="number" step="any" value={slInput}
+              onChange={e => handleSlInput(e.target.value)}
+              placeholder={isLong ? `< ${entry.toFixed(2)}` : `> ${entry.toFixed(2)}`}
+              className="flex-1 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-red-500 tabular-nums"
+            />
+            <span className="text-[10px] text-slate-500">USDT</span>
+          </div>
+          {slPct > 0 && (
+            <div className="text-[10px] text-red-400/80 mt-1.5 tabular-nums">
+              Est. P&L at trigger: <b>{slPnl.toFixed(2)} USDT</b>
+            </div>
+          )}
+        </div>
 
-        {error && <div className="text-[11px] text-red-400 mb-2">{error}</div>}
+        {error && <div className="text-[11px] text-red-400 mb-2 leading-snug">{error}</div>}
 
         <div className="flex gap-2 mt-2">
           <button
@@ -366,15 +591,17 @@ function TpSlEditor({ position, onClose, onSaved }: {
           </button>
           <button
             onClick={save}
-            disabled={submitting}
-            className="flex-1 px-3 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium hover:bg-emerald-400 disabled:opacity-50"
+            disabled={submitting || (tpPct === 0 && slPct === 0)}
+            className="flex-1 px-3 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {submitting ? 'Saving…' : 'Save'}
           </button>
         </div>
 
-        <div className="text-[10px] text-slate-500 mt-3">
-          For live positions, TP/SL is also placed on KuCoin Lead Trading as reduceOnly stop orders.
+        <div className="text-[10px] text-slate-500 mt-3 leading-snug">
+          For live positions, TP/SL is placed on KuCoin Lead Trading as
+          reduceOnly stop orders — you&apos;ll see them in KuCoin&apos;s
+          Open Orders tab right after saving.
         </div>
       </div>
     </div>
