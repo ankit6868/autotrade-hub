@@ -719,26 +719,53 @@ export default function ManualOrderPanel({
             <span className="text-[10px] text-slate-400 pr-2 shrink-0">{costMode ? 'USDT' : baseCoin}</span>
           </div>
 
-          {/* Slider */}
+          {/* Continuous slider (0-100% of Available). Replaces the old
+              5-dot stepped slider so users can land on any value, e.g. 37%.
+              Native <input type="range"> + custom styling keeps drag + click
+              both working on desktop and mobile. The four faint tick marks
+              (25/50/75/100) are just visual guides — they don't snap. */}
           <div className="mt-2 px-1">
             <div className="relative py-2">
-              <div className="absolute top-1/2 left-0 right-0 h-[2px] bg-slate-700 -translate-y-1/2 rounded" />
+              {/* Track background */}
+              <div className="absolute top-1/2 left-0 right-0 h-[2px] bg-slate-700 -translate-y-1/2 rounded pointer-events-none" />
+              {/* Filled portion up to current value */}
               <div
-                className="absolute top-1/2 left-0 h-[2px] bg-emerald-500 -translate-y-1/2 rounded"
+                className="absolute top-1/2 left-0 h-[2px] bg-emerald-500 -translate-y-1/2 rounded pointer-events-none"
                 style={{ width: `${sliderValue}%` }}
               />
-              {[0, 25, 50, 75, 100].map(pct => (
-                <button
+              {/* Tick marks at 25/50/75/100 — visual reference only */}
+              {[25, 50, 75, 100].map(pct => (
+                <div
                   key={pct}
-                  onClick={() => handleSliderChange(pct)}
-                  className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-2.5 h-2.5 rounded-full border-2 transition-colors ${
-                    sliderValue >= pct
-                      ? 'bg-emerald-500 border-emerald-500'
-                      : 'bg-[#1e222d] border-slate-600'
+                  className={`absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-1 h-1 rounded-full pointer-events-none ${
+                    sliderValue >= pct ? 'bg-emerald-300' : 'bg-slate-500'
                   }`}
                   style={{ left: `${pct}%` }}
                 />
               ))}
+              {/* Native range input, fully transparent track — the styled
+                  divs above are what the user sees, the input handles all
+                  drag/click/keyboard interaction. */}
+              <input
+                type="range"
+                min={0}
+                max={100}
+                step={1}
+                value={sliderValue}
+                onChange={e => handleSliderChange(Number(e.target.value))}
+                aria-label="Percentage of available balance"
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              />
+              {/* Visible thumb at the current position */}
+              <div
+                className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3 h-3 rounded-full bg-emerald-500 border-2 border-white shadow pointer-events-none transition-[left] duration-75"
+                style={{ left: `${sliderValue}%` }}
+              />
+            </div>
+            <div className="flex justify-between text-[9px] text-slate-500 mt-0.5 px-0.5">
+              <span>0%</span>
+              <span>{sliderValue}%</span>
+              <span>100%</span>
             </div>
           </div>
         </div>
