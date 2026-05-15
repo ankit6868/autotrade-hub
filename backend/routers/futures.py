@@ -1756,10 +1756,26 @@ def cancel_futures_order(
         for method, endpoint, query in attempts:
             ok_r, resp_r = _try_cancel(method, endpoint, query)
             last_responses.append((endpoint, resp_r))
+            log.info("[%s] stop-cancel attempt %s -> ok=%s resp=%s",
+                     user_id, endpoint, ok_r, resp_r)
             if ok_r and str((resp_r or {}).get("code", "")) == "200000":
                 log_event(db, user_id, "futures.cancel_stop_order", request,
                           payload={"order_id": order_id, "endpoint": endpoint})
                 log.info("[%s] Stop-order cancel ok via %s", user_id, endpoint)
+                # Mark DB row as cancelled if we have one.
+                try:
+                    from sqlalchemy import update as sql_update
+                    db.execute(
+                        sql_update(FuturesOrder)
+                        .where(
+                            FuturesOrder.user_id == user_id,
+                            FuturesOrder.exchange_order_id == stop_exchange_id,
+                        )
+                        .values(status="cancelled", cancelled_at=datetime.utcnow())
+                    )
+                    db.commit()
+                except Exception:
+                    db.rollback()
                 return {"kucoin_cancelled": True, "order_id": order_id, "endpoint": endpoint}
 
         # Every attempt failed. Build a verbose diagnostic so we can SEE
@@ -1946,9 +1962,12 @@ def get_futures_orders(
             )
             if str(so_resp.get("code")) == "200000":
                 items = (so_resp.get("data") or {}).get("items") or []
-                # Build a clientOid → Lead Trading order_id lookup from our
-                # DB so we can serve the cancel-compatible ID to the frontend
-                # instead of the regular-futures ID returned by /stopOrders.
+                # Build a clientOid → cancel-compatible order_id lookup. We
+                # first try our DB (orders we POSTed get their KuCoin orderId
+                # stored at placement time). For any stop we don't have a DB
+                # row for (placed by an earlier build, or restored from a
+                # KuCoin-only state) we fall back to KuCoin's byClientOid
+                # endpoint to fetch the canonical id and persist it.
                 client_oids = [s.get("clientOid") for s in items if s.get("clientOid")]
                 lead_id_by_oid: dict[str, str] = {}
                 if client_oids:
@@ -1961,6 +1980,55 @@ def get_futures_orders(
                         )
                     ).all()
                     lead_id_by_oid = {coid: str(xid) for (coid, xid) in rows if coid and xid}
+
+                # Backfill: for each stop with a clientOid but no DB row, ask
+                # KuCoin for its canonical orderId via byClientOid and persist.
+                # This makes pre-existing TP/SL orders (placed before the
+                # persistence change shipped) cancellable from the app too.
+                from sqlalchemy import insert as sql_insert
+                for s in items:
+                    coid = s.get("clientOid")
+                    if not coid or coid in lead_id_by_oid:
+                        continue
+                    try:
+                        lookup = _kucoin_get_signed(
+                            "/api/v1/orders/byClientOid",
+                            eng._api_key, eng._api_sec, eng._api_pass,
+                            params={"clientOid": coid},
+                            base_url=KUCOIN_FUTURES_BASE,
+                        )
+                        if str(lookup.get("code")) == "200000":
+                            fetched = (lookup.get("data") or {})
+                            fetched_id = fetched.get("id") or s.get("id")
+                            if fetched_id:
+                                lead_id_by_oid[coid] = str(fetched_id)
+                                log.info("[%s] Backfilled stop-order id %s for clientOid %s",
+                                         user_id, fetched_id, coid)
+                                # Persist so future page loads skip the lookup.
+                                try:
+                                    db.add(FuturesOrder(
+                                        user_id=user_id,
+                                        client_oid=coid,
+                                        exchange_order_id=str(fetched_id),
+                                        symbol=s.get("symbol"),
+                                        side=(s.get("side") or "").lower(),
+                                        order_type=f"stop_{('tp' if ((s.get('side') or '').lower() == 'sell' and (s.get('stop') or '').lower() == 'up') or ((s.get('side') or '').lower() == 'buy' and (s.get('stop') or '').lower() == 'down') else 'sl')}",
+                                        size=s.get("size") or 0,
+                                        stop_price=float(s.get("stopPrice") or 0) or None,
+                                        leverage=s.get("leverage"),
+                                        margin_mode=s.get("marginMode"),
+                                        mode="live",
+                                        status="pending",
+                                        created_at=datetime.utcnow(),
+                                    ))
+                                    db.commit()
+                                except Exception as persist_err:
+                                    log.debug("[%s] Backfill persist failed (likely exists): %s",
+                                              user_id, persist_err)
+                                    db.rollback()
+                    except Exception as lookup_err:
+                        log.debug("[%s] byClientOid lookup for %s failed: %s",
+                                  user_id, coid, lookup_err)
                 for s in items:
                     stop_dir = (s.get("stop") or "").lower()   # "up" | "down"
                     side     = (s.get("side") or "").lower()
