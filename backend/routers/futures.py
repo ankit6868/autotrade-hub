@@ -1744,42 +1744,26 @@ def cancel_futures_order(
         # (which we list FIRST below) are what KuCoin's own UI uses.
         attempts: list[tuple[str, str, dict | None]] = []
 
-        # Cancel by clientOid — stop-orders namespace (Lead Trading).
-        # v3 paths first since the user's key is tagged v3.
-        if client_oid and symbol:
-            # ── v3 cancel-by-clientOid ──
-            attempts.append((
-                "DELETE",
-                "/api/v3/copy-trade/futures/orders/client-order",
-                {"clientOid": client_oid, "symbol": symbol},
-            ))
-            attempts.append((
-                "DELETE",
-                "/api/v3/copy-trade/futures/st-orders/client-order",
-                {"clientOid": client_oid, "symbol": symbol},
-            ))
-            # ── v1 cancel-by-clientOid ──
-            attempts.append((
-                "DELETE",
-                "/api/v1/copy-trade/futures/st-orders/client-order",
-                {"clientOid": client_oid, "symbol": symbol},
-            ))
-            attempts.append((
-                "DELETE",
-                "/api/v1/copy-trade/futures/orders/client-order",
-                {"clientOid": client_oid, "symbol": symbol},
-            ))
-            attempts.append((
-                "DELETE",
-                "/api/v1/copy-trade/futures/orders/byClientOid",
-                {"clientOid": client_oid, "symbol": symbol},
-            ))
-            # Regular futures cancel-by-clientOid in stop namespace.
-            attempts.append((
-                "DELETE",
-                "/api/v1/stopOrders/cancelByClientOid",
-                {"clientOid": client_oid, "symbol": symbol},
-            ))
+        # Cancel by clientOid.
+        #
+        # CRITICAL FIX: per https://www.kucoin.com/docs-new (Futures
+        # Trading → Orders → Cancel Order By ClientOid), the canonical
+        # URL pattern is /api/v1/orders/client-order/{clientOid} with
+        # clientOid in the PATH, not as a query parameter. Every prior
+        # attempt that used `?clientOid=X` returned 404 for exactly
+        # this reason.
+        if client_oid:
+            # Primary: regular Futures cancel-by-clientOid (path param).
+            # This is what the docs document — and the user's key has
+            # "Futures Lead Trading Permissions" which the docs say is
+            # equivalent to Futures for trading/cancel operations.
+            attempts.append(("DELETE", f"/api/v1/orders/client-order/{client_oid}", None))
+            # Lead Trading variant with same path pattern.
+            attempts.append(("DELETE", f"/api/v1/copy-trade/futures/orders/client-order/{client_oid}", None))
+            # Stop-orders variant with path pattern (in case stops
+            # have a dedicated cancel-by-clientOid endpoint).
+            attempts.append(("DELETE", f"/api/v1/stopOrders/client-order/{client_oid}", None))
+            attempts.append(("DELETE", f"/api/v1/copy-trade/futures/st-orders/client-order/{client_oid}", None))
 
         # Cancel by ID — try v3 + every namespace variant. The regular
         # /orders/{id} goes LAST since that's the route that returns
