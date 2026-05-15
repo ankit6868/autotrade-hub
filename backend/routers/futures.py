@@ -1718,24 +1718,38 @@ def cancel_futures_order(
 
         # Step 2: try every plausible cancel route in order of likelihood.
         # The first one to return code 200000 wins.
+        #
+        # KuCoin's "The order cannot be canceled" error (code 300003) is
+        # returned specifically when you DELETE a stop order via the
+        # *regular* /orders/{id} route — the order is found, but that
+        # endpoint can't cancel stops. The dedicated stop-order routes
+        # (which we list FIRST below) are what KuCoin's own UI uses.
         attempts: list[tuple[str, str, dict | None]] = []
+
+        # Cancel by clientOid — stop-orders namespace (Lead Trading).
         if client_oid and symbol:
-            # Cancel by clientOid (Lead Trading)
+            attempts.append((
+                "DELETE",
+                "/api/v1/copy-trade/futures/st-orders/client-order",
+                {"clientOid": client_oid, "symbol": symbol},
+            ))
             attempts.append((
                 "DELETE",
                 "/api/v1/copy-trade/futures/orders/client-order",
                 {"clientOid": client_oid, "symbol": symbol},
             ))
-            # Cancel by clientOid (regular futures)
+            # Regular futures cancel-by-clientOid in stop namespace.
             attempts.append((
                 "DELETE",
-                "/api/v1/orders/client-order",
+                "/api/v1/stopOrders/cancelByClientOid",
                 {"clientOid": client_oid, "symbol": symbol},
             ))
-        # Cancel by ID — try every namespace variant.
+
+        # Cancel by ID — stop-order namespaces FIRST (regular /orders/{id}
+        # returns "cannot be canceled" for stops, so try it last).
         attempts.append(("DELETE", f"/api/v1/copy-trade/futures/st-orders/{stop_exchange_id}", None))
-        attempts.append(("DELETE", f"/api/v1/copy-trade/futures/orders/{stop_exchange_id}", None))
         attempts.append(("DELETE", f"/api/v1/stopOrders/{stop_exchange_id}", None))
+        attempts.append(("DELETE", f"/api/v1/copy-trade/futures/orders/{stop_exchange_id}", None))
         attempts.append(("DELETE", f"/api/v1/orders/{stop_exchange_id}", None))
 
         last_responses: list[tuple[str, dict | str]] = []
@@ -1748,18 +1762,30 @@ def cancel_futures_order(
                 log.info("[%s] Stop-order cancel ok via %s", user_id, endpoint)
                 return {"kucoin_cancelled": True, "order_id": order_id, "endpoint": endpoint}
 
-        # Every attempt failed — surface the most informative error to the modal.
+        # Every attempt failed. Build a verbose diagnostic so we can SEE
+        # which routes returned which errors. The alert shows just the
+        # most informative message; the full breakdown is in `attempts`
+        # and in the backend log.
         def _msg(r):
             if isinstance(r, dict):
                 return (r.get("body") or {}).get("msg") or r.get("error") or r.get("msg")
             return str(r) if r else None
-        err_msg = next((m for (_e, r) in last_responses if (m := _msg(r))), "unknown")
-        log.warning("[%s] Stop-order cancel failed on all endpoints (client_oid=%s): %s",
-                    user_id, client_oid, last_responses)
+        non_404 = [(e, _msg(r)) for (e, r) in last_responses
+                   if _msg(r) and "404" not in str(_msg(r)) and "Not Found" not in str(_msg(r))]
+        if non_404:
+            # Prefer the most informative non-404 error.
+            err_endpoint, err_msg = non_404[0]
+            err_str = f"{err_msg} (via {err_endpoint})"
+        else:
+            err_str = next((m for (_e, r) in last_responses if (m := _msg(r))), "unknown")
+        log.warning("[%s] Stop-order cancel failed on all endpoints (client_oid=%s symbol=%s): %s",
+                    user_id, client_oid, symbol, last_responses)
         return {
-            "error": f"KuCoin rejected stop-order cancel: {err_msg}",
+            "error": f"KuCoin rejected stop-order cancel: {err_str}",
             "order_id": order_id,
             "kucoin_cancelled": False,
+            "client_oid": client_oid,
+            "symbol": symbol,
             "attempts": [{"endpoint": e, "response": r} for (e, r) in last_responses],
         }
 
