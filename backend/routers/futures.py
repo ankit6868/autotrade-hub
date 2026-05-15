@@ -2302,16 +2302,42 @@ def set_position_tp_sl(
             lev           = min(LEAD_MAX_LEVERAGE, kc_leverage)
             margin_mode   = kc_margin or "ISOLATED"
 
+            # ────────────────────────────────────────────────────────────
+            # Why this body shape:
+            #
+            # KuCoin Futures stop orders are placed via the *regular* orders
+            # endpoint (NOT a separate /st-orders endpoint) with three
+            # required fields that make it a stop order instead of a market
+            # order:
+            #     stop:           "up" | "down"   — trigger direction
+            #     stopPrice:      "<price>"      — trigger price
+            #     stopPriceType:  "TP" | "MP" | "IP" — Last/Mark/Index price source
+            #
+            # The Lead Trading wrapper is /api/v1/copy-trade/futures/orders
+            # and accepts the same fields.
+            #
+            # Earlier versions of this code used `triggerStopUpPrice` /
+            # `triggerStopDownPrice` against an `/api/v1/copy-trade/futures/
+            # st-orders` endpoint. Those field names belong to KuCoin's
+            # position-attached-TP/SL feature on the order-CREATION body
+            # (attach TP/SL to a NEW order as it's placed), not to stand-
+            # alone stop orders. When KuCoin's API saw our body without a
+            # recognized stop trigger, it interpreted the order as an
+            # IMMEDIATE market + reduceOnly + closeOrder=true (if set)
+            # request — which fired the instant it was POSTed and closed
+            # the entire position. That's exactly the bug the user kept
+            # reporting.
+            #
+            # The fix: use the canonical `stop` + `stopPrice` fields on the
+            # regular Lead Trading orders endpoint with reduceOnly=true and
+            # closeOrder=true. KuCoin then queues a real stop order that
+            # waits for the trigger price.
+            # ────────────────────────────────────────────────────────────
             def _stop_order(label: str, price: float, is_tp: bool) -> dict:
                 # Trigger side depends on direction × order kind:
                 # Long TP / Short SL  → trigger up
                 # Long SL / Short TP  → trigger down
                 trig_up = (kc_direction == "long" and is_tp) or (kc_direction == "short" and not is_tp)
-                # KuCoin's Lead Trading /copy-trade/futures/st-orders endpoint
-                # expects `triggerStopUpPrice` / `triggerStopDownPrice` (NOT
-                # the regular-futures `stop` + `stopPrice` field pair). This
-                # matches `kucoin_futures_client.place_tp_sl_order` and the
-                # existing entry-stop code path in this router.
                 body: dict = {
                     "clientOid":     f"atf-{label}-{int(_t.time() * 1000)}",
                     "symbol":         kc_symbol,
@@ -2321,50 +2347,53 @@ def set_position_tp_sl(
                     "side":           close_side,
                     "type":           "market",
                     "size":           kc_contracts,
-                    "stopPriceType":  "TP",   # TP = trigger from Last Trade Price
+                    # Stop-order trigger fields (canonical KuCoin Futures):
+                    "stop":           "up" if trig_up else "down",
+                    "stopPrice":      str(float(price)),
+                    "stopPriceType":  "TP",   # trigger from Last Trade Price
                     "reduceOnly":     True,
+                    "closeOrder":     True,   # closes entire position on trigger
                 }
-                if trig_up:
-                    body["triggerStopUpPrice"]   = str(float(price))
-                else:
-                    body["triggerStopDownPrice"] = str(float(price))
                 return body
 
-            if tp_price is not None:
+            def _place_stop(label: str, price: float, is_tp: bool):
+                body = _stop_order(label, price, is_tp)
+                log.info("[%s] Placing %s stop order: %s", user_id, label.upper(), body)
                 try:
                     resp = _kucoin_post_signed(
-                        "/api/v1/copy-trade/futures/st-orders",
-                        _stop_order("tp", float(tp_price), True),
+                        "/api/v1/copy-trade/futures/orders",
+                        body,
                         eng._api_key, eng._api_sec, eng._api_pass,
                         base_url=KUCOIN_FUTURES_BASE,
                     )
-                    code = str(resp.get("code", ""))
-                    kc_results["tp"] = {"code": code, "msg": resp.get("msg"), "data": resp.get("data")}
-                    if code == "200000":
-                        log.info("[%s] Lead Trading TP order placed for %s @ %s", user_id, pair, tp_price)
-                    else:
-                        log.warning("[%s] Lead Trading TP rejected: %s", user_id, resp)
                 except Exception as e:
-                    log.exception("[%s] Lead Trading TP failed", user_id)
-                    kc_results["tp"] = {"error": str(e)}
+                    log.exception("[%s] Lead Trading %s failed", user_id, label.upper())
+                    kc_results[label] = {"error": str(e)}
+                    return
+                code = str(resp.get("code", ""))
+                kc_results[label] = {"code": code, "msg": resp.get("msg"), "data": resp.get("data")}
+                if code == "200000":
+                    log.info("[%s] Lead Trading %s stop order placed for %s @ %s",
+                             user_id, label.upper(), pair, price)
+                else:
+                    log.warning("[%s] Lead Trading %s rejected: %s",
+                                user_id, label.upper(), resp)
 
+            if tp_price is not None:
+                _place_stop("tp", float(tp_price), True)
             if sl_price is not None:
-                try:
-                    resp = _kucoin_post_signed(
-                        "/api/v1/copy-trade/futures/st-orders",
-                        _stop_order("sl", float(sl_price), False),
-                        eng._api_key, eng._api_sec, eng._api_pass,
-                        base_url=KUCOIN_FUTURES_BASE,
-                    )
-                    code = str(resp.get("code", ""))
-                    kc_results["sl"] = {"code": code, "msg": resp.get("msg"), "data": resp.get("data")}
-                    if code == "200000":
-                        log.info("[%s] Lead Trading SL order placed for %s @ %s", user_id, pair, sl_price)
-                    else:
-                        log.warning("[%s] Lead Trading SL rejected: %s", user_id, resp)
-                except Exception as e:
-                    log.exception("[%s] Lead Trading SL failed", user_id)
-                    kc_results["sl"] = {"error": str(e)}
+                _place_stop("sl", float(sl_price), False)
+
+            # If BOTH sides failed, surface a clear error to the frontend.
+            # If at least one succeeded, the partial success is reported in
+            # `kc_results` so the modal can show which leg landed.
+            tp_ok = kc_results.get("tp", {}).get("code") == "200000" if tp_price is not None else True
+            sl_ok = kc_results.get("sl", {}).get("code") == "200000" if sl_price is not None else True
+            if not tp_ok and not sl_ok:
+                tp_msg = (kc_results.get("tp") or {}).get("msg") or (kc_results.get("tp") or {}).get("error")
+                sl_msg = (kc_results.get("sl") or {}).get("msg") or (kc_results.get("sl") or {}).get("error")
+                return {"error": f"KuCoin rejected TP/SL — TP: {tp_msg or 'n/a'} | SL: {sl_msg or 'n/a'}",
+                        "kucoin": kc_results}
 
     # ── Step 4: persist on the DB Trade row (paper reconciliation + UI) ──
     trade = db.execute(
