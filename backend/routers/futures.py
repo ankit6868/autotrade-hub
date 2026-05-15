@@ -1946,6 +1946,21 @@ def get_futures_orders(
             )
             if str(so_resp.get("code")) == "200000":
                 items = (so_resp.get("data") or {}).get("items") or []
+                # Build a clientOid → Lead Trading order_id lookup from our
+                # DB so we can serve the cancel-compatible ID to the frontend
+                # instead of the regular-futures ID returned by /stopOrders.
+                client_oids = [s.get("clientOid") for s in items if s.get("clientOid")]
+                lead_id_by_oid: dict[str, str] = {}
+                if client_oids:
+                    rows = db.execute(
+                        select(FuturesOrder.client_oid, FuturesOrder.exchange_order_id)
+                        .where(
+                            FuturesOrder.user_id == user_id,
+                            FuturesOrder.client_oid.in_(client_oids),
+                            FuturesOrder.exchange_order_id.isnot(None),
+                        )
+                    ).all()
+                    lead_id_by_oid = {coid: str(xid) for (coid, xid) in rows if coid and xid}
                 for s in items:
                     stop_dir = (s.get("stop") or "").lower()   # "up" | "down"
                     side     = (s.get("side") or "").lower()
@@ -1962,8 +1977,15 @@ def get_futures_orders(
                             tp_or_sl = "sl"
                     else:
                         tp_or_sl = None
+                    # Prefer the Lead Trading orderId from our DB so cancel
+                    # hits /copy-trade/futures/orders/{id} (the namespace
+                    # that accepts the user's Lead Trading API key). Fall
+                    # back to the /stopOrders id for orders placed before
+                    # this persistence change shipped.
+                    client_oid = s.get("clientOid") or ""
+                    lead_id = lead_id_by_oid.get(client_oid) or s.get("id")
                     stop_orders.append({
-                        "order_id":   f"stop:{s.get('id')}",
+                        "order_id":   f"stop:{lead_id}",
                         "symbol":     s.get("symbol"),
                         "side":       side,
                         "order_type": s.get("type") or "market",
@@ -2478,6 +2500,35 @@ def set_position_tp_sl(
                 if code == "200000":
                     log.info("[%s] Lead Trading %s stop order placed for %s @ %s",
                              user_id, label.upper(), pair, price)
+                    # Persist the Lead Trading orderId so the cancel button
+                    # has the correct namespace ID. /api/v1/stopOrders LIST
+                    # returns regular-futures IDs that don't work with the
+                    # /copy-trade/futures/orders/{id} cancel route.
+                    try:
+                        kc_order_id = (resp.get("data") or {}).get("orderId")
+                        if kc_order_id:
+                            db.add(FuturesOrder(
+                                user_id=user_id,
+                                client_oid=body["clientOid"],
+                                exchange_order_id=str(kc_order_id),
+                                symbol=kc_symbol,
+                                side=close_side,
+                                order_type=f"stop_{label}",   # "stop_tp" / "stop_sl"
+                                size=kc_contracts,
+                                stop_price=float(price),
+                                leverage=lev,
+                                margin_mode=margin_mode,
+                                mode="live",
+                                status="pending",
+                                tp_price=float(price) if is_tp else None,
+                                sl_price=float(price) if not is_tp else None,
+                                created_at=datetime.utcnow(),
+                            ))
+                            db.commit()
+                    except Exception as persist_err:
+                        log.warning("[%s] Failed to persist %s stop order id: %s",
+                                    user_id, label.upper(), persist_err)
+                        db.rollback()
                 else:
                     log.warning("[%s] Lead Trading %s rejected: %s",
                                 user_id, label.upper(), resp)
