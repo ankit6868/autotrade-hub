@@ -1788,20 +1788,40 @@ def cancel_futures_order(
             return str(r) if r else None
         non_404 = [(e, _msg(r)) for (e, r) in last_responses
                    if _msg(r) and "404" not in str(_msg(r)) and "Not Found" not in str(_msg(r))]
+        raw_err = ""
         if non_404:
-            # Prefer the most informative non-404 error.
-            err_endpoint, err_msg = non_404[0]
-            err_str = f"{err_msg} (via {err_endpoint})"
+            err_endpoint, raw_err = non_404[0]
         else:
-            err_str = next((m for (_e, r) in last_responses if (m := _msg(r))), "unknown")
+            raw_err = next((m for (_e, r) in last_responses if (m := _msg(r))), "unknown")
+
+        # If KuCoin says "Access denied", surface a user-friendly message
+        # that explains the actual KuCoin API limitation and what to do.
+        # Confirmed via logs that this happens when a Lead-Trading-scoped
+        # API key tries to cancel a stop order via /api/v1/orders/{id} —
+        # the only route that finds it. KuCoin doesn't expose a
+        # Lead Trading-namespace stop-order cancel route, so the only
+        # paths forward are (a) adding Futures Trading scope to the key,
+        # or (b) cancelling from KuCoin's UI.
+        if "Access denied" in str(raw_err) or "require more permission" in str(raw_err):
+            err_str = (
+                "Your Lead Trading API key doesn't have scope to cancel this stop order. "
+                "KuCoin routes Lead-Trading stop orders to the regular futures namespace, "
+                "and the regular cancel endpoint requires Futures Trading permission. "
+                "Fix: on KuCoin → API Management, edit the key and add Futures Trading "
+                "permission, OR cancel this order directly from the KuCoin UI."
+            )
+        else:
+            err_str = f"KuCoin rejected the cancel: {raw_err}"
+
         log.warning("[%s] Stop-order cancel failed on all endpoints (client_oid=%s symbol=%s): %s",
                     user_id, client_oid, symbol, last_responses)
         return {
-            "error": f"KuCoin rejected stop-order cancel: {err_str}",
+            "error": err_str,
             "order_id": order_id,
             "kucoin_cancelled": False,
             "client_oid": client_oid,
             "symbol": symbol,
+            "raw_kucoin_error": raw_err,
             "attempts": [{"endpoint": e, "response": r} for (e, r) in last_responses],
         }
 
