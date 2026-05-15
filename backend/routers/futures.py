@@ -801,6 +801,61 @@ def futures_open_positions(
         except Exception as e:
             log.warning("[%s] KuCoin position reconcile failed: %s", user_id, e)
 
+    # ── Attach KuCoin Advanced Orders (TP/SL stops) to their positions ──
+    # When the user sets TP/SL on a position, the resulting stop orders
+    # live on KuCoin (not our DB). Without this step the position row's
+    # TP/SL columns show "—" even though KuCoin's UI shows them. We fetch
+    # active stop orders once and match them to positions by symbol +
+    # direction, populating tp_price / stoploss_price so the UI mirrors
+    # what KuCoin shows.
+    if (mode == "live" or mode is None) and merged and _ensure_live_credentials(eng, user_id, db)[0]:
+        try:
+            from backend.services.native_trading_engine import _kucoin_get_signed
+            from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+            so_resp = _kucoin_get_signed(
+                "/api/v1/stopOrders",
+                eng._api_key, eng._api_sec, eng._api_pass,
+                params={"status": "active"},
+                base_url=KUCOIN_FUTURES_BASE,
+            )
+            if str(so_resp.get("code")) == "200000":
+                items = (so_resp.get("data") or {}).get("items") or []
+                # Build {pair: {"tp": price, "sl": price}} by classifying each
+                # reduce-only stop order by side + stop direction.
+                # Long position closes:  side=sell + stop=up  → TP
+                #                        side=sell + stop=down → SL
+                # Short position closes: side=buy  + stop=down → TP
+                #                        side=buy  + stop=up   → SL
+                tp_sl_by_pair: dict[str, dict] = {}
+                for s in items:
+                    if not (s.get("reduceOnly") or s.get("closeOrder")):
+                        continue
+                    kc_sym = (s.get("symbol") or "").upper()
+                    base   = kc_sym.replace("USDTM", "").replace("XBT", "BTC")
+                    pair   = f"{base}/USDT"
+                    side   = (s.get("side") or "").lower()
+                    sdir   = (s.get("stop") or "").lower()
+                    try:
+                        sp = float(s.get("stopPrice") or 0) or None
+                    except (TypeError, ValueError):
+                        sp = None
+                    if not sp or not side or not sdir:
+                        continue
+                    is_tp = (side == "sell" and sdir == "up") or (side == "buy" and sdir == "down")
+                    bucket = tp_sl_by_pair.setdefault(pair, {})
+                    bucket["tp" if is_tp else "sl"] = sp
+                # Apply to positions in-place.
+                for t in merged:
+                    bucket = tp_sl_by_pair.get(t["pair"])
+                    if not bucket:
+                        continue
+                    if bucket.get("tp") is not None:
+                        t["tp_price"] = bucket["tp"]
+                    if bucket.get("sl") is not None:
+                        t["stoploss_price"] = bucket["sl"]
+        except Exception as e:
+            log.warning("[%s] KuCoin stop-orders attach failed: %s", user_id, e)
+
     return {"trades": merged}
 
 
