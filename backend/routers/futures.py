@@ -1742,59 +1742,38 @@ def cancel_futures_order(
             except Exception as e:
                 return False, {"error": str(e)}
 
-        # Step 2: try every plausible cancel route in order of likelihood.
-        # The first one to return code 200000 wins.
+        # ── Documented KuCoin Lead Trading cancel endpoints ─────────────
+        # Verified against https://www.kucoin.com/docs-new
+        #   Copy Trading → Futures → Cancel Order By OrderId:
+        #     DELETE /api/v1/copy-trade/futures/orders?orderId=X
+        #     Permission: LeadtradeFutures ← user has this
+        #     "Cancel an order (including a stop order)" — handles stops.
         #
-        # KuCoin's "The order cannot be canceled" error (code 300003) is
-        # returned specifically when you DELETE a stop order via the
-        # *regular* /orders/{id} route — the order is found, but that
-        # endpoint can't cancel stops. The dedicated stop-order routes
-        # (which we list FIRST below) are what KuCoin's own UI uses.
+        #   Copy Trading → Futures → Cancel Order By ClientOid:
+        #     DELETE /api/v1/copy-trade/futures/orders/client-order
+        #            ?symbol=X&clientOid=Y
+        #     Permission: LeadtradeFutures ← user has this
+        #
+        # CRITICAL: every prior commit had orderId/clientOid in the URL
+        # PATH. KuCoin's actual API expects them as QUERY parameters.
+        # That's why every Lead Trading attempt returned 404 even though
+        # the user's key has the right permission.
         attempts: list[tuple[str, str, dict | None]] = []
 
-        # Cancel by clientOid.
-        #
-        # CRITICAL FIX: per https://www.kucoin.com/docs-new (Futures
-        # Trading → Orders → Cancel Order By ClientOid), the canonical
-        # URL pattern is /api/v1/orders/client-order/{clientOid} with
-        # clientOid in the PATH, not as a query parameter. Every prior
-        # attempt that used `?clientOid=X` returned 404 for exactly
-        # this reason.
-        if client_oid:
-            # Primary: regular Futures cancel-by-clientOid (path param).
-            # This is what the docs document — and the user's key has
-            # "Futures Lead Trading Permissions" which the docs say is
-            # equivalent to Futures for trading/cancel operations.
-            attempts.append(("DELETE", f"/api/v1/orders/client-order/{client_oid}", None))
-            # Lead Trading variant with same path pattern.
-            attempts.append(("DELETE", f"/api/v1/copy-trade/futures/orders/client-order/{client_oid}", None))
-            # Stop-orders variant with path pattern (in case stops
-            # have a dedicated cancel-by-clientOid endpoint).
-            attempts.append(("DELETE", f"/api/v1/stopOrders/client-order/{client_oid}", None))
-            attempts.append(("DELETE", f"/api/v1/copy-trade/futures/st-orders/client-order/{client_oid}", None))
-
-        # Cancel by ID — try v3 + every namespace variant. The regular
-        # /orders/{id} goes LAST since that's the route that returns
-        # "Access denied" and "cannot be canceled" for stops.
-        attempts.append(("DELETE", f"/api/v3/copy-trade/futures/orders/{stop_exchange_id}", None))
-        attempts.append(("DELETE", f"/api/v3/copy-trade/futures/st-orders/{stop_exchange_id}", None))
-        attempts.append(("DELETE", f"/api/v1/copy-trade/futures/st-orders/{stop_exchange_id}", None))
-        attempts.append(("DELETE", f"/api/v1/copy-trade/futures/stop-orders/{stop_exchange_id}", None))
-        attempts.append(("DELETE", f"/api/v1/stopOrders/{stop_exchange_id}", None))
-        attempts.append(("DELETE", f"/api/v1/copy-trade/futures/orders/{stop_exchange_id}", None))
-        attempts.append(("DELETE", f"/api/v1/orders/{stop_exchange_id}", None))
-
-        # Last-resort: cancel ALL active stop orders for this symbol via
-        # the bulk endpoint. KuCoin's documented Lead Trading endpoint
-        # `DELETE /api/v1/stopOrders?symbol=X` is the same route their
-        # UI calls and it accepts Lead-Trading-scoped keys (it doesn't
-        # require regular Trade permission per-order). If only one stop
-        # is active on this symbol, this cancels exactly the one the
-        # user clicked.
-        if symbol:
-            attempts.append(("DELETE", "/api/v1/stopOrders", {"symbol": symbol}))
-            attempts.append(("DELETE", "/api/v1/copy-trade/futures/stop-orders", {"symbol": symbol}))
-            attempts.append(("DELETE", "/api/v1/copy-trade/futures/st-orders", {"symbol": symbol}))
+        # Primary: Lead Trading cancel-by-orderId (handles stop orders).
+        if stop_exchange_id:
+            attempts.append((
+                "DELETE",
+                "/api/v1/copy-trade/futures/orders",
+                {"orderId": stop_exchange_id},
+            ))
+        # Secondary: Lead Trading cancel-by-clientOid (requires symbol).
+        if client_oid and symbol:
+            attempts.append((
+                "DELETE",
+                "/api/v1/copy-trade/futures/orders/client-order",
+                {"symbol": symbol, "clientOid": client_oid},
+            ))
 
         last_responses: list[tuple[str, dict | str]] = []
         for method, endpoint, query in attempts:
