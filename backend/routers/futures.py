@@ -2023,54 +2023,15 @@ def get_futures_orders(
                     ).all()
                     lead_id_by_oid = {coid: str(xid) for (coid, xid) in rows if coid and xid}
 
-                # Backfill: for each stop with a clientOid but no DB row, ask
-                # KuCoin for its canonical orderId via byClientOid and persist.
-                # This makes pre-existing TP/SL orders (placed before the
-                # persistence change shipped) cancellable from the app too.
-                from sqlalchemy import insert as sql_insert
-                for s in items:
-                    coid = s.get("clientOid")
-                    if not coid or coid in lead_id_by_oid:
-                        continue
-                    try:
-                        lookup = _kucoin_get_signed(
-                            "/api/v1/orders/byClientOid",
-                            eng._api_key, eng._api_sec, eng._api_pass,
-                            params={"clientOid": coid},
-                            base_url=KUCOIN_FUTURES_BASE,
-                        )
-                        if str(lookup.get("code")) == "200000":
-                            fetched = (lookup.get("data") or {})
-                            fetched_id = fetched.get("id") or s.get("id")
-                            if fetched_id:
-                                lead_id_by_oid[coid] = str(fetched_id)
-                                log.info("[%s] Backfilled stop-order id %s for clientOid %s",
-                                         user_id, fetched_id, coid)
-                                # Persist so future page loads skip the lookup.
-                                try:
-                                    db.add(FuturesOrder(
-                                        user_id=user_id,
-                                        client_oid=coid,
-                                        exchange_order_id=str(fetched_id),
-                                        symbol=s.get("symbol"),
-                                        side=(s.get("side") or "").lower(),
-                                        order_type=f"stop_{('tp' if ((s.get('side') or '').lower() == 'sell' and (s.get('stop') or '').lower() == 'up') or ((s.get('side') or '').lower() == 'buy' and (s.get('stop') or '').lower() == 'down') else 'sl')}",
-                                        size=s.get("size") or 0,
-                                        stop_price=float(s.get("stopPrice") or 0) or None,
-                                        leverage=s.get("leverage"),
-                                        margin_mode=s.get("marginMode"),
-                                        mode="live",
-                                        status="pending",
-                                        created_at=datetime.utcnow(),
-                                    ))
-                                    db.commit()
-                                except Exception as persist_err:
-                                    log.debug("[%s] Backfill persist failed (likely exists): %s",
-                                              user_id, persist_err)
-                                    db.rollback()
-                    except Exception as lookup_err:
-                        log.debug("[%s] byClientOid lookup for %s failed: %s",
-                                  user_id, coid, lookup_err)
+                # NOTE: We deliberately do NOT call /api/v1/orders/byClientOid
+                # here to "backfill" missing DB rows. That made one extra
+                # signed request per stop order per refresh, multiplied by
+                # the frontend's poll rate, and was causing API stack-up
+                # that broke the Lead Trading connection check and other
+                # parallel calls. With the new order_id encoding below
+                # (stop:{id}:{clientOid}:{symbol}) the cancel handler has
+                # everything it needs from the LIST response itself — no
+                # DB lookup required.
                 for s in items:
                     stop_dir = (s.get("stop") or "").lower()   # "up" | "down"
                     side     = (s.get("side") or "").lower()
