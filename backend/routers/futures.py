@@ -1654,14 +1654,18 @@ def cancel_futures_order(
     eng = futures_engine_registry.for_user(user_id)
 
     # ── Stop-order (Advanced Order) cancel branch ───────────────────────
-    # We placed TP/SL via /api/v1/copy-trade/futures/orders (Lead Trading
-    # orders endpoint), so the order lives under that namespace and must
-    # be cancelled via the matching Lead Trading cancel route. The plain
-    # /api/v1/stopOrders/{id} returns 404 for Lead Trading orders — that
-    # was the source of the user's 404.
+    # Both Lead-Trading `/copy-trade/futures/orders/{id}` and regular
+    # `/stopOrders/{id}` were returning 404 for the IDs we list from
+    # `/api/v1/stopOrders`. KuCoin's own UI cancels these fine, which
+    # means there's a route + ID combination that works — we just have
+    # to find it.
     #
-    # Try Lead Trading cancel first; on failure fall back to the regular
-    # stop-orders cancel for any legacy orders.
+    # Strategy: look up the stop order's clientOid + symbol from the
+    # active-stops list first, then attempt cancel against every known
+    # endpoint variant in order of likelihood. The first 200000 wins.
+    # Cancel-by-clientOid is more reliable than cancel-by-id because the
+    # clientOid is the same regardless of which namespace the order
+    # lives in.
     if order_id.startswith("stop:"):
         stop_exchange_id = order_id.split(":", 1)[1]
         ok, err = _ensure_live_credentials(eng, user_id, db)
@@ -1670,17 +1674,37 @@ def cancel_futures_order(
 
         from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
         from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+        from backend.services.native_trading_engine import _kucoin_get_signed
+        from urllib.parse import urlencode
 
-        def _try_cancel(endpoint: str):
+        # Step 1: find the order's clientOid + symbol from KuCoin so we can
+        # try cancel-by-clientOid which is namespace-agnostic.
+        client_oid: str | None = None
+        symbol: str | None = None
+        try:
+            list_resp = _kucoin_get_signed(
+                "/api/v1/stopOrders", eng._api_key, eng._api_sec, eng._api_pass,
+                params={"status": "active"}, base_url=_base,
+            )
+            for s in ((list_resp.get("data") or {}).get("items") or []):
+                if str(s.get("id")) == stop_exchange_id:
+                    client_oid = s.get("clientOid")
+                    symbol     = s.get("symbol")
+                    break
+        except Exception as e:
+            log.warning("[%s] Stop-order lookup before cancel failed: %s", user_id, e)
+
+        def _try_cancel(method: str, endpoint: str, query: dict | None = None):
             """Returns (ok, parsed_response_or_error_dict)."""
             try:
+                ep = endpoint + (("?" + urlencode(query)) if query else "")
                 ts = str(int(_time.time() * 1000))
                 headers = _sign_request(
                     eng._api_sec, eng._api_pass, eng._api_key,
-                    ts, "DELETE", endpoint,
+                    ts, method, ep,
                 )
-                url = f"{_base}{endpoint}"
-                req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
+                url = f"{_base}{ep}"
+                req_obj = urllib.request.Request(url, headers=headers, method=method)
                 with _proxy_urlopen(req_obj, timeout=15) as resp:
                     return True, _json.loads(resp.read().decode())
             except urllib.error.HTTPError as he:
@@ -1692,32 +1716,51 @@ def cancel_futures_order(
             except Exception as e:
                 return False, {"error": str(e)}
 
-        # Primary: Lead Trading cancel.
-        ok1, resp1 = _try_cancel(f"/api/v1/copy-trade/futures/orders/{stop_exchange_id}")
-        if ok1 and str((resp1 or {}).get("code", "")) == "200000":
-            log_event(db, user_id, "futures.cancel_stop_order", request,
-                      payload={"order_id": order_id, "endpoint": "copy-trade"})
-            return {"kucoin_cancelled": True, "order_id": order_id}
+        # Step 2: try every plausible cancel route in order of likelihood.
+        # The first one to return code 200000 wins.
+        attempts: list[tuple[str, str, dict | None]] = []
+        if client_oid and symbol:
+            # Cancel by clientOid (Lead Trading)
+            attempts.append((
+                "DELETE",
+                "/api/v1/copy-trade/futures/orders/client-order",
+                {"clientOid": client_oid, "symbol": symbol},
+            ))
+            # Cancel by clientOid (regular futures)
+            attempts.append((
+                "DELETE",
+                "/api/v1/orders/client-order",
+                {"clientOid": client_oid, "symbol": symbol},
+            ))
+        # Cancel by ID — try every namespace variant.
+        attempts.append(("DELETE", f"/api/v1/copy-trade/futures/st-orders/{stop_exchange_id}", None))
+        attempts.append(("DELETE", f"/api/v1/copy-trade/futures/orders/{stop_exchange_id}", None))
+        attempts.append(("DELETE", f"/api/v1/stopOrders/{stop_exchange_id}", None))
+        attempts.append(("DELETE", f"/api/v1/orders/{stop_exchange_id}", None))
 
-        # Fallback: regular stop-orders cancel (legacy orders).
-        ok2, resp2 = _try_cancel(f"/api/v1/stopOrders/{stop_exchange_id}")
-        if ok2 and str((resp2 or {}).get("code", "")) == "200000":
-            log_event(db, user_id, "futures.cancel_stop_order", request,
-                      payload={"order_id": order_id, "endpoint": "stopOrders"})
-            return {"kucoin_cancelled": True, "order_id": order_id}
+        last_responses: list[tuple[str, dict | str]] = []
+        for method, endpoint, query in attempts:
+            ok_r, resp_r = _try_cancel(method, endpoint, query)
+            last_responses.append((endpoint, resp_r))
+            if ok_r and str((resp_r or {}).get("code", "")) == "200000":
+                log_event(db, user_id, "futures.cancel_stop_order", request,
+                          payload={"order_id": order_id, "endpoint": endpoint})
+                log.info("[%s] Stop-order cancel ok via %s", user_id, endpoint)
+                return {"kucoin_cancelled": True, "order_id": order_id, "endpoint": endpoint}
 
-        # Both failed — surface the most informative error.
+        # Every attempt failed — surface the most informative error to the modal.
         def _msg(r):
             if isinstance(r, dict):
                 return (r.get("body") or {}).get("msg") or r.get("error") or r.get("msg")
             return str(r) if r else None
-        err_msg = _msg(resp1) or _msg(resp2) or "unknown"
-        log.warning("[%s] Stop-order cancel failed on both endpoints: %s | %s",
-                    user_id, resp1, resp2)
+        err_msg = next((m for (_e, r) in last_responses if (m := _msg(r))), "unknown")
+        log.warning("[%s] Stop-order cancel failed on all endpoints (client_oid=%s): %s",
+                    user_id, client_oid, last_responses)
         return {
             "error": f"KuCoin rejected stop-order cancel: {err_msg}",
             "order_id": order_id,
             "kucoin_cancelled": False,
+            "attempts": [{"endpoint": e, "response": r} for (e, r) in last_responses],
         }
 
     # An order is "live" if it has an exchange_order_id (it was forwarded to
