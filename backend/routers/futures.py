@@ -1929,15 +1929,9 @@ def get_futures_orders(
 
     # ── Live-mode: also fetch KuCoin Lead Trading "Advanced Orders" (stop
     # orders, i.e. attached TP/SL). These don't live in our DB because they
-    # were placed directly against KuCoin and KuCoin is the source of truth.
-    #
-    # IMPORTANT: list from /api/v1/copy-trade/futures/orders, NOT
-    # /api/v1/stopOrders. The latter returns regular-futures-namespace IDs
-    # that are NOT accepted by any /copy-trade/futures/... cancel route —
-    # only by the regular /orders/{id} which Lead Trading API keys can't
-    # call ("Access denied, require more permission"). The Lead Trading
-    # orders endpoint returns IDs that DO work with the matching cancel
-    # endpoint.
+    # were placed directly via /st-orders against KuCoin and KuCoin is the
+    # source of truth. We merge them into the response so the Open Orders
+    # tab can show what KuCoin's "Advanced Orders" sub-tab shows.
     stop_orders: list[dict] = []
     if (status == "pending" or status is None) and mode != "paper" and _ensure_live_credentials(eng, user_id, db)[0]:
         try:
@@ -1947,16 +1941,11 @@ def get_futures_orders(
             if symbol:
                 params["symbol"] = symbol
             so_resp = _kucoin_get_signed(
-                "/api/v1/copy-trade/futures/orders",
-                eng._api_key, eng._api_sec, eng._api_pass,
+                "/api/v1/stopOrders", eng._api_key, eng._api_sec, eng._api_pass,
                 params=params, base_url=KUCOIN_FUTURES_BASE,
             )
             if str(so_resp.get("code")) == "200000":
                 items = (so_resp.get("data") or {}).get("items") or []
-                # Filter to only stop orders (those with a `stop` field).
-                # Regular limit/market orders also appear in this list and
-                # are handled by the existing DB-row code path below.
-                items = [s for s in items if (s.get("stop") or "").strip()]
                 for s in items:
                     stop_dir = (s.get("stop") or "").lower()   # "up" | "down"
                     side     = (s.get("side") or "").lower()
