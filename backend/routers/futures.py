@@ -1667,7 +1667,15 @@ def cancel_futures_order(
     # clientOid is the same regardless of which namespace the order
     # lives in.
     if order_id.startswith("stop:"):
-        stop_exchange_id = order_id.split(":", 1)[1]
+        # Parse the encoded order_id. New format from /orders LIST is
+        # "stop:{id}:{clientOid}:{symbol}". Legacy format (older client
+        # builds) is "stop:{id}" — fall back to the DB+LIST lookup for
+        # those.
+        parts = order_id.split(":")
+        stop_exchange_id = parts[1] if len(parts) > 1 else ""
+        client_oid: str | None = parts[2] if len(parts) > 2 and parts[2] else None
+        symbol: str | None     = parts[3] if len(parts) > 3 and parts[3] else None
+
         ok, err = _ensure_live_credentials(eng, user_id, db)
         if not ok:
             return {"error": f"Cannot cancel stop order: {err}", "order_id": order_id}
@@ -1677,27 +1685,24 @@ def cancel_futures_order(
         from backend.services.native_trading_engine import _kucoin_get_signed
         from urllib.parse import urlencode
 
-        # Step 1: find clientOid + symbol. Try our DB first (which is set
-        # at TP/SL placement time with our atf-tp-* / atf-sl-* clientOid),
-        # then fall back to KuCoin's /stopOrders LIST. KuCoin's LIST often
-        # omits clientOid for stop orders so the DB path is the reliable
-        # one.
-        client_oid: str | None = None
-        symbol: str | None = None
-        try:
-            db_row = db.execute(
-                select(FuturesOrder.client_oid, FuturesOrder.symbol)
-                .where(
-                    FuturesOrder.user_id == user_id,
-                    FuturesOrder.exchange_order_id == stop_exchange_id,
-                )
-                .limit(1)
-            ).first()
-            if db_row:
-                client_oid, symbol = db_row
-        except Exception as e:
-            log.warning("[%s] DB clientOid lookup for stop %s failed: %s",
-                        user_id, stop_exchange_id, e)
+        # Legacy path: if the encoded id didn't include clientOid/symbol,
+        # fall back to DB + KuCoin /stopOrders LIST to find them.
+        if not client_oid or not symbol:
+            try:
+                db_row = db.execute(
+                    select(FuturesOrder.client_oid, FuturesOrder.symbol)
+                    .where(
+                        FuturesOrder.user_id == user_id,
+                        FuturesOrder.exchange_order_id == stop_exchange_id,
+                    )
+                    .limit(1)
+                ).first()
+                if db_row:
+                    client_oid = client_oid or db_row[0]
+                    symbol     = symbol or db_row[1]
+            except Exception as e:
+                log.warning("[%s] DB clientOid lookup for stop %s failed: %s",
+                            user_id, stop_exchange_id, e)
         if not client_oid or not symbol:
             try:
                 list_resp = _kucoin_get_signed(
@@ -1711,6 +1716,9 @@ def cancel_futures_order(
                         break
             except Exception as e:
                 log.warning("[%s] Stop-order lookup before cancel failed: %s", user_id, e)
+
+        log.info("[%s] stop-cancel start: id=%s clientOid=%s symbol=%s",
+                 user_id, stop_exchange_id, client_oid, symbol)
 
         def _try_cancel(method: str, endpoint: str, query: dict | None = None):
             """Returns (ok, parsed_response_or_error_dict)."""
@@ -2100,15 +2108,19 @@ def get_futures_orders(
                             tp_or_sl = "sl"
                     else:
                         tp_or_sl = None
-                    # Prefer the Lead Trading orderId from our DB so cancel
-                    # hits /copy-trade/futures/orders/{id} (the namespace
-                    # that accepts the user's Lead Trading API key). Fall
-                    # back to the /stopOrders id for orders placed before
-                    # this persistence change shipped.
+                    # Encode the cancel-relevant fields directly into
+                    # order_id so the cancel handler never needs a DB
+                    # lookup. Format: stop:{id}:{clientOid}:{symbol}
+                    # Each piece base64url-safe (clientOid may have dashes
+                    # but no slashes/colons). The cancel handler parses
+                    # this back out and tries cancel-by-clientOid as the
+                    # primary route (which is what KuCoin's docs say is
+                    # the canonical Lead Trading cancel path).
                     client_oid = s.get("clientOid") or ""
-                    lead_id = lead_id_by_oid.get(client_oid) or s.get("id")
+                    lead_id    = lead_id_by_oid.get(client_oid) or s.get("id") or ""
+                    sym        = s.get("symbol") or ""
                     stop_orders.append({
-                        "order_id":   f"stop:{lead_id}",
+                        "order_id":   f"stop:{lead_id}:{client_oid}:{sym}",
                         "symbol":     s.get("symbol"),
                         "side":       side,
                         "order_type": s.get("type") or "market",
