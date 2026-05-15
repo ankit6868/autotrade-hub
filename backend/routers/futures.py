@@ -2205,16 +2205,14 @@ def set_position_tp_sl(
 
             def _stop_order(label: str, price: float, is_tp: bool) -> dict:
                 # Trigger side depends on direction × order kind:
-                # Long TP / Short SL  → trigger up    (stop="up")
-                # Long SL / Short TP  → trigger down  (stop="down")
+                # Long TP / Short SL  → trigger up
+                # Long SL / Short TP  → trigger down
                 trig_up = (kc_direction == "long" and is_tp) or (kc_direction == "short" and not is_tp)
-                # NOTE: We use the regular stop-order field shape (`stop` +
-                # `stopPrice`) that KuCoin's /st-orders endpoint expects.
-                # An earlier version sent `triggerStopUpPrice` /
-                # `triggerStopDownPrice` — those are fields for the *position*
-                # TP/SL endpoint, not /st-orders. KuCoin silently ignored
-                # them, leaving the order as an immediate reduceOnly market
-                # which fired the instant we POSTed and closed the position.
+                # KuCoin's Lead Trading /copy-trade/futures/st-orders endpoint
+                # expects `triggerStopUpPrice` / `triggerStopDownPrice` (NOT
+                # the regular-futures `stop` + `stopPrice` field pair). This
+                # matches `kucoin_futures_client.place_tp_sl_order` and the
+                # existing entry-stop code path in this router.
                 body: dict = {
                     "clientOid":     f"atf-{label}-{int(_t.time() * 1000)}",
                     "symbol":         kc_symbol,
@@ -2224,12 +2222,13 @@ def set_position_tp_sl(
                     "side":           close_side,
                     "type":           "market",
                     "size":           kc_contracts,
-                    "stop":           "up" if trig_up else "down",
-                    "stopPrice":      str(float(price)),
                     "stopPriceType":  "TP",   # TP = trigger from Last Trade Price
                     "reduceOnly":     True,
-                    "closeOrder":     True,
                 }
+                if trig_up:
+                    body["triggerStopUpPrice"]   = str(float(price))
+                else:
+                    body["triggerStopDownPrice"] = str(float(price))
                 return body
 
             if tp_price is not None:
