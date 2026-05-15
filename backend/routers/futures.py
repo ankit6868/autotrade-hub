@@ -1727,7 +1727,20 @@ def cancel_futures_order(
         attempts: list[tuple[str, str, dict | None]] = []
 
         # Cancel by clientOid — stop-orders namespace (Lead Trading).
+        # v3 paths first since the user's key is tagged v3.
         if client_oid and symbol:
+            # ── v3 cancel-by-clientOid ──
+            attempts.append((
+                "DELETE",
+                "/api/v3/copy-trade/futures/orders/client-order",
+                {"clientOid": client_oid, "symbol": symbol},
+            ))
+            attempts.append((
+                "DELETE",
+                "/api/v3/copy-trade/futures/st-orders/client-order",
+                {"clientOid": client_oid, "symbol": symbol},
+            ))
+            # ── v1 cancel-by-clientOid ──
             attempts.append((
                 "DELETE",
                 "/api/v1/copy-trade/futures/st-orders/client-order",
@@ -1738,6 +1751,11 @@ def cancel_futures_order(
                 "/api/v1/copy-trade/futures/orders/client-order",
                 {"clientOid": client_oid, "symbol": symbol},
             ))
+            attempts.append((
+                "DELETE",
+                "/api/v1/copy-trade/futures/orders/byClientOid",
+                {"clientOid": client_oid, "symbol": symbol},
+            ))
             # Regular futures cancel-by-clientOid in stop namespace.
             attempts.append((
                 "DELETE",
@@ -1745,9 +1763,13 @@ def cancel_futures_order(
                 {"clientOid": client_oid, "symbol": symbol},
             ))
 
-        # Cancel by ID — stop-order namespaces FIRST (regular /orders/{id}
-        # returns "cannot be canceled" for stops, so try it last).
+        # Cancel by ID — try v3 + every namespace variant. The regular
+        # /orders/{id} goes LAST since that's the route that returns
+        # "Access denied" and "cannot be canceled" for stops.
+        attempts.append(("DELETE", f"/api/v3/copy-trade/futures/orders/{stop_exchange_id}", None))
+        attempts.append(("DELETE", f"/api/v3/copy-trade/futures/st-orders/{stop_exchange_id}", None))
         attempts.append(("DELETE", f"/api/v1/copy-trade/futures/st-orders/{stop_exchange_id}", None))
+        attempts.append(("DELETE", f"/api/v1/copy-trade/futures/stop-orders/{stop_exchange_id}", None))
         attempts.append(("DELETE", f"/api/v1/stopOrders/{stop_exchange_id}", None))
         attempts.append(("DELETE", f"/api/v1/copy-trade/futures/orders/{stop_exchange_id}", None))
         attempts.append(("DELETE", f"/api/v1/orders/{stop_exchange_id}", None))
@@ -1794,24 +1816,23 @@ def cancel_futures_order(
         else:
             raw_err = next((m for (_e, r) in last_responses if (m := _msg(r))), "unknown")
 
-        # If KuCoin says "Access denied", surface a user-friendly message
-        # that explains the actual KuCoin API limitation and what to do.
-        # Confirmed via logs that this happens when a Lead-Trading-scoped
-        # API key tries to cancel a stop order via /api/v1/orders/{id} —
-        # the only route that finds it. KuCoin doesn't expose a
-        # Lead Trading-namespace stop-order cancel route, so the only
-        # paths forward are (a) adding Futures Trading scope to the key,
-        # or (b) cancelling from KuCoin's UI.
-        if "Access denied" in str(raw_err) or "require more permission" in str(raw_err):
-            err_str = (
-                "Your Lead Trading API key doesn't have scope to cancel this stop order. "
-                "KuCoin routes Lead-Trading stop orders to the regular futures namespace, "
-                "and the regular cancel endpoint requires Futures Trading permission. "
-                "Fix: on KuCoin → API Management, edit the key and add Futures Trading "
-                "permission, OR cancel this order directly from the KuCoin UI."
-            )
-        else:
-            err_str = f"KuCoin rejected the cancel: {raw_err}"
+        # Dump the FULL per-attempt diagnostic into the error message so
+        # we can see exactly which routes returned what. Helps pinpoint
+        # the canonical endpoint without needing Railway log access.
+        # Group identical responses to keep it compact.
+        breakdown_lines: list[str] = []
+        for (ep, r) in last_responses:
+            msg = _msg(r)
+            status = (r or {}).get("http_status") if isinstance(r, dict) else None
+            code = (r or {}).get("code") if isinstance(r, dict) else None
+            tag = f"[{status or code or '?'}]"
+            breakdown_lines.append(f"  {tag} {ep} → {msg or 'no message'}")
+        breakdown = "\n".join(breakdown_lines)
+        err_str = (
+            f"KuCoin rejected the cancel ({raw_err}).\n"
+            f"client_oid={client_oid} symbol={symbol}\n"
+            f"Per-attempt breakdown:\n{breakdown}"
+        )
 
         log.warning("[%s] Stop-order cancel failed on all endpoints (client_oid=%s symbol=%s): %s",
                     user_id, client_oid, symbol, last_responses)
