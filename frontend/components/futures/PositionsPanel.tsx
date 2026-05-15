@@ -356,6 +356,9 @@ function TpSlEditor({ position, onClose, onSaved }: {
   const leverage = Number(position.leverage) || 1;
   const margin = Number(position.amount) || 0;       // USDT margin locked
   const notional = margin * leverage;                 // position value
+  // KuCoin parity: show Last Price + Liquidation Price in the header.
+  const lastPrice = Number(position.current_price) || entry;
+  const liqPrice  = Number(position.liquidation_price) || 0;
 
   // Slider state — 0-100% (capped at 100, but in practice 1-50% is the
   // useful range). 0 means "no TP/SL set".
@@ -474,10 +477,30 @@ function TpSlEditor({ position, onClose, onSaved }: {
           <h3 className="text-sm font-semibold text-white">Take Profit / Stop Loss</h3>
           <button onClick={onClose} className="text-slate-400 hover:text-white text-lg leading-none">×</button>
         </div>
-        <div className="text-[11px] text-slate-400 mb-4">
-          {position.pair} ·{' '}
-          <span className={isLong ? 'text-emerald-400' : 'text-red-400'}>{isLong ? 'LONG' : 'SHORT'}</span>
-          {' '}· {leverage}× · Entry <span className="text-white">{entry.toFixed(2)}</span>
+        <div className="text-[11px] text-slate-400 mb-3 flex items-center gap-2 flex-wrap">
+          <span>{position.pair}</span>
+          <span className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${isLong ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'}`}>
+            {isLong ? 'LONG' : 'SHORT'}
+          </span>
+          <span className="text-slate-500">Isolated · {leverage}×</span>
+        </div>
+
+        {/* ─────────── Entry / Last / Liquidation header trio (KuCoin parity) ─────────── */}
+        <div className="grid grid-cols-3 gap-2 mb-4 p-2.5 bg-[#06091a] border border-[#1a2440] rounded-lg">
+          <div>
+            <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-0.5">Entry Price</div>
+            <div className="text-xs font-semibold text-white tabular-nums">{entry.toFixed(2)}</div>
+          </div>
+          <div>
+            <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-0.5">Last Price</div>
+            <div className="text-xs font-semibold text-white tabular-nums">{lastPrice.toFixed(2)}</div>
+          </div>
+          <div>
+            <div className="text-[9px] uppercase tracking-wider text-slate-500 mb-0.5">Liq. Price</div>
+            <div className="text-xs font-semibold text-amber-400 tabular-nums">
+              {liqPrice > 0 ? liqPrice.toFixed(2) : '—'}
+            </div>
+          </div>
         </div>
 
         {/* ─────────── Take Profit ─────────── */}
@@ -531,20 +554,45 @@ function TpSlEditor({ position, onClose, onSaved }: {
               ✕
             </button>
           </div>
-          {/* Trigger price input */}
-          <div className="flex gap-2 items-center">
-            <label className="text-[10px] text-slate-500 shrink-0">Trigger</label>
-            <input
-              type="number" step="any" value={tpInput}
-              onChange={e => handleTpInput(e.target.value)}
-              placeholder={isLong ? `> ${entry.toFixed(2)}` : `< ${entry.toFixed(2)}`}
-              className="flex-1 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-emerald-500 tabular-nums"
-            />
-            <span className="text-[10px] text-slate-500">USDT</span>
+          {/* Trigger price + free-text % input (KuCoin parity) */}
+          <div className="flex gap-2 items-stretch">
+            <div className="flex-1 flex items-center gap-2 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 focus-within:border-emerald-500">
+              <input
+                type="number" step="any" value={tpInput}
+                onChange={e => handleTpInput(e.target.value)}
+                placeholder={isLong ? `> ${entry.toFixed(2)}` : `< ${entry.toFixed(2)}`}
+                className="flex-1 bg-transparent text-sm text-white focus:outline-none tabular-nums min-w-0"
+              />
+              <span className="text-[10px] text-slate-500">USDT</span>
+            </div>
+            <div className="w-20 flex items-center gap-1 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 focus-within:border-emerald-500">
+              <input
+                type="number" step="any"
+                value={tpPct > 0 ? tpPct.toFixed(2).replace(/\.?0+$/, '') : ''}
+                onChange={e => {
+                  const v = parseFloat(e.target.value);
+                  if (e.target.value === '') setTpPct(0);
+                  else if (isFinite(v) && v >= 0) setTpPct(Math.min(v, 100));
+                }}
+                placeholder="0"
+                className="flex-1 bg-transparent text-sm text-white focus:outline-none tabular-nums min-w-0 text-right"
+              />
+              <span className="text-[10px] text-slate-500">%</span>
+            </div>
           </div>
+          {tpPct > 0 && lastPrice > 0 && (
+            (isLong && tpPrice <= lastPrice) || (!isLong && tpPrice >= lastPrice)
+          ) && (
+            <div className="text-[10px] text-amber-400 mt-1.5 leading-snug">
+              The take-profit price must be {isLong ? 'higher' : 'lower'} than the Last Price of{' '}
+              <b className="tabular-nums">{lastPrice.toFixed(2)}</b> — otherwise it triggers immediately.
+            </div>
+          )}
           {tpPct > 0 && (
-            <div className="text-[10px] text-emerald-400/80 mt-1.5 tabular-nums">
-              Est. P&L at trigger: <b>+{tpPnl.toFixed(2)} USDT</b>
+            <div className="text-[10px] text-slate-400 mt-1.5 leading-snug">
+              A market order will be executed when the price reaches{' '}
+              <b className="text-emerald-300 tabular-nums">{tpPrice.toFixed(2)}</b>, with an
+              estimated profit of <b className="text-emerald-400 tabular-nums">+{tpPnl.toFixed(2)} USDT</b>.
             </div>
           )}
         </div>
@@ -598,19 +646,46 @@ function TpSlEditor({ position, onClose, onSaved }: {
               ✕
             </button>
           </div>
-          <div className="flex gap-2 items-center">
-            <label className="text-[10px] text-slate-500 shrink-0">Trigger</label>
-            <input
-              type="number" step="any" value={slInput}
-              onChange={e => handleSlInput(e.target.value)}
-              placeholder={isLong ? `< ${entry.toFixed(2)}` : `> ${entry.toFixed(2)}`}
-              className="flex-1 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:border-red-500 tabular-nums"
-            />
-            <span className="text-[10px] text-slate-500">USDT</span>
+          {/* Trigger price + free-text % input (KuCoin parity) */}
+          <div className="flex gap-2 items-stretch">
+            <div className="flex-1 flex items-center gap-2 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 focus-within:border-red-500">
+              <input
+                type="number" step="any" value={slInput}
+                onChange={e => handleSlInput(e.target.value)}
+                placeholder={isLong ? `< ${entry.toFixed(2)}` : `> ${entry.toFixed(2)}`}
+                className="flex-1 bg-transparent text-sm text-white focus:outline-none tabular-nums min-w-0"
+              />
+              <span className="text-[10px] text-slate-500">USDT</span>
+            </div>
+            <div className="w-20 flex items-center gap-1 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 focus-within:border-red-500">
+              <input
+                type="number" step="any"
+                value={slPct > 0 ? slPct.toFixed(2).replace(/\.?0+$/, '') : ''}
+                onChange={e => {
+                  const v = parseFloat(e.target.value);
+                  if (e.target.value === '') setSlPct(0);
+                  else if (isFinite(v) && v >= 0) setSlPct(Math.min(v, 100));
+                }}
+                placeholder="0"
+                className="flex-1 bg-transparent text-sm text-white focus:outline-none tabular-nums min-w-0 text-right"
+              />
+              <span className="text-[10px] text-slate-500">%</span>
+            </div>
           </div>
+          {/* Inline validation — KuCoin shows the same kind of warning. */}
+          {slPct > 0 && lastPrice > 0 && (
+            (isLong && slPrice >= lastPrice) || (!isLong && slPrice <= lastPrice)
+          ) && (
+            <div className="text-[10px] text-amber-400 mt-1.5 leading-snug">
+              The stop-loss price must be {isLong ? 'lower' : 'higher'} than the Last Price of{' '}
+              <b className="tabular-nums">{lastPrice.toFixed(2)}</b>.
+            </div>
+          )}
           {slPct > 0 && (
-            <div className="text-[10px] text-red-400/80 mt-1.5 tabular-nums">
-              Est. P&L at trigger: <b>{slPnl.toFixed(2)} USDT</b>
+            <div className="text-[10px] text-slate-400 mt-1.5 leading-snug">
+              A market order will be executed when the price reaches{' '}
+              <b className="text-red-300 tabular-nums">{slPrice.toFixed(2)}</b>, with an
+              estimated profit of <b className="text-red-400 tabular-nums">{slPnl.toFixed(2)} USDT</b>.
             </div>
           )}
         </div>
