@@ -1873,16 +1873,25 @@ def cancel_futures_order(
             kucoin_error = err
         else:
             try:
+                # KuCoin Copy Trading docs:
+                #   DELETE /api/v1/copy-trade/futures/orders?orderId=X
+                #   Permission: LeadtradeFutures (user has it)
+                # orderId is a QUERY parameter — not a path segment.
+                # Same correction we made for stop-order cancels in
+                # commit 9e7eb76.
                 from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
+                from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+                from urllib.parse import urlencode
                 ts = str(int(_time.time() * 1000))
-                endpoint = f"/api/v1/copy-trade/futures/orders/{db_order.exchange_order_id}"
+                qs = urlencode({"orderId": db_order.exchange_order_id})
+                endpoint = f"/api/v1/copy-trade/futures/orders?{qs}"
                 headers = _sign_request(
                     eng._api_sec, eng._api_pass, eng._api_key,
                     ts, "DELETE", endpoint,
                 )
                 url = f"{_base}{endpoint}"
                 req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
-                with urllib.request.urlopen(req_obj, timeout=15) as resp:
+                with _proxy_urlopen(req_obj, timeout=15) as resp:
                     cancel_resp = _json.loads(resp.read().decode())
                 code = str(cancel_resp.get("code", ""))
                 if code == "200000":
