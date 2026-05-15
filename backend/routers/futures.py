@@ -1677,22 +1677,40 @@ def cancel_futures_order(
         from backend.services.native_trading_engine import _kucoin_get_signed
         from urllib.parse import urlencode
 
-        # Step 1: find the order's clientOid + symbol from KuCoin so we can
-        # try cancel-by-clientOid which is namespace-agnostic.
+        # Step 1: find clientOid + symbol. Try our DB first (which is set
+        # at TP/SL placement time with our atf-tp-* / atf-sl-* clientOid),
+        # then fall back to KuCoin's /stopOrders LIST. KuCoin's LIST often
+        # omits clientOid for stop orders so the DB path is the reliable
+        # one.
         client_oid: str | None = None
         symbol: str | None = None
         try:
-            list_resp = _kucoin_get_signed(
-                "/api/v1/stopOrders", eng._api_key, eng._api_sec, eng._api_pass,
-                params={"status": "active"}, base_url=_base,
-            )
-            for s in ((list_resp.get("data") or {}).get("items") or []):
-                if str(s.get("id")) == stop_exchange_id:
-                    client_oid = s.get("clientOid")
-                    symbol     = s.get("symbol")
-                    break
+            db_row = db.execute(
+                select(FuturesOrder.client_oid, FuturesOrder.symbol)
+                .where(
+                    FuturesOrder.user_id == user_id,
+                    FuturesOrder.exchange_order_id == stop_exchange_id,
+                )
+                .limit(1)
+            ).first()
+            if db_row:
+                client_oid, symbol = db_row
         except Exception as e:
-            log.warning("[%s] Stop-order lookup before cancel failed: %s", user_id, e)
+            log.warning("[%s] DB clientOid lookup for stop %s failed: %s",
+                        user_id, stop_exchange_id, e)
+        if not client_oid or not symbol:
+            try:
+                list_resp = _kucoin_get_signed(
+                    "/api/v1/stopOrders", eng._api_key, eng._api_sec, eng._api_pass,
+                    params={"status": "active"}, base_url=_base,
+                )
+                for s in ((list_resp.get("data") or {}).get("items") or []):
+                    if str(s.get("id")) == stop_exchange_id:
+                        client_oid = client_oid or s.get("clientOid")
+                        symbol     = symbol or s.get("symbol")
+                        break
+            except Exception as e:
+                log.warning("[%s] Stop-order lookup before cancel failed: %s", user_id, e)
 
         def _try_cancel(method: str, endpoint: str, query: dict | None = None):
             """Returns (ok, parsed_response_or_error_dict)."""
@@ -1773,6 +1791,18 @@ def cancel_futures_order(
         attempts.append(("DELETE", f"/api/v1/stopOrders/{stop_exchange_id}", None))
         attempts.append(("DELETE", f"/api/v1/copy-trade/futures/orders/{stop_exchange_id}", None))
         attempts.append(("DELETE", f"/api/v1/orders/{stop_exchange_id}", None))
+
+        # Last-resort: cancel ALL active stop orders for this symbol via
+        # the bulk endpoint. KuCoin's documented Lead Trading endpoint
+        # `DELETE /api/v1/stopOrders?symbol=X` is the same route their
+        # UI calls and it accepts Lead-Trading-scoped keys (it doesn't
+        # require regular Trade permission per-order). If only one stop
+        # is active on this symbol, this cancels exactly the one the
+        # user clicked.
+        if symbol:
+            attempts.append(("DELETE", "/api/v1/stopOrders", {"symbol": symbol}))
+            attempts.append(("DELETE", "/api/v1/copy-trade/futures/stop-orders", {"symbol": symbol}))
+            attempts.append(("DELETE", "/api/v1/copy-trade/futures/st-orders", {"symbol": symbol}))
 
         last_responses: list[tuple[str, dict | str]] = []
         for method, endpoint, query in attempts:
