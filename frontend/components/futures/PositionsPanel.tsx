@@ -94,6 +94,25 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
     onRefresh?.();
   }
 
+  // Enrich positions with TP/SL prices read from the active stop orders we
+  // already fetched from /api/futures/orders. KuCoin's Advanced Orders are
+  // the source of truth for live TP/SL; we just project them onto the
+  // matching position row so the Positions tab shows the same numbers as
+  // KuCoin's "Take Profit & Stop Loss" column. This is purely client-side
+  // — no backend changes needed and no risk to the working /open endpoint.
+  const positionsWithTpSl = positions.map(p => {
+    const stops = openOrders.filter(o =>
+      o?.kind === 'stop' && _displayPair(o.symbol) === p.pair
+    );
+    const tpStop = stops.find(s => s.tp_or_sl === 'tp');
+    const slStop = stops.find(s => s.tp_or_sl === 'sl');
+    return {
+      ...p,
+      tp_price:       p.tp_price       ?? (tpStop?.stop_price ? Number(tpStop.stop_price) : null),
+      stoploss_price: p.stoploss_price ?? (slStop?.stop_price ? Number(slStop.stop_price) : null),
+    };
+  });
+
   const tabs: { key: Tab; label: string; count?: number }[] = [
     { key: 'open_orders', label: 'Open Orders', count: openOrders.length },
     { key: 'positions', label: 'Positions', count: positions.length },
@@ -130,7 +149,7 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
       <div className="flex-1 overflow-auto">
         {tab === 'positions' && (
           <PositionsTab
-            positions={positions}
+            positions={positionsWithTpSl}
             closingPair={closingPair}
             onClose={closePosition}
             onCloseAll={closeAllPositions}
