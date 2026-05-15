@@ -639,8 +639,42 @@ function _displayPair(symbol: string | undefined): string {
 }
 
 function OrdersTab({ orders, onCancel }: { orders: any[]; onCancel: (id: string) => void }) {
+  // Split into Basic vs Advanced (TP/SL stop) orders to mirror KuCoin's UX.
+  const advanced = orders.filter(o => o.kind === 'stop');
+  const basic    = orders.filter(o => o.kind !== 'stop');
+  const [subtab, setSubtab] = useState<'basic' | 'advanced'>(
+    advanced.length > 0 && basic.length === 0 ? 'advanced' : 'basic'
+  );
+
   if (orders.length === 0) {
     return <div className="text-center text-slate-500 py-8 text-sm">No open orders</div>;
+  }
+
+  return (
+    <div>
+      <div className="flex gap-2 mb-2 border-b border-white/[0.04]">
+        <button
+          onClick={() => setSubtab('basic')}
+          className={`px-3 py-1.5 text-xs ${subtab === 'basic' ? 'text-white border-b-2 border-emerald-400' : 'text-slate-500'}`}
+        >
+          Basic Orders ({basic.length})
+        </button>
+        <button
+          onClick={() => setSubtab('advanced')}
+          className={`px-3 py-1.5 text-xs ${subtab === 'advanced' ? 'text-white border-b-2 border-emerald-400' : 'text-slate-500'}`}
+        >
+          Advanced Orders ({advanced.length})
+        </button>
+      </div>
+      {subtab === 'basic'    ? <BasicOrdersTable    orders={basic}    onCancel={onCancel} /> : null}
+      {subtab === 'advanced' ? <AdvancedOrdersTable orders={advanced} onCancel={onCancel} /> : null}
+    </div>
+  );
+}
+
+function BasicOrdersTable({ orders, onCancel }: { orders: any[]; onCancel: (id: string) => void }) {
+  if (orders.length === 0) {
+    return <div className="text-center text-slate-500 py-6 text-sm">No basic orders</div>;
   }
   return (
     <table className="w-full text-xs">
@@ -674,6 +708,64 @@ function OrdersTab({ orders, onCancel }: { orders: any[]; onCancel: (id: string)
             </td>
           </tr>
         ))}
+      </tbody>
+    </table>
+  );
+}
+
+function AdvancedOrdersTable({ orders, onCancel }: { orders: any[]; onCancel: (id: string) => void }) {
+  if (orders.length === 0) {
+    return <div className="text-center text-slate-500 py-6 text-sm">No advanced orders (TP/SL)</div>;
+  }
+  return (
+    <table className="w-full text-xs">
+      <thead>
+        <tr className="text-slate-500 text-[10px]">
+          <th className="text-left px-2 py-1">Symbol</th>
+          <th className="text-left px-2 py-1">Type</th>
+          <th className="text-left px-2 py-1">Side</th>
+          <th className="text-right px-2 py-1">Stop Price</th>
+          <th className="text-right px-2 py-1">Order</th>
+          <th className="text-right px-2 py-1">Amount</th>
+          <th className="text-center px-2 py-1">Cancel</th>
+        </tr>
+      </thead>
+      <tbody>
+        {orders.map((o, i) => {
+          const isTp = o.tp_or_sl === 'tp';
+          const priceLabel =
+            o.stop_price_type === 'TP' ? 'Last Price'
+            : o.stop_price_type === 'MP' ? 'Mark Price'
+            : o.stop_price_type === 'IP' ? 'Index Price'
+            : '';
+          return (
+            <tr key={i} className="border-t border-white/[0.04]">
+              <td className="px-2 py-2 text-white">{_displayPair(o.symbol)}</td>
+              <td className={`px-2 py-2 font-semibold ${isTp ? 'text-emerald-400' : 'text-red-400'}`}>
+                {isTp ? 'TP' : 'SL'}
+              </td>
+              <td className={`px-2 py-2 capitalize ${o.side === 'buy' ? 'text-emerald-400' : 'text-red-400'}`}>
+                {o.side === 'buy' ? 'Long' : 'Short'}
+              </td>
+              <td className="text-right px-2 py-2 text-slate-200">
+                {o.stop_price ? Number(o.stop_price).toFixed(2) : '--'}
+                {priceLabel ? <span className="text-slate-500 ml-1">({priceLabel})</span> : null}
+              </td>
+              <td className="text-right px-2 py-2 text-slate-300 capitalize">{o.order_type}</td>
+              <td className="text-right px-2 py-2 text-slate-400">
+                {o.close_order ? 'Entire Position' : (o.size ?? '--')}
+              </td>
+              <td className="text-center px-2 py-2">
+                <button
+                  onClick={() => onCancel(o.order_id)}
+                  className="px-2 py-1 rounded bg-red-500/20 text-red-400 text-[10px] hover:bg-red-500/30"
+                >
+                  Cancel
+                </button>
+              </td>
+            </tr>
+          );
+        })}
       </tbody>
     </table>
   );

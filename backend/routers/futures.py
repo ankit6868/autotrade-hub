@@ -1640,12 +1640,51 @@ def cancel_futures_order(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Cancel a pending futures order. In live mode, cancels on KuCoin Lead Trading."""
+    """Cancel a pending futures order. In live mode, cancels on KuCoin Lead Trading.
+
+    Supports two id formats:
+      * Regular pending orders use `client_oid` (matches FuturesOrder.client_oid).
+      * Advanced orders (TP/SL stops) returned by /orders use `stop:<exchange_id>`
+        because they live only on KuCoin, not in our DB.
+    """
     from backend.services.native_trading_engine import _kucoin_post_signed
     from backend.services.futures_engine import KUCOIN_FUTURES_BASE
     import urllib.request, json as _json
 
     eng = futures_engine_registry.for_user(user_id)
+
+    # ── Stop-order (Advanced Order) cancel branch ───────────────────────
+    if order_id.startswith("stop:"):
+        stop_exchange_id = order_id.split(":", 1)[1]
+        ok, err = _ensure_live_credentials(eng, user_id, db)
+        if not ok:
+            return {"error": f"Cannot cancel stop order: {err}", "order_id": order_id}
+        try:
+            from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
+            from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+            ts = str(int(_time.time() * 1000))
+            endpoint = f"/api/v1/stopOrders/{stop_exchange_id}"
+            headers = _sign_request(
+                eng._api_sec, eng._api_pass, eng._api_key,
+                ts, "DELETE", endpoint,
+            )
+            url = f"{_base}{endpoint}"
+            req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
+            with _proxy_urlopen(req_obj, timeout=15) as resp:
+                cancel_resp = _json.loads(resp.read().decode())
+            code = str(cancel_resp.get("code", ""))
+            if code != "200000":
+                return {
+                    "error": f"KuCoin rejected stop-order cancel: {cancel_resp.get('msg') or cancel_resp}",
+                    "order_id": order_id,
+                    "kucoin_cancelled": False,
+                }
+            log_event(db, user_id, "futures.cancel_stop_order", request,
+                      payload={"order_id": order_id})
+            return {"kucoin_cancelled": True, "order_id": order_id}
+        except Exception as e:
+            log.error("[%s] Stop-order cancel failed: %s", user_id, e)
+            return {"error": f"Stop-order cancel failed: {e}", "order_id": order_id}
 
     # An order is "live" if it has an exchange_order_id (it was forwarded to
     # KuCoin Lead Trading). Engine mode is unreliable here because the user
@@ -1785,6 +1824,64 @@ def get_futures_orders(
         except Exception as e:
             log.warning("[%s] KuCoin order reconcile failed: %s", user_id, e)
 
+    # ── Live-mode: also fetch KuCoin Lead Trading "Advanced Orders" (stop
+    # orders, i.e. attached TP/SL). These don't live in our DB because they
+    # were placed directly via /st-orders against KuCoin and KuCoin is the
+    # source of truth. We merge them into the response so the Open Orders
+    # tab can show what KuCoin's "Advanced Orders" sub-tab shows.
+    stop_orders: list[dict] = []
+    if (status == "pending" or status is None) and mode != "paper" and _ensure_live_credentials(eng, user_id, db)[0]:
+        try:
+            from backend.services.native_trading_engine import _kucoin_get_signed
+            from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+            params = {"status": "active"}
+            if symbol:
+                params["symbol"] = symbol
+            so_resp = _kucoin_get_signed(
+                "/api/v1/stopOrders", eng._api_key, eng._api_sec, eng._api_pass,
+                params=params, base_url=KUCOIN_FUTURES_BASE,
+            )
+            if str(so_resp.get("code")) == "200000":
+                items = (so_resp.get("data") or {}).get("items") or []
+                for s in items:
+                    stop_dir = (s.get("stop") or "").lower()   # "up" | "down"
+                    side     = (s.get("side") or "").lower()
+                    is_reduce = bool(s.get("reduceOnly") or s.get("closeOrder"))
+                    # Classify TP vs SL by stop direction + close side:
+                    #   sell + up   → TP for LONG
+                    #   sell + down → SL for LONG
+                    #   buy  + down → TP for SHORT
+                    #   buy  + up   → SL for SHORT
+                    if is_reduce and stop_dir and side:
+                        if (side == "sell" and stop_dir == "up") or (side == "buy" and stop_dir == "down"):
+                            tp_or_sl = "tp"
+                        else:
+                            tp_or_sl = "sl"
+                    else:
+                        tp_or_sl = None
+                    stop_orders.append({
+                        "order_id":   f"stop:{s.get('id')}",
+                        "symbol":     s.get("symbol"),
+                        "side":       side,
+                        "order_type": s.get("type") or "market",
+                        "size":       s.get("size") or 0,
+                        "price":      s.get("price"),
+                        "stop_price": s.get("stopPrice"),
+                        "stop":       stop_dir,
+                        "stop_price_type": s.get("stopPriceType"),
+                        "leverage":   s.get("leverage"),
+                        "margin_mode": s.get("marginMode"),
+                        "mode":       "live",
+                        "status":     "pending",
+                        "kind":       "stop",            # marker for frontend
+                        "tp_or_sl":   tp_or_sl,
+                        "reduce_only": is_reduce,
+                        "close_order": bool(s.get("closeOrder")),
+                        "created_at": s.get("createdAt"),
+                    })
+        except Exception as e:
+            log.warning("[%s] KuCoin stop-orders fetch failed: %s", user_id, e)
+
     query = select(FuturesOrder).where(FuturesOrder.user_id == user_id)
     if status:
         query = query.where(FuturesOrder.status == status)
@@ -1829,7 +1926,9 @@ def get_futures_orders(
     # place_futures_order), so the DB rows are the single source of truth.
     # The mode filter above (`FuturesOrder.mode == mode`) does the right
     # paper/live separation directly off the column.
-    return {"orders": db_orders}
+    # Merge KuCoin stop orders ("Advanced Orders") at the top so users see
+    # active TP/SL alongside their regular pending orders.
+    return {"orders": stop_orders + db_orders}
 
 
 @router.get("/orders/history")
