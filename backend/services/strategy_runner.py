@@ -379,6 +379,25 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
         except Exception as e:
             raise RuntimeError(f"{method_name} failed: {e}")
 
+    # Detect "non-Freqtrade" strategies: classes that don't define any of
+    # the populate_* hooks the engine knows how to call. These are usually
+    # built-in Python ports (Pine Script translations etc.) authored to
+    # run via the name-pattern path (_guess_strategy) — NOT to be exec'd
+    # as IStrategy subclasses. Raise so the caller can gracefully fall
+    # back to the name-matched signal function.
+    HOOKS = ("populate_indicators", "populate_entry_trend",
+             "populate_buy_trend",  "populate_exit_trend",
+             "populate_sell_trend")
+    available = [h for h in HOOKS if callable(getattr(instance, h, None))]
+    if not available:
+        raise RuntimeError(
+            f"Strategy class '{strategy_cls.__name__}' has none of the "
+            f"populate_* hooks (populate_indicators / populate_entry_trend / "
+            f"populate_buy_trend / populate_exit_trend). This looks like a "
+            f"Python-class strategy designed for the built-in signal-pattern "
+            f"path — falling back to the name-matched signal function."
+        )
+
     _call_if_exists("populate_indicators", "indicators")
     # Try the new-style entry/exit hooks first, fall back to old buy/sell.
     if hasattr(instance, "populate_entry_trend"):
