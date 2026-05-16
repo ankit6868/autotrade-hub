@@ -12,15 +12,13 @@ const nav = [
   { href: '/strategy/upload',    label: 'Upload Strategy',    icon: '📄',  section: 'STRATEGY' },
   { href: '/strategy/editor',    label: 'Strategy Editor',    icon: '✏️',  section: null },
   { href: '/strategy/templates', label: 'Templates',          icon: '📋',  section: null },
-  { href: '/opportunities',      label: 'Opportunities',      icon: '🎯',  section: null },
   // ── Futures Trading ───────────────────────────────────────────────
+  // Futures Paper / Futures Live were collapsed into Futures Terminal
+  // (which has the Paper/Live toggle in its top-right corner).
   { href: '/futures-trade',      label: 'Futures Terminal',   icon: '💹',  section: 'FUTURES' },
-  { href: '/futures-paper',      label: 'Futures Paper',      icon: '📊',  section: null },
-  { href: '/futures-live',       label: 'Futures Live',       icon: '⚡',  section: null },
   { href: '/futures-backtest',   label: 'Futures Backtest',   icon: '🔬',  section: null },
   // ── Advanced ──────────────────────────────────────────────────────
-  { href: '/copy-trading',       label: 'Copy Trading',       icon: '📡',  section: 'ADVANCED' },
-  { href: '/auto-trade',         label: 'Auto-Trade',         icon: '🤖',  section: null },
+  { href: '/auto-trade',         label: 'Auto-Trade',         icon: '🤖',  section: 'ADVANCED' },
   { href: '/history',            label: 'History',            icon: '📈',  section: null },
 ];
 
