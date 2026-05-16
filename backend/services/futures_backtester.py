@@ -166,6 +166,15 @@ def run_futures_backtest(
                 data_diagnostics[pair]["strategy_class"]   = df.attrs.get("strategy_class")
                 data_diagnostics[pair]["strategy_methods"] = df.attrs.get("strategy_methods", [])
                 data_diagnostics[pair]["signal_columns"]   = df.attrs.get("signal_columns", [])
+                # When zero entries fire, include the first 800 chars of the
+                # user's generated code in the diagnostics so it's possible
+                # to see at a glance whether the strategy actually has
+                # populate_entry_trend / produces enter_long signals.
+                if (el_count == 0 and es_count == 0):
+                    snippet = (generated_code or "").strip()
+                    if len(snippet) > 800:
+                        snippet = snippet[:800] + "\n... (truncated)"
+                    data_diagnostics[pair]["code_preview"] = snippet
             except Exception as e:
                 # User's code errored — fall back to name-match so the user
                 # still gets a result, but surface the error in the response.

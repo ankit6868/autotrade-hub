@@ -565,6 +565,16 @@ function FuturesBacktestInner() {
                               </code>
                             </div>
                           )}
+                          {d.code_preview && (
+                            <details className="mt-1.5 group">
+                              <summary className="cursor-pointer text-slate-400 hover:text-amber-300 text-[10px]">
+                                Show first 800 chars of strategy code ▾
+                              </summary>
+                              <pre className="mt-1 p-2 bg-black/30 border border-amber-500/20 rounded text-[10px] text-amber-100/90 whitespace-pre-wrap break-all font-mono overflow-auto max-h-72">
+                                {d.code_preview}
+                              </pre>
+                            </details>
+                          )}
                         </div>
                       )}
                       {d.user_code_error && (
