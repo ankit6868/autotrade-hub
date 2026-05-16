@@ -134,10 +134,16 @@ def _fetch_futures_klines(symbol: str, granularity_min: int,
         if not new:
             break
         rows.extend(new)
-        # Advance cursor past the last returned candle. KuCoin returns
-        # ascending order; if the page is short of 500 we're at the tail.
-        last_ts_ms = int(new[-1][0])
-        next_cur = last_ts_ms + granularity_secs * 1000
+        # Advance past the NEWEST candle in this page. KuCoin Futures
+        # /kline/query returns candles in DESCENDING order (newest
+        # first) — so `new[0]` is the newest and `new[-1]` is the
+        # oldest. An earlier version of this code did `last = new[-1]`
+        # which advanced the cursor to a timestamp in the PAST, so the
+        # next request kept fetching the same head of the range and we
+        # only ever got ~half the candles.
+        page_ts = [int(r[0]) for r in new]
+        newest_ms = max(page_ts)
+        next_cur = newest_ms + granularity_secs * 1000
         if next_cur <= cur:
             break   # safety: no forward progress
         cur = next_cur
