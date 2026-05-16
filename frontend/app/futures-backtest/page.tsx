@@ -66,6 +66,14 @@ function FuturesBacktestInner() {
   const [leverage,        setLeverage]        = useState(10);
   const [stoploss,        setStoploss]        = useState(1.5);   // SL ≤ TP for positive R:R
   const [takeProfit,      setTakeProfit]      = useState(3.0);   // TP should be ≥ SL (2:1 R:R)
+  // Track WHERE each parameter's current value came from so we can label
+  // the control with "from strategy" or "default" — transparent to the
+  // user about what was inherited vs what's a fallback we picked.
+  type Src = 'strategy' | 'default' | 'manual';
+  const [slSrc,  setSlSrc]  = useState<Src>('default');
+  const [tpSrc,  setTpSrc]  = useState<Src>('default');
+  const [levSrc, setLevSrc] = useState<Src>('default');
+  const [tfSrc,  setTfSrc]  = useState<Src>('default');
 
   // ── State ───────────────────────────────────────────────────────────────────
   const [running,  setRunning]  = useState(false);
@@ -77,12 +85,7 @@ function FuturesBacktestInner() {
     api.strategy.list().then(d => {
       setStrategies(d.strategies ?? []);
       if (d.strategies?.length > 0) {
-        const first = d.strategies[0];
-        setStrategyId(Number(first.id));
-        if (first.stoploss)         setStoploss(Math.abs(Number(first.stoploss) * 100));
-        if (first.take_profit)      setTakeProfit(Number(first.take_profit) * 100);
-        if (first.default_leverage) setLeverage(Number(first.default_leverage));
-        if (first.timeframe)        setTimeframe(first.timeframe);
+        setStrategyId(Number(d.strategies[0].id));
       }
     }).catch(() => {});
 
@@ -97,19 +100,74 @@ function FuturesBacktestInner() {
       .catch(() => {});
   }, []);
 
-  // Auto-fill from strategy — use strategy config, fall back to sensible futures defaults
+  // Auto-fill from the selected strategy. For each field we record whether
+  // the value was actually defined on the strategy ("strategy"), or whether
+  // we had to fall back to a sensible futures default ("default"). The
+  // source is rendered next to each control so the user can see at a glance
+  // what was inherited.
   useEffect(() => {
     if (!strategyId || strategies.length === 0) return;
     const s = strategies.find((x: any) => x.id === strategyId);
     if (!s) return;
-    const sl  = Math.abs(Number(s.stoploss ?? -0.03) * 100);
-    const tp  = Number(s.take_profit ?? 0.015) * 100;
-    const lev = Number(s.default_leverage ?? 10);
-    setStoploss(sl   > 0 ? sl  : 3);
-    setTakeProfit(tp > 0 ? tp  : 1.5);
-    setLeverage(lev  > 1 ? lev : 10);   // never show 1x by default for futures
-    if (s.timeframe) setTimeframe(s.timeframe);
+
+    // Stoploss: strategy stores as negative decimal (-0.03 = -3%).
+    // Treat null/undefined/0 as "not set on the strategy".
+    const rawSl = s.stoploss;
+    if (rawSl !== null && rawSl !== undefined && Number(rawSl) !== 0) {
+      setStoploss(Math.abs(Number(rawSl) * 100));
+      setSlSrc('strategy');
+    } else {
+      setStoploss(3);
+      setSlSrc('default');
+    }
+
+    // Take profit: strategy stores as positive decimal (0.015 = 1.5%).
+    const rawTp = s.take_profit;
+    if (rawTp !== null && rawTp !== undefined && Number(rawTp) > 0) {
+      setTakeProfit(Number(rawTp) * 100);
+      setTpSrc('strategy');
+    } else {
+      setTakeProfit(1.5);
+      setTpSrc('default');
+    }
+
+    // Leverage: strategy stores as integer. We treat 1× as "not set"
+    // because that's the SQLAlchemy default — a real futures strategy
+    // wouldn't deliberately ship at 1× leverage.
+    const rawLev = s.default_leverage;
+    if (rawLev !== null && rawLev !== undefined && Number(rawLev) > 1) {
+      setLeverage(Number(rawLev));
+      setLevSrc('strategy');
+    } else {
+      setLeverage(10);
+      setLevSrc('default');
+    }
+
+    // Timeframe.
+    if (s.timeframe && s.timeframe !== '15m') {
+      setTimeframe(s.timeframe);
+      setTfSrc('strategy');
+    } else if (s.timeframe === '15m') {
+      // Strategy explicitly chose 15m (could be the default too, but we
+      // treat the explicit field as authoritative if present).
+      setTimeframe('15m');
+      setTfSrc('strategy');
+    } else {
+      setTimeframe('15m');
+      setTfSrc('default');
+    }
   }, [strategyId, strategies]);
+
+  // Small reusable badge that shows where a field's current value came from.
+  function SourceBadge({ src }: { src: Src }) {
+    if (src === 'manual') {
+      return <span className="ml-2 text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-slate-700/60 text-slate-300">manual</span>;
+    }
+    if (src === 'strategy') {
+      return <span className="ml-2 text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30" title="Value inherited from the selected strategy">from strategy</span>;
+    }
+    return <span className="ml-2 text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/10 text-amber-300 border border-amber-500/30" title="Strategy didn't define this field — using sensible futures default">default</span>;
+  }
 
   function selectPreset(label: string, days: number) {
     setSelectedPreset(label);
@@ -316,8 +374,9 @@ function FuturesBacktestInner() {
           </div>
 
           <div>
-            <label className="label">Timeframe</label>
-            <select className="input" value={timeframe} onChange={e => setTimeframe(e.target.value)}>
+            <label className="label flex items-center">Timeframe <SourceBadge src={tfSrc} /></label>
+            <select className="input" value={timeframe}
+              onChange={e => { setTimeframe(e.target.value); setTfSrc('manual'); }}>
               {['1m','5m','15m','30m','1h','4h'].map(tf => (
                 <option key={tf} value={tf}>{tf}</option>
               ))}
@@ -333,25 +392,32 @@ function FuturesBacktestInner() {
               onChange={e => setStartBalance(Number(e.target.value))} />
           </div>
           <div>
-            <label className="label">Leverage: {leverage}x
+            <label className="label flex items-center flex-wrap">
+              <span>Leverage: {leverage}x</span>
+              <SourceBadge src={levSrc} />
               <span className="text-orange-400 ml-2 text-[10px]">Liq ~{(100/leverage).toFixed(1)}%</span>
             </label>
             <input type="range" min={1} max={50} value={leverage}
-              onChange={e => setLeverage(Number(e.target.value))}
+              onChange={e => { setLeverage(Number(e.target.value)); setLevSrc('manual'); }}
               className="w-full accent-blue-500 mt-2" />
           </div>
           <div>
-            <label className="label">Stop-Loss: {stoploss}%</label>
+            <label className="label flex items-center">
+              <span>Stop-Loss: {stoploss}%</span>
+              <SourceBadge src={slSrc} />
+            </label>
             <input type="range" min={0.5} max={10} step={0.5} value={stoploss}
-              onChange={e => setStoploss(Number(e.target.value))}
+              onChange={e => { setStoploss(Number(e.target.value)); setSlSrc('manual'); }}
               className="w-full accent-red-500 mt-2" />
           </div>
           <div>
-            <label className="label">Take-Profit: {takeProfit}%
+            <label className="label flex items-center flex-wrap">
+              <span>Take-Profit: {takeProfit}%</span>
+              <SourceBadge src={tpSrc} />
               <span className="text-emerald-400 ml-1 text-[10px]">→ {(takeProfit*leverage).toFixed(1)}% leveraged</span>
             </label>
             <input type="range" min={0.1} max={10} step={0.1} value={takeProfit}
-              onChange={e => setTakeProfit(Number(e.target.value))}
+              onChange={e => { setTakeProfit(Number(e.target.value)); setTpSrc('manual'); }}
               className="w-full accent-emerald-500 mt-2" />
           </div>
         </div>
