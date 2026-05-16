@@ -192,6 +192,11 @@ def _build_sandbox() -> dict[str, Any]:
     freqtrade.persistence.Trade = _Trade
 
     return {
+        # When Python defines a class, it reads __name__ from the current
+        # module's globals to set the class's __module__ attribute. Setting
+        # this lets us cleanly distinguish user-defined classes from
+        # imported ones when we hunt for the IStrategy subclass.
+        "__name__":    "user_strategy",
         # Standard libs the LLM uses
         "pd":          pd,
         "pandas":      pd,
@@ -301,13 +306,47 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
         raise RuntimeError(f"Strategy code failed to import: {e}")
 
     # Find the IStrategy subclass in the sandbox namespace.
+    # We walk the MRO and look for ANY ancestor named "IStrategy" rather
+    # than strict identity-equality against our stub. The LLM-generated
+    # code sometimes imports IStrategy from a slightly different path
+    # (freqtrade.strategy.interface, freqtrade.strategy.istrategy, etc.)
+    # which would create a different IStrategy object that fails an
+    # identity-based issubclass check — even though semantically it's
+    # the same Freqtrade interface.
     strategy_cls = None
+    user_classes: list[tuple[str, type]] = []
+    # Set of class identities we INJECTED into the sandbox (so we can skip
+    # them when iterating to find the user's class).
+    injected_ids = {id(IStrategy)}
     for name, val in sandbox.items():
-        if isinstance(val, type) and val is not IStrategy and issubclass(val, IStrategy):
+        if not isinstance(val, type):
+            continue
+        if id(val) in injected_ids:
+            continue
+        # Heuristic: skip anything that came in via the typing module or
+        # similar import side-effects. We only care about classes whose
+        # module is unknown (created in user code) or whose MRO mentions
+        # IStrategy.
+        mro_names = [c.__name__ for c in val.__mro__]
+        if "IStrategy" in mro_names:
             strategy_cls = val
             break
+        # Track non-IStrategy classes too — used as last-resort fallback.
+        if getattr(val, "__module__", None) in (None, "__main__", "user_strategy", "<user_strategy>"):
+            user_classes.append((name, val))
+
+    # Fallback: if no IStrategy subclass found but exactly one user class
+    # is defined, use it. Covers the case where the LLM forgot the explicit
+    # subclass or used a different base class name.
+    if strategy_cls is None and len(user_classes) == 1:
+        strategy_cls = user_classes[0][1]
+
     if strategy_cls is None:
-        raise RuntimeError("strategy code does not define a class subclassing IStrategy")
+        defined = [n for n, _ in user_classes] or ["<none>"]
+        raise RuntimeError(
+            f"strategy code does not define a class subclassing IStrategy. "
+            f"Classes found: {', '.join(defined)}"
+        )
 
     try:
         instance = strategy_cls()
