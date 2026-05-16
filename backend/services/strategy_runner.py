@@ -356,6 +356,13 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
     metadata = {"pair": "BTC/USDT"}
 
+    # Diagnostic: log the user-defined methods on their strategy so we can
+    # see in Railway logs what entry/exit hooks they actually have. This
+    # is invaluable when their class uses non-Freqtrade conventions.
+    user_methods = [m for m in dir(instance)
+                    if not m.startswith("_") and callable(getattr(instance, m, None))]
+    log.info("strategy=%s methods=%s", strategy_cls.__name__, user_methods)
+
     # Be defensive: not every LLM-emitted strategy inherits from OUR
     # IStrategy stub (the import may resolve to a different object than
     # we provide). In that case populate_* methods won't be inherited and
@@ -391,6 +398,10 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
     for col in ("enter_long", "enter_short", "exit_long", "exit_short"):
         if col not in work.columns:
             work[col] = 0
+    # Attach a non-data attribute we can inspect in the backtester to
+    # surface "which methods did the user define" diagnostics back to UI.
+    work.attrs["strategy_methods"] = user_methods
+    work.attrs["strategy_class"]   = strategy_cls.__name__
     return work
 
 

@@ -160,6 +160,11 @@ def run_futures_backtest(
                 es_count = int((df.get("enter_short", 0) == 1).sum()) if "enter_short" in df.columns else 0
                 data_diagnostics[pair]["entry_signals_long"]  = el_count
                 data_diagnostics[pair]["entry_signals_short"] = es_count
+                # Echo back what methods the user's class defines so the UI
+                # can show them when 0 signals fire (helps debug "why aren't
+                # my entries triggering?").
+                data_diagnostics[pair]["strategy_class"]   = df.attrs.get("strategy_class")
+                data_diagnostics[pair]["strategy_methods"] = df.attrs.get("strategy_methods", [])
             except Exception as e:
                 # User's code errored — fall back to name-match so the user
                 # still gets a result, but surface the error in the response.
