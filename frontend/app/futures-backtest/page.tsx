@@ -541,6 +541,32 @@ function FuturesBacktestInner() {
                           {' · '}<b className="text-red-400">{d.entry_signals_short ?? 0} short</b>
                         </div>
                       )}
+                      {/* When the strategy fired 0 signals, show which class
+                          + methods we found so the user can see whether
+                          their populate_entry_trend is actually defined and
+                          which entry/exit hooks the runner called. */}
+                      {isUserStrat && (d.entry_signals_long ?? 0) === 0 && (d.entry_signals_short ?? 0) === 0 && d.strategy_class && (
+                        <div className="text-[10px] text-amber-300 mt-1 leading-snug border-l-2 border-amber-500/40 pl-2 space-y-0.5">
+                          <div>Strategy fired no signals on this data.</div>
+                          <div className="text-slate-400">
+                            Class: <code className="text-amber-200">{d.strategy_class}</code>
+                          </div>
+                          {Array.isArray(d.strategy_methods) && d.strategy_methods.length > 0 && (
+                            <div className="text-slate-400">
+                              Methods found: <code className="text-amber-200/80 text-[9px] break-all">
+                                {d.strategy_methods.join(', ')}
+                              </code>
+                            </div>
+                          )}
+                          {Array.isArray(d.signal_columns) && d.signal_columns.length > 0 && (
+                            <div className="text-slate-400">
+                              Non-zero columns in dataframe: <code className="text-amber-200/80 text-[9px] break-all">
+                                {d.signal_columns.join(', ')}
+                              </code>
+                            </div>
+                          )}
+                        </div>
+                      )}
                       {d.user_code_error && (
                         <div className="text-[10px] text-red-400 mt-1 leading-snug border-l-2 border-red-500/40 pl-2">
                           User code error: <code>{d.user_code_error}</code>

@@ -165,6 +165,7 @@ def run_futures_backtest(
                 # my entries triggering?").
                 data_diagnostics[pair]["strategy_class"]   = df.attrs.get("strategy_class")
                 data_diagnostics[pair]["strategy_methods"] = df.attrs.get("strategy_methods", [])
+                data_diagnostics[pair]["signal_columns"]   = df.attrs.get("signal_columns", [])
             except Exception as e:
                 # User's code errored — fall back to name-match so the user
                 # still gets a result, but surface the error in the response.

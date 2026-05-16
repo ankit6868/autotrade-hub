@@ -394,14 +394,59 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
         if "sell" in work.columns and "exit_long" not in work.columns:
             work["exit_long"] = work["sell"]
 
-    # Default any missing signal columns to 0 so the engine doesn't KeyError.
+    # ── Fallback column-name detection ─────────────────────────────────
+    # If the strategy didn't fill enter_long/enter_short directly, look
+    # for common Freqtrade-historical column names and map them. Order:
+    # newer naming wins.
+    _COL_ALIASES = {
+        "enter_long":  ["enter_long",  "buy",  "long",  "signal_long",  "go_long",  "entry_long"],
+        "enter_short": ["enter_short", "sell_short", "short", "signal_short", "go_short", "entry_short"],
+        "exit_long":   ["exit_long",   "sell", "close_long",  "exit_long_signal"],
+        "exit_short":  ["exit_short",  "exit_short_signal", "close_short"],
+    }
+    for target, candidates in _COL_ALIASES.items():
+        if target in work.columns and (work[target].fillna(0).astype(int) != 0).any():
+            continue   # already populated by user code
+        for alt in candidates:
+            if alt == target:
+                continue
+            if alt in work.columns and (work[alt].fillna(0).astype(int) != 0).any():
+                # Bool/numeric-friendly copy. Keep both columns alive for
+                # downstream debugging, just mirror the values.
+                work[target] = work[alt].fillna(0).astype(int)
+                break
+
+    # Default any still-missing signal columns to 0 so the engine doesn't KeyError.
     for col in ("enter_long", "enter_short", "exit_long", "exit_short"):
         if col not in work.columns:
             work[col] = 0
+
+    # Diagnostics for the UI: which columns have any non-zero values?
+    # When entries fired = 0, the user can see if their strategy populated
+    # `buy_signal` instead of `enter_long` etc.
+    non_zero_cols = []
+    for col in work.columns:
+        if col in ("date", "open", "high", "low", "close", "vol"):
+            continue
+        try:
+            if work[col].dtype.kind in "biu" or work[col].dtype == bool:
+                if (work[col].fillna(0).astype(int) != 0).any():
+                    non_zero_cols.append(col)
+            elif work[col].dtype.kind == "f":
+                # Floats: include only if it looks like a binary signal
+                # (only 0s and 1s) — otherwise it's an indicator value.
+                vals = work[col].dropna().unique()
+                if len(vals) <= 3 and set(vals).issubset({0.0, 1.0, -1.0}):
+                    if (work[col].fillna(0).astype(int) != 0).any():
+                        non_zero_cols.append(col)
+        except Exception:
+            pass
+
     # Attach a non-data attribute we can inspect in the backtester to
     # surface "which methods did the user define" diagnostics back to UI.
     work.attrs["strategy_methods"] = user_methods
     work.attrs["strategy_class"]   = strategy_cls.__name__
+    work.attrs["signal_columns"]   = non_zero_cols
     return work
 
 
