@@ -387,7 +387,12 @@ function FuturesBacktestInner() {
         {/* ── Futures-specific config ─────────────────────────────────── */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
           <div>
-            <label className="label">Starting Balance (USDT)</label>
+            <label
+              className="label"
+              title="Virtual paper-money starting balance for the simulation. No real funds are used."
+            >
+              Starting Balance (virtual USDT)
+            </label>
             <input type="number" className="input" value={startBalance}
               onChange={e => setStartBalance(Number(e.target.value))} />
           </div>
@@ -479,6 +484,20 @@ function FuturesBacktestInner() {
             </span>
           </div>
 
+          {/* Simulation disclaimer — make it impossible to misread the
+              backtest as touching real funds. The "$1000" is virtual
+              starting capital; the "Funding: N · real KuCoin" further down
+              is a COUNT of historical funding-rate data records (not money). */}
+          <div className="mb-4 px-3 py-2 rounded-lg bg-emerald-500/5 border border-emerald-500/20 text-[11px] text-emerald-300/90 flex items-center gap-2">
+            <span className="text-base">🧪</span>
+            <span>
+              <b className="text-emerald-200">Simulation only.</b> Starting balance{' '}
+              <b className="text-emerald-200">${startBalance}</b> is virtual paper money.
+              No real funds, no KuCoin account access — this replays your strategy
+              against historical price + funding-rate data and computes a simulated P&amp;L.
+            </span>
+          </div>
+
           {/* Data quality + signal-source banner */}
           {result?.data_quality && Object.keys(result.data_quality).length > 0 && (
             <div className="card mb-4 border-[#243153] bg-[#0d1424]">
@@ -498,8 +517,12 @@ function FuturesBacktestInner() {
                         </span>
                       </div>
                       <div className="flex items-center justify-between gap-2 text-[10px]">
-                        <span className="text-slate-500">
-                          Funding: {d.funding_records} {d.funding_source === 'kucoin_history' ? '· ✓ real KuCoin' : '· fallback 0.03%'}
+                        <span
+                          className="text-slate-500"
+                          title="Number of historical funding-rate records fetched from KuCoin's public funding-rates API. The simulation applies the real historical rate every 8h to your virtual position — no real money involved."
+                        >
+                          Funding records: {d.funding_records}{' '}
+                          {d.funding_source === 'kucoin_history' ? '· historical data' : '· using 0.03% fallback'}
                         </span>
                         <span
                           className={
@@ -528,9 +551,10 @@ function FuturesBacktestInner() {
                 })}
               </div>
               <p className="text-[10px] text-slate-500 mt-2">
-                Backtest uses KuCoin <b>futures</b> klines (api-futures.kucoin.com /api/v1/kline/query)
-                and real historical funding rates (/api/v1/contract/funding-rates).
-                Custom strategies execute your authored IStrategy code; built-in names use the corresponding hardcoded signal function.
+                Backtest replays <b>historical</b> KuCoin futures klines (api-futures.kucoin.com /api/v1/kline/query)
+                and historical funding rates (/api/v1/contract/funding-rates) against a <b>simulated</b> portfolio.
+                Nothing here touches your live KuCoin account or real funds. Custom strategies execute
+                your authored IStrategy code; built-in names use the corresponding hardcoded signal function.
               </p>
             </div>
           )}
