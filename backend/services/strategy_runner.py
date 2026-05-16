@@ -228,6 +228,20 @@ def _safe_builtins(freqtrade_mod) -> dict[str, Any]:
         "min": _b.min, "max": _b.max, "callable": _b.callable, "vars": _b.vars,
         "property": _b.property, "super": _b.super, "staticmethod": _b.staticmethod,
         "classmethod": _b.classmethod, "id": _b.id, "repr": _b.repr,
+        # Class machinery — Python's `class Foo: ...` syntax compiles to a
+        # call to __build_class__. Without it, every IStrategy subclass
+        # definition fails with "__build_class__ not found".
+        "__build_class__": _b.__build_class__,
+        "__name__": "user_strategy",
+        # Additional commonly-used safe builtins by LLM-generated code.
+        "frozenset": _b.frozenset, "format": _b.format, "ord": _b.ord,
+        "chr": _b.chr, "divmod": _b.divmod, "pow": _b.pow, "hex": _b.hex,
+        "oct": _b.oct, "bin": _b.bin, "complex": _b.complex, "bytes": _b.bytes,
+        "bytearray": _b.bytearray, "reversed": _b.reversed,
+        "RuntimeError": _b.RuntimeError, "ZeroDivisionError": _b.ZeroDivisionError,
+        "IndexError": _b.IndexError, "StopIteration": _b.StopIteration,
+        "NotImplementedError": _b.NotImplementedError,
+        "NotImplemented": _b.NotImplemented,
     }
 
     original_import = _b.__import__
