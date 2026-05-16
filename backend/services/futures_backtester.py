@@ -73,6 +73,7 @@ def run_futures_backtest(
     stoploss_pct: float = 3.0,        # % e.g. 3 → -3%
     take_profit_pct: float = 1.5,     # % e.g. 1.5 → +1.5%
     risk_per_trade: float = 0.05,     # fraction of balance used as margin per trade
+    generated_code: str | None = None,  # user's IStrategy Python class (Freqtrade-style)
 ) -> dict:
     """
     Run a leveraged futures backtest matching TradingView's methodology:
@@ -97,7 +98,20 @@ def run_futures_backtest(
     except Exception:
         return {"error": f"Invalid timerange '{timerange}'. Use YYYYMMDD-YYYYMMDD."}
 
-    signal_fn = _guess_strategy(strategy_name)
+    # ── Pick the signal function for this run ──────────────────────────
+    # Priority:
+    #   1. If the user supplied generated_code (their authored IStrategy
+    #      class), exec it and read enter_long/enter_short signal columns.
+    #      This is what runs for ALL strategies the user creates via the
+    #      Strategy Editor — their actual code, not a name-match heuristic.
+    #   2. Otherwise (built-in template names like "SMCStrategyTV") fall
+    #      back to _guess_strategy which maps the name to one of the
+    #      hardcoded Python signal functions in native_backtester.
+    use_user_strategy = bool(generated_code and generated_code.strip())
+    user_strategy_error: str | None = None
+    signal_fn = None
+    if not use_user_strategy:
+        signal_fn = _guess_strategy(strategy_name)
     all_trades: list[dict] = []
     balance = starting_balance
     candles_per_8h = CANDLES_PER_8H.get(timeframe, 32)
@@ -124,8 +138,37 @@ def run_futures_backtest(
             "coverage_pct":      round(100.0 * len(df) / expected_bars, 1),
             "funding_records":   len(funding_sorted),
             "funding_source":    "kucoin_history" if funding_sorted else "fallback_0.03%",
+            "signal_source":     "user_strategy" if use_user_strategy else f"builtin:{strategy_name}",
         }
         df = add_indicators(df)
+
+        # ── User-strategy path: exec their generated_code and pre-populate
+        # enter_long / enter_short signal columns on the dataframe ─────
+        if use_user_strategy:
+            try:
+                from backend.services.strategy_runner import (
+                    evaluate_strategy, make_signal_fn_from_df,
+                )
+                df = evaluate_strategy(generated_code, df)
+                signal_fn = make_signal_fn_from_df(
+                    df, leverage, stoploss_pct, take_profit_pct,
+                )
+                # Surface the count of fired signals in diagnostics so the
+                # user can tell at a glance whether their strategy actually
+                # produces entries on this data.
+                el_count = int((df.get("enter_long", 0) == 1).sum()) if "enter_long" in df.columns else 0
+                es_count = int((df.get("enter_short", 0) == 1).sum()) if "enter_short" in df.columns else 0
+                data_diagnostics[pair]["entry_signals_long"]  = el_count
+                data_diagnostics[pair]["entry_signals_short"] = es_count
+            except Exception as e:
+                # User's code errored — fall back to name-match so the user
+                # still gets a result, but surface the error in the response.
+                user_strategy_error = str(e)
+                data_diagnostics[pair]["signal_source"]   = (
+                    f"builtin:{strategy_name} (user code failed)"
+                )
+                data_diagnostics[pair]["user_code_error"] = user_strategy_error
+                signal_fn = _guess_strategy(strategy_name)
 
         in_trade      = False
         pending_entry = None     # (direction, entry_px, sl, tp, liq, margin) from previous bar
@@ -354,6 +397,7 @@ def run_futures_backtest(
             "trades":  [],
             "equity_curve": [{"date": "", "balance": starting_balance}],
             "data_quality": data_diagnostics,
+            "user_strategy_error": user_strategy_error,
         }
 
     wins         = sum(1 for t in all_trades if t["profit_abs"] > 0)
@@ -398,10 +442,15 @@ def run_futures_backtest(
             "leverage":         leverage,
             "starting_balance": starting_balance,
         },
-        "trades":         all_trades,
-        "equity_curve":   equity_curve,
+        "trades":              all_trades,
+        "equity_curve":        equity_curve,
         # Per-pair data-coverage report so the user can spot incomplete
         # backtests at a glance (e.g. KuCoin returned only 60% of expected
         # candles or no funding history was found for the range).
-        "data_quality":   data_diagnostics,
+        "data_quality":        data_diagnostics,
+        # If the user's strategy code errored, surface it here. The
+        # backtest still completes with the name-match fallback so the
+        # user always sees a number, but with a clear warning of why
+        # their custom code wasn't used.
+        "user_strategy_error": user_strategy_error,
     }

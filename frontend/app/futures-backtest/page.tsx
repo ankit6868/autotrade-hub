@@ -479,25 +479,50 @@ function FuturesBacktestInner() {
             </span>
           </div>
 
-          {/* Data quality banner — shows coverage + funding-rate source per
-              pair so the user knows whether the backtest was run on full
-              KuCoin futures data or a partial range. */}
+          {/* Data quality + signal-source banner */}
           {result?.data_quality && Object.keys(result.data_quality).length > 0 && (
             <div className="card mb-4 border-[#243153] bg-[#0d1424]">
-              <p className="text-xs uppercase tracking-wider text-slate-500 mb-2">Data quality</p>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+              <p className="text-xs uppercase tracking-wider text-slate-500 mb-2">Data quality &amp; signal source</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {Object.entries(result.data_quality as Record<string, any>).map(([pair, d]) => {
                   const cov = Number(d.coverage_pct) || 0;
                   const covColor = cov >= 95 ? 'text-emerald-400' : cov >= 80 ? 'text-amber-400' : 'text-red-400';
+                  const isUserStrat = String(d.signal_source || '').startsWith('user_strategy');
+                  const isCodeFail  = String(d.signal_source || '').includes('user code failed');
                   return (
-                    <div key={pair} className="text-xs text-slate-300 flex items-center justify-between gap-2 bg-[#0a0f1d] border border-[#1a2236] rounded px-2 py-1.5">
-                      <span className="font-medium">{pair}</span>
-                      <span className={covColor}>
-                        {d.candles_loaded} / {d.candles_expected} candles ({cov.toFixed(1)}%)
-                      </span>
-                      <span className="text-slate-500" title={`Source: ${d.funding_source}`}>
-                        {d.funding_records} funding · {d.funding_source === 'kucoin_history' ? '✓ real' : 'fallback'}
-                      </span>
+                    <div key={pair} className="text-xs text-slate-300 bg-[#0a0f1d] border border-[#1a2236] rounded px-2.5 py-2 space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-semibold text-white">{pair}</span>
+                        <span className={covColor}>
+                          {d.candles_loaded} / {d.candles_expected} candles ({cov.toFixed(1)}%)
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between gap-2 text-[10px]">
+                        <span className="text-slate-500">
+                          Funding: {d.funding_records} {d.funding_source === 'kucoin_history' ? '· ✓ real KuCoin' : '· fallback 0.03%'}
+                        </span>
+                        <span
+                          className={
+                            isCodeFail ? 'text-red-400 font-medium'
+                            : isUserStrat ? 'text-emerald-300 font-medium'
+                            : 'text-amber-300'
+                          }
+                          title={isUserStrat ? 'Your strategy code was executed' : 'Built-in pattern was used'}
+                        >
+                          Signal: {isUserStrat ? '✓ your strategy code' : isCodeFail ? '⚠ user code failed → fallback' : d.signal_source}
+                        </span>
+                      </div>
+                      {(d.entry_signals_long !== undefined || d.entry_signals_short !== undefined) && (
+                        <div className="text-[10px] text-slate-500">
+                          Entries fired: <b className="text-emerald-400">{d.entry_signals_long ?? 0} long</b>
+                          {' · '}<b className="text-red-400">{d.entry_signals_short ?? 0} short</b>
+                        </div>
+                      )}
+                      {d.user_code_error && (
+                        <div className="text-[10px] text-red-400 mt-1 leading-snug border-l-2 border-red-500/40 pl-2">
+                          User code error: <code>{d.user_code_error}</code>
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -505,6 +530,7 @@ function FuturesBacktestInner() {
               <p className="text-[10px] text-slate-500 mt-2">
                 Backtest uses KuCoin <b>futures</b> klines (api-futures.kucoin.com /api/v1/kline/query)
                 and real historical funding rates (/api/v1/contract/funding-rates).
+                Custom strategies execute your authored IStrategy code; built-in names use the corresponding hardcoded signal function.
               </p>
             </div>
           )}

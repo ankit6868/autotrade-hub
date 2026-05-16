@@ -322,9 +322,12 @@ def run_futures_backtest(
     stoploss_pct     = float(req.get("stoploss_pct", 3.0))
     take_profit_pct  = float(req.get("take_profit_pct", 1.5))
 
-    # Resolve strategy
+    # Resolve strategy — pull generated_code so the backtester can actually
+    # run the user's authored logic instead of pattern-matching the name to
+    # one of the hardcoded built-in signal functions.
     strategy_name = req.get("strategy_name", "SimpleTargetStrategy")
     strategy = None
+    generated_code: str | None = None
     if strategy_id:
         strategy = db.execute(
             select(Strategy).where(
@@ -333,7 +336,8 @@ def run_futures_backtest(
             )
         ).scalar_one_or_none()
         if strategy:
-            strategy_name = strategy.name
+            strategy_name  = strategy.name
+            generated_code = strategy.generated_code
 
     result = _run(
         strategy_name    = strategy_name,
@@ -344,6 +348,7 @@ def run_futures_backtest(
         starting_balance = starting_balance,
         stoploss_pct     = stoploss_pct,
         take_profit_pct  = take_profit_pct,
+        generated_code   = generated_code,
     )
 
     if "error" in result:
