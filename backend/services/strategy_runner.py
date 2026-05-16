@@ -356,33 +356,36 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
     work = df.copy()
     metadata = {"pair": "BTC/USDT"}
 
-    try:
-        work = instance.populate_indicators(work, metadata)
-    except Exception as e:
-        raise RuntimeError(f"populate_indicators failed: {e}")
+    # Be defensive: not every LLM-emitted strategy inherits from OUR
+    # IStrategy stub (the import may resolve to a different object than
+    # we provide). In that case populate_* methods won't be inherited and
+    # we have to skip the ones the user didn't define on their class.
+    def _call_if_exists(method_name: str, what: str):
+        nonlocal work
+        method = getattr(instance, method_name, None)
+        if method is None or not callable(method):
+            return  # method not defined on this strategy — skip
+        try:
+            result = method(work, metadata)
+            if isinstance(result, pd.DataFrame):
+                work = result
+        except Exception as e:
+            raise RuntimeError(f"{method_name} failed: {e}")
 
-    # Newer Freqtrade uses populate_entry_trend/exit_trend; older uses
-    # populate_buy_trend/sell_trend. Run whichever the class defines.
-    try:
-        if "populate_entry_trend" in vars(strategy_cls):
-            work = instance.populate_entry_trend(work, metadata)
-        elif "populate_buy_trend" in vars(strategy_cls):
-            work = instance.populate_buy_trend(work, metadata)
-            # Old style sets `buy` column; mirror to `enter_long`.
-            if "buy" in work.columns and "enter_long" not in work.columns:
-                work["enter_long"] = work["buy"]
-    except Exception as e:
-        raise RuntimeError(f"populate_entry_trend failed: {e}")
-
-    try:
-        if "populate_exit_trend" in vars(strategy_cls):
-            work = instance.populate_exit_trend(work, metadata)
-        elif "populate_sell_trend" in vars(strategy_cls):
-            work = instance.populate_sell_trend(work, metadata)
-            if "sell" in work.columns and "exit_long" not in work.columns:
-                work["exit_long"] = work["sell"]
-    except Exception as e:
-        raise RuntimeError(f"populate_exit_trend failed: {e}")
+    _call_if_exists("populate_indicators", "indicators")
+    # Try the new-style entry/exit hooks first, fall back to old buy/sell.
+    if hasattr(instance, "populate_entry_trend"):
+        _call_if_exists("populate_entry_trend", "entry signals")
+    if hasattr(instance, "populate_buy_trend"):
+        _call_if_exists("populate_buy_trend", "buy signals (legacy)")
+        if "buy" in work.columns and "enter_long" not in work.columns:
+            work["enter_long"] = work["buy"]
+    if hasattr(instance, "populate_exit_trend"):
+        _call_if_exists("populate_exit_trend", "exit signals")
+    if hasattr(instance, "populate_sell_trend"):
+        _call_if_exists("populate_sell_trend", "sell signals (legacy)")
+        if "sell" in work.columns and "exit_long" not in work.columns:
+            work["exit_long"] = work["sell"]
 
     # Default any missing signal columns to 0 so the engine doesn't KeyError.
     for col in ("enter_long", "enter_short", "exit_long", "exit_short"):
