@@ -102,10 +102,17 @@ def _pair_to_futures_symbol(pair: str) -> str:
     return f"{base.upper()}{quote.upper()}M"
 
 
-def _fetch_futures_klines(symbol: str, granularity_secs: int,
+def _fetch_futures_klines(symbol: str, granularity_min: int,
                           from_ms: int, to_ms: int) -> list:
-    """Paginated fetch from /api/v1/kline/query — 500 candles per request."""
+    """Paginated fetch from /api/v1/kline/query.
+
+    IMPORTANT: KuCoin Futures `granularity` is in MINUTES (1, 5, 15, 30,
+    60, 120, 240, 480, 720, 1440, 10080), NOT seconds. Their docs page
+    mislabels it. Sending 900 (== 15 minutes in seconds) for 15m would
+    actually request 900-minute candles → 400 Bad Request.
+    """
     from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+    granularity_secs = granularity_min * 60
     chunk_ms = 500 * granularity_secs * 1000
     rows: list = []
     cur = from_ms
@@ -113,7 +120,7 @@ def _fetch_futures_klines(symbol: str, granularity_secs: int,
         end_chunk = min(cur + chunk_ms, to_ms)
         qs = urllib.parse.urlencode({
             "symbol":      symbol,
-            "granularity": granularity_secs,
+            "granularity": granularity_min,
             "from":        cur,
             "to":          end_chunk,
         })
@@ -145,11 +152,13 @@ def load_futures_ohlcv(pair: str, timeframe: str, start_ts: int, end_ts: int) ->
     Returns a DataFrame with columns [date, open, high, low, close, vol] —
     same shape as load_ohlcv() so the rest of the backtester is unchanged.
     """
-    TF_SECS = {
-        "1m": 60, "3m": 180, "5m": 300, "15m": 900,
-        "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400,
+    # KuCoin Futures granularity is in MINUTES (see _fetch_futures_klines docstring).
+    TF_MIN = {
+        "1m": 1, "3m": 3, "5m": 5, "15m": 15,
+        "30m": 30, "1h": 60, "2h": 120, "4h": 240,
+        "6h": 360, "8h": 480, "12h": 720, "1d": 1440, "1w": 10080,
     }
-    granularity = TF_SECS.get(timeframe, 900)
+    granularity = TF_MIN.get(timeframe, 15)
     symbol      = _pair_to_futures_symbol(pair)
     rows = _fetch_futures_klines(symbol, granularity,
                                  start_ts * 1000, end_ts * 1000)
