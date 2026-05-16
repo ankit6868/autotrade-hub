@@ -413,6 +413,36 @@ function FuturesBacktestInner() {
             </span>
           </div>
 
+          {/* Data quality banner — shows coverage + funding-rate source per
+              pair so the user knows whether the backtest was run on full
+              KuCoin futures data or a partial range. */}
+          {result?.data_quality && Object.keys(result.data_quality).length > 0 && (
+            <div className="card mb-4 border-[#243153] bg-[#0d1424]">
+              <p className="text-xs uppercase tracking-wider text-slate-500 mb-2">Data quality</p>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+                {Object.entries(result.data_quality as Record<string, any>).map(([pair, d]) => {
+                  const cov = Number(d.coverage_pct) || 0;
+                  const covColor = cov >= 95 ? 'text-emerald-400' : cov >= 80 ? 'text-amber-400' : 'text-red-400';
+                  return (
+                    <div key={pair} className="text-xs text-slate-300 flex items-center justify-between gap-2 bg-[#0a0f1d] border border-[#1a2236] rounded px-2 py-1.5">
+                      <span className="font-medium">{pair}</span>
+                      <span className={covColor}>
+                        {d.candles_loaded} / {d.candles_expected} candles ({cov.toFixed(1)}%)
+                      </span>
+                      <span className="text-slate-500" title={`Source: ${d.funding_source}`}>
+                        {d.funding_records} funding · {d.funding_source === 'kucoin_history' ? '✓ real' : 'fallback'}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-slate-500 mt-2">
+                Backtest uses KuCoin <b>futures</b> klines (api-futures.kucoin.com /api/v1/kline/query)
+                and real historical funding rates (/api/v1/contract/funding-rates).
+              </p>
+            </div>
+          )}
+
           {/* Metrics row 1 — same as spot */}
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-4">
             <MetricCard

@@ -16,16 +16,39 @@ from typing import Optional
 
 import pandas as pd
 
+import bisect
+
 from backend.services.native_backtester import (
-    load_ohlcv, add_indicators,
+    add_indicators, load_futures_ohlcv, load_funding_history,
     _signal_miss_candle_short, _signal_miss_candle_long,
     _signal_macd_crossover, _signal_rsi_bollinger, _signal_ema_scalping,
     _guess_strategy,
 )
 
-# Funding fee per 8-hour period (KuCoin standard)
-FUNDING_RATE = 0.0003   # 0.03%
+# Fallback funding fee per 8-hour period if KuCoin's history endpoint
+# returns no data for the range (e.g. very old contracts). The real
+# applied rate comes from /api/v1/contract/funding-rates per settlement.
+FUNDING_RATE_FALLBACK = 0.0003   # 0.03%
 CANDLES_PER_8H = {"1m": 480, "5m": 96, "15m": 32, "30m": 16, "1h": 8, "4h": 2}
+
+
+def _funding_rate_for_ts(funding_sorted: list[tuple[int, float]],
+                         bar_ts_secs: int) -> float:
+    """Binary-search the most recent funding rate at or before `bar_ts_secs`.
+
+    Funding history is sorted by timepoint; we want the rate that was last
+    settled before this bar — that's what would have actually been charged
+    on a position open at this moment.
+    """
+    if not funding_sorted:
+        return FUNDING_RATE_FALLBACK
+    # `bisect_right` finds first index where ts > bar_ts; we want the one
+    # right before that.
+    timestamps = [t for (t, _) in funding_sorted]
+    idx = bisect.bisect_right(timestamps, bar_ts_secs) - 1
+    if idx < 0:
+        return FUNDING_RATE_FALLBACK
+    return funding_sorted[idx][1]
 
 
 def _calc_liquidation(entry: float, direction: str, leverage: int) -> float:
@@ -78,13 +101,30 @@ def run_futures_backtest(
     all_trades: list[dict] = []
     balance = starting_balance
     candles_per_8h = CANDLES_PER_8H.get(timeframe, 32)
+    # Sanity-check tallies surfaced in the response so the user can see if
+    # the kline range was incomplete (KuCoin sometimes has gaps on older
+    # data) and the funding history loaded as expected.
+    data_diagnostics: dict[str, dict] = {}
 
     for pair in pairs:
-        # ── Load OHLCV ────────────────────────────────────────────────────
+        # ── Load FUTURES OHLCV (not spot — see comment in native_backtester) ─
         try:
-            df = load_ohlcv(pair, timeframe, start_ts, end_ts)
+            df = load_futures_ohlcv(pair, timeframe, start_ts, end_ts)
         except Exception as e:
-            return {"error": f"Data download failed for {pair}: {e}"}
+            return {"error": f"Futures data download failed for {pair}: {e}"}
+        # ── Load real funding rates from KuCoin (replaces hardcoded 0.03%) ─
+        funding_sorted = load_funding_history(pair, start_ts, end_ts)
+        # Per-pair coverage diagnostics
+        tf_secs_per_bar = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+                           "1h": 3600, "4h": 14400, "1d": 86400}.get(timeframe, 900)
+        expected_bars = max(1, (end_ts - start_ts) // tf_secs_per_bar)
+        data_diagnostics[pair] = {
+            "candles_loaded":    len(df),
+            "candles_expected":  int(expected_bars),
+            "coverage_pct":      round(100.0 * len(df) / expected_bars, 1),
+            "funding_records":   len(funding_sorted),
+            "funding_source":    "kucoin_history" if funding_sorted else "fallback_0.03%",
+        }
         df = add_indicators(df)
 
         in_trade      = False
@@ -156,11 +196,20 @@ def run_futures_backtest(
             if in_trade:
                 candles_held += 1
 
-                # Funding fee every 8h (on position value = margin × leverage)
+                # Funding fee every 8h (on position value = margin × leverage).
+                # Use the REAL historical funding rate KuCoin would have
+                # applied at this bar's timestamp — not a constant. Falls
+                # back to 0.03% only if KuCoin's history endpoint returned
+                # nothing for this range.
                 funding_cost = 0.0
                 if candles_held % candles_per_8h == 0:
-                    pos_value    = margin * leverage
-                    funding_cost = pos_value * FUNDING_RATE
+                    pos_value     = margin * leverage
+                    bar_ts_secs   = int(row["date"].timestamp())
+                    applied_rate  = _funding_rate_for_ts(funding_sorted, bar_ts_secs)
+                    # Funding charged on longs when rate>0, credited when rate<0
+                    # (and vice-versa for shorts). Backtest from holder side:
+                    signed_rate   = applied_rate if direction == "long" else -applied_rate
+                    funding_cost  = pos_value * signed_rate
 
                 # Check liquidation first (instant full loss)
                 liquidated = False
@@ -304,6 +353,7 @@ def run_futures_backtest(
             },
             "trades":  [],
             "equity_curve": [{"date": "", "balance": starting_balance}],
+            "data_quality": data_diagnostics,
         }
 
     wins         = sum(1 for t in all_trades if t["profit_abs"] > 0)
@@ -348,6 +398,10 @@ def run_futures_backtest(
             "leverage":         leverage,
             "starting_balance": starting_balance,
         },
-        "trades":       all_trades,
-        "equity_curve": equity_curve,
+        "trades":         all_trades,
+        "equity_curve":   equity_curve,
+        # Per-pair data-coverage report so the user can spot incomplete
+        # backtests at a glance (e.g. KuCoin returned only 60% of expected
+        # candles or no funding history was found for the range).
+        "data_quality":   data_diagnostics,
     }

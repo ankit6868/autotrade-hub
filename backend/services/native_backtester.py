@@ -70,6 +70,142 @@ def load_ohlcv(pair: str, timeframe: str, start_ts: int, end_ts: int) -> pd.Data
     return df[["date", "open", "high", "low", "close", "vol"]].sort_values("date").reset_index(drop=True)
 
 
+# ─── Futures kline + funding-rate loaders ─────────────────────────────────
+#
+# Why a separate code path:
+#   - SPOT endpoint  : https://api.kucoin.com         /api/v1/market/candles
+#     · granularity  : text ("15min")
+#     · time         : seconds
+#     · max          : 1500 candles per request
+#     · columns      : [ts, open, CLOSE, HIGH, LOW, vol, turn]   ← spot quirk
+#
+#   - FUTURES endpoint: https://api-futures.kucoin.com /api/v1/kline/query
+#     · granularity  : seconds (900)
+#     · time         : milliseconds
+#     · max          : 500 candles per request
+#     · columns      : [ts_ms, open, HIGH, LOW, CLOSE, vol, turn]  ← standard
+#
+# Mixing them by accident (copy-paste from spot) silently swaps high/close,
+# which makes every backtest result wrong without throwing an error. The
+# futures loader below is deliberately independent so that can't happen.
+
+FUTURES_BASE = "https://api-futures.kucoin.com"
+
+
+def _pair_to_futures_symbol(pair: str) -> str:
+    """BTC/USDT → XBTUSDTM ; ETH/USDT → ETHUSDTM (KuCoin Futures convention)."""
+    if "/" not in pair:
+        return pair
+    base, quote = pair.split("/", 1)
+    if base.upper() == "BTC":
+        base = "XBT"
+    return f"{base.upper()}{quote.upper()}M"
+
+
+def _fetch_futures_klines(symbol: str, granularity_secs: int,
+                          from_ms: int, to_ms: int) -> list:
+    """Paginated fetch from /api/v1/kline/query — 500 candles per request."""
+    from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+    chunk_ms = 500 * granularity_secs * 1000
+    rows: list = []
+    cur = from_ms
+    while cur < to_ms:
+        end_chunk = min(cur + chunk_ms, to_ms)
+        qs = urllib.parse.urlencode({
+            "symbol":      symbol,
+            "granularity": granularity_secs,
+            "from":        cur,
+            "to":          end_chunk,
+        })
+        url = f"{FUTURES_BASE}/api/v1/kline/query?{qs}"
+        req = urllib.request.Request(url, headers={"User-Agent": "AutoTradeHub/1.0"})
+        with _proxy_urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        if str(data.get("code")) != "200000":
+            raise RuntimeError(f"KuCoin Futures kline error: {data.get('msg','unknown')}")
+        new = data.get("data") or []
+        if not new:
+            break
+        rows.extend(new)
+        # Advance cursor past the last returned candle. KuCoin returns
+        # ascending order; if the page is short of 500 we're at the tail.
+        last_ts_ms = int(new[-1][0])
+        next_cur = last_ts_ms + granularity_secs * 1000
+        if next_cur <= cur:
+            break   # safety: no forward progress
+        cur = next_cur
+        if len(new) < 500:
+            break   # final page
+    return rows
+
+
+def load_futures_ohlcv(pair: str, timeframe: str, start_ts: int, end_ts: int) -> pd.DataFrame:
+    """Load FUTURES OHLCV for the perpetual contract of `pair`.
+
+    Returns a DataFrame with columns [date, open, high, low, close, vol] —
+    same shape as load_ohlcv() so the rest of the backtester is unchanged.
+    """
+    TF_SECS = {
+        "1m": 60, "3m": 180, "5m": 300, "15m": 900,
+        "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400,
+    }
+    granularity = TF_SECS.get(timeframe, 900)
+    symbol      = _pair_to_futures_symbol(pair)
+    rows = _fetch_futures_klines(symbol, granularity,
+                                 start_ts * 1000, end_ts * 1000)
+    if not rows:
+        raise RuntimeError(f"No futures OHLCV data for {pair} {timeframe}")
+    # FUTURES column order: [ts_ms, open, high, low, close, vol, turn]
+    # — NOT the same as the spot endpoint. Hardcoded here to prevent any
+    #   copy-paste reuse of the spot column order.
+    df = pd.DataFrame(rows, columns=["ts_ms", "open", "high", "low", "close", "vol", "turn"])
+    df["date"] = pd.to_datetime(df["ts_ms"].astype("int64"), unit="ms", utc=True)
+    for c in ["open", "high", "low", "close", "vol"]:
+        df[c] = df[c].astype(float)
+    return (df[["date", "open", "high", "low", "close", "vol"]]
+              .drop_duplicates(subset=["date"])
+              .sort_values("date")
+              .reset_index(drop=True))
+
+
+def load_funding_history(pair: str, start_ts: int, end_ts: int) -> list[tuple[int, float]]:
+    """Fetch real funding rates for the date range from
+    /api/v1/contract/funding-rates (public, no auth).
+
+    Returns a sorted list of (timepoint_seconds, rate) tuples — caller can
+    binary-search this in the backtest bar loop. Returns [] on any error
+    so the caller can fall back to a constant rate without aborting the
+    whole backtest.
+    """
+    from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+    symbol = _pair_to_futures_symbol(pair)
+    qs = urllib.parse.urlencode({
+        "symbol": symbol,
+        "from":   start_ts * 1000,
+        "to":     end_ts   * 1000,
+    })
+    url = f"{FUTURES_BASE}/api/v1/contract/funding-rates?{qs}"
+    req = urllib.request.Request(url, headers={"User-Agent": "AutoTradeHub/1.0"})
+    try:
+        with _proxy_urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception:
+        return []
+    if str(data.get("code")) != "200000":
+        return []
+    rates = data.get("data") or []
+    out: list[tuple[int, float]] = []
+    for r in rates:
+        try:
+            tp_s = int(int(r["timepoint"]) // 1000)
+            fr   = float(r["fundingRate"])
+            out.append((tp_s, fr))
+        except (KeyError, TypeError, ValueError):
+            continue
+    out.sort(key=lambda x: x[0])
+    return out
+
+
 # ─────────────────────────── indicators ───────────────────────────────────
 
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
