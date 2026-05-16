@@ -155,11 +155,18 @@ async def _upload_strategy_impl(
         model_used = result["model_used"]
         tokens_used = result.get("tokens_used", {})
         description = f"Parsed from uploaded document using {model_used}"
+        # Forward the new validation status from strategy_parser so the
+        # frontend can warn loudly if the LLM still emitted a stub.
+        ai_validation = {
+            "passed":  result.get("validation_passed", True),
+            "missing": result.get("validation_missing", []),
+        }
     else:
         code = strategy_text
         model_used = None
         tokens_used = {}
         description = "Imported directly (no AI parsing)"
+        ai_validation = {"passed": True, "missing": []}
 
     validation = validate_strategy_code(code)
 
@@ -211,6 +218,7 @@ async def _upload_strategy_impl(
         "model_used": model_used,
         "tokens_used": tokens_used,
         "validation": validation,
+        "ai_validation": ai_validation,
         "original_text": strategy_text[:500],
     }
 
