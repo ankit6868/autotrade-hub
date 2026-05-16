@@ -176,13 +176,25 @@ def run_futures_backtest(
                         snippet = snippet[:800] + "\n... (truncated)"
                     data_diagnostics[pair]["code_preview"] = snippet
             except Exception as e:
-                # User's code errored — fall back to name-match so the user
-                # still gets a result, but surface the error in the response.
+                # Two sub-cases:
+                #
+                #  a) User's code has populate_* hooks but raised at runtime.
+                #     → real error, show in red.
+                #
+                #  b) User's code is a plain Python class without populate_*
+                #     hooks (legacy strategies authored as Pine Script ports
+                #     for the name-matched signal-pattern path). The runner
+                #     deliberately raises RuntimeError with "has none of the
+                #     populate_* hooks" so we fall back gracefully here.
+                #     → expected behaviour, show in neutral colour.
                 user_strategy_error = str(e)
+                is_intended_fallback = "populate_* hooks" in user_strategy_error
+                tag = "name-match" if is_intended_fallback else "user code failed"
                 data_diagnostics[pair]["signal_source"]   = (
-                    f"builtin:{strategy_name} (user code failed)"
+                    f"builtin:{strategy_name} ({tag})"
                 )
                 data_diagnostics[pair]["user_code_error"] = user_strategy_error
+                data_diagnostics[pair]["fallback_intended"] = is_intended_fallback
                 signal_fn = _guess_strategy(strategy_name)
 
         in_trade      = False

@@ -508,6 +508,7 @@ function FuturesBacktestInner() {
                   const covColor = cov >= 95 ? 'text-emerald-400' : cov >= 80 ? 'text-amber-400' : 'text-red-400';
                   const isUserStrat = String(d.signal_source || '').startsWith('user_strategy');
                   const isCodeFail  = String(d.signal_source || '').includes('user code failed');
+                  const isNameMatch = Boolean(d.fallback_intended) || String(d.signal_source || '').includes('name-match');
                   return (
                     <div key={pair} className="text-xs text-slate-300 bg-[#0a0f1d] border border-[#1a2236] rounded px-2.5 py-2 space-y-1">
                       <div className="flex items-center justify-between gap-2">
@@ -528,11 +529,21 @@ function FuturesBacktestInner() {
                           className={
                             isCodeFail ? 'text-red-400 font-medium'
                             : isUserStrat ? 'text-emerald-300 font-medium'
+                            : isNameMatch ? 'text-sky-300 font-medium'
                             : 'text-amber-300'
                           }
-                          title={isUserStrat ? 'Your strategy code was executed' : 'Built-in pattern was used'}
+                          title={
+                            isUserStrat ? 'Your strategy code was executed'
+                            : isNameMatch ? "Your strategy is a Pine Script port that runs via the matching built-in signal function (this is expected, not an error)"
+                            : 'Built-in pattern was used'
+                          }
                         >
-                          Signal: {isUserStrat ? '✓ your strategy code' : isCodeFail ? '⚠ user code failed → fallback' : d.signal_source}
+                          Signal: {
+                            isUserStrat ? '✓ your strategy code'
+                            : isCodeFail ? '⚠ user code failed → fallback'
+                            : isNameMatch ? `↻ name-matched built-in (${strategies.find((s: any) => s.id === strategyId)?.name || 'strategy'})`
+                            : d.signal_source
+                          }
                         </span>
                       </div>
                       {(d.entry_signals_long !== undefined || d.entry_signals_short !== undefined) && (
@@ -577,9 +588,16 @@ function FuturesBacktestInner() {
                           )}
                         </div>
                       )}
-                      {d.user_code_error && (
+                      {d.user_code_error && !isNameMatch && (
                         <div className="text-[10px] text-red-400 mt-1 leading-snug border-l-2 border-red-500/40 pl-2">
                           User code error: <code>{d.user_code_error}</code>
+                        </div>
+                      )}
+                      {isNameMatch && (
+                        <div className="text-[10px] text-sky-300/80 mt-1 leading-snug border-l-2 border-sky-500/40 pl-2">
+                          ℹ This strategy is a Python-class port (e.g. Pine Script translation),
+                          so it runs via the matching built-in signal function instead of being
+                          exec'd as a Freqtrade IStrategy. This is the intended path — not an error.
                         </div>
                       )}
                     </div>
