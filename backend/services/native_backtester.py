@@ -106,23 +106,33 @@ def _fetch_futures_klines(symbol: str, granularity_min: int,
                           from_ms: int, to_ms: int) -> list:
     """Paginated fetch from /api/v1/kline/query.
 
-    IMPORTANT: KuCoin Futures `granularity` is in MINUTES (1, 5, 15, 30,
-    60, 120, 240, 480, 720, 1440, 10080), NOT seconds. Their docs page
-    mislabels it. Sending 900 (== 15 minutes in seconds) for 15m would
-    actually request 900-minute candles → 400 Bad Request.
+    Verified empirically against api-futures.kucoin.com:
+      - `granularity` is in MINUTES (1, 5, 15, 30, 60, 120, 240, 480,
+        720, 1440, 10080) — NOT seconds, despite what the doc says.
+        Sending seconds → HTTP 400.
+      - Response is capped at 200 candles per request — NOT 500 like
+        the doc claims. Anything bigger silently truncates.
+      - Response order is ASCENDING (oldest first), so to paginate
+        forward we advance the cursor to (max_ts_in_page + interval).
+      - The endpoint walks FORWARD from `from`, returning up to 200
+        candles. The `to` query is just a stop-bound; if from..to spans
+        more than 200 candles, you only get the first 200.
     """
     from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
     granularity_secs = granularity_min * 60
-    chunk_ms = 500 * granularity_secs * 1000
     rows: list = []
     cur = from_ms
-    while cur < to_ms:
-        end_chunk = min(cur + chunk_ms, to_ms)
+    # Safety bound: even if KuCoin keeps returning data, stop after
+    # enough pages to cover the requested span (with slack for gaps).
+    max_pages = max(1, ((to_ms - from_ms) // (200 * granularity_secs * 1000)) + 5)
+    pages = 0
+    while cur < to_ms and pages < max_pages:
+        pages += 1
         qs = urllib.parse.urlencode({
             "symbol":      symbol,
             "granularity": granularity_min,
             "from":        cur,
-            "to":          end_chunk,
+            "to":          to_ms,
         })
         url = f"{FUTURES_BASE}/api/v1/kline/query?{qs}"
         req = urllib.request.Request(url, headers={"User-Agent": "AutoTradeHub/1.0"})
@@ -134,21 +144,13 @@ def _fetch_futures_klines(symbol: str, granularity_min: int,
         if not new:
             break
         rows.extend(new)
-        # Advance past the NEWEST candle in this page. KuCoin Futures
-        # /kline/query returns candles in DESCENDING order (newest
-        # first) — so `new[0]` is the newest and `new[-1]` is the
-        # oldest. An earlier version of this code did `last = new[-1]`
-        # which advanced the cursor to a timestamp in the PAST, so the
-        # next request kept fetching the same head of the range and we
-        # only ever got ~half the candles.
+        # Advance past the newest timestamp in the page.
         page_ts = [int(r[0]) for r in new]
         newest_ms = max(page_ts)
         next_cur = newest_ms + granularity_secs * 1000
         if next_cur <= cur:
             break   # safety: no forward progress
         cur = next_cur
-        if len(new) < 500:
-            break   # final page
     return rows
 
 
