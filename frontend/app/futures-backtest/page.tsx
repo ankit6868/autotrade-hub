@@ -635,6 +635,55 @@ function FuturesBacktestInner() {
             </div>
           )}
 
+          {/* Production-grade cost-transparency card.
+              Funding + slippage are deducted from balance (real-cost
+              modelling); the KuCoin fee line is informational — it shows
+              what the exchange would have charged if these trades were
+              live. The app itself doesn't charge anything. */}
+          {(m.total_funding_paid !== undefined ||
+            m.total_slippage_paid !== undefined ||
+            m.total_hyp_kucoin_fees !== undefined) && (
+            <div className="card mb-4 border-[#243153] bg-[#0d1424]">
+              <p className="text-xs uppercase tracking-wider text-slate-500 mb-2">
+                Real-trading costs (transparency)
+              </p>
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+                <div className="bg-[#0a0f1d] border border-[#1a2236] rounded px-3 py-2">
+                  <div className="text-slate-500 text-[10px] uppercase tracking-wider">Funding paid</div>
+                  <div className="text-amber-300 font-semibold mt-0.5">
+                    ${(m.total_funding_paid ?? 0).toFixed(2)}
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">
+                    Charged at real KuCoin settlement times (00/08/16 UTC) using historical rates.
+                    Deducted from simulated P&amp;L.
+                  </div>
+                </div>
+                <div className="bg-[#0a0f1d] border border-[#1a2236] rounded px-3 py-2">
+                  <div className="text-slate-500 text-[10px] uppercase tracking-wider">Slippage paid</div>
+                  <div className="text-amber-300 font-semibold mt-0.5">
+                    ${(m.total_slippage_paid ?? 0).toFixed(2)}
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">
+                    Adverse fill on stops (5bps), TPs (2bps), liquidations (15bps), market exits (5bps).
+                    Deducted from simulated P&amp;L.
+                  </div>
+                </div>
+                <div className="bg-[#0a0f1d] border border-sky-500/20 rounded px-3 py-2">
+                  <div className="text-sky-400/80 text-[10px] uppercase tracking-wider">KuCoin would charge (info)</div>
+                  <div className="text-sky-300 font-semibold mt-0.5">
+                    ${(m.total_hyp_kucoin_fees ?? 0).toFixed(2)}
+                  </div>
+                  <div className="text-[10px] text-slate-500 mt-0.5">
+                    Hypothetical fees at KuCoin's rates ({(m.kucoin_taker_fee_pct ?? 0.06).toFixed(2)}% taker /
+                    {' '}{(m.kucoin_maker_fee_pct ?? 0.02).toFixed(2)}% maker).
+                    <b className="text-sky-300/90"> Not deducted</b> from your simulated balance — this app
+                    is not a broker.
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Metrics row 1 — same as spot */}
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-4">
             <MetricCard
