@@ -358,6 +358,8 @@ export const api = {
     backtest: {
       run: (data: Record<string, unknown>) =>
         request<any>('/api/futures/backtest/run', { method: 'POST', body: JSON.stringify(data) }),
+      autoTune: (data: Record<string, unknown>) =>
+        request<any>('/api/futures/backtest/auto-tune', { method: 'POST', body: JSON.stringify(data) }),
       history: (limit = 20) =>
         request<any>(`/api/futures/backtest/history?limit=${limit}`),
     },

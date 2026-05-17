@@ -78,6 +78,8 @@ function FuturesBacktestInner() {
   // ── State ───────────────────────────────────────────────────────────────────
   const [running,  setRunning]  = useState(false);
   const [result,   setResult]   = useState<any>(null);
+  const [tuning,   setTuning]   = useState(false);
+  const [tuneResult, setTuneResult] = useState<any>(null);
   const [history,  setHistory]  = useState<any[]>([]);
   const [error,    setError]    = useState('');
 
@@ -206,6 +208,25 @@ function FuturesBacktestInner() {
       }
     } catch (e) { setError(String(e)); }
     setRunning(false);
+  }
+
+  async function autoTune() {
+    if (!strategyId) return;
+    setTuning(true); setTuneResult(null); setError('');
+    const activeRange = selectedPreset === 'Custom' ? customRange : timerange;
+    try {
+      const data = await api.futures.backtest.autoTune({
+        strategy_id:      strategyId,
+        pairs,
+        timeframe,
+        timerange:        activeRange,
+        leverage,
+        starting_balance: startBalance,
+      });
+      if (data.error) setError(data.error);
+      else setTuneResult(data);
+    } catch (e) { setError(String(e)); }
+    setTuning(false);
   }
 
   const activeRange   = selectedPreset === 'Custom' ? customRange : timerange;
@@ -427,14 +448,20 @@ function FuturesBacktestInner() {
           </div>
         </div>
 
-        {/* Run button */}
-        <div className="flex items-center gap-4 flex-wrap">
+        {/* Run + Auto-tune buttons */}
+        <div className="flex items-center gap-3 flex-wrap">
           <button onClick={runBacktest}
-            disabled={running || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
+            disabled={running || tuning || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
             className="btn-primary px-8 py-3 text-base">
             {running
               ? `Running ${currentPreset && currentPreset.days > 365 ? '(downloading data…)' : ''}…`
               : `▶ Run ${selectedPreset} Futures Backtest`}
+          </button>
+          <button onClick={autoTune}
+            disabled={running || tuning || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
+            className="px-5 py-3 rounded-xl text-sm font-semibold border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Run a small grid of SL/TP combos (20 backtests) and show which combination gives the best result. Takes 1–3 minutes (data is cached so all runs share one download).">
+            {tuning ? '🔬 Auto-tuning (20 runs)…' : '🔬 Auto-tune SL/TP'}
           </button>
         </div>
 
@@ -465,6 +492,117 @@ function FuturesBacktestInner() {
       {error && (
         <div className="card mb-8 border-red-500/30 bg-red-500/10">
           <p className="text-red-400">{error}</p>
+        </div>
+      )}
+
+      {/* Auto-tune in-progress notice */}
+      {tuning && (
+        <div className="card mb-8 border-amber-500/30 bg-amber-500/5">
+          <div className="flex items-center gap-3">
+            <span className="text-amber-300 animate-pulse">🔬</span>
+            <div>
+              <div className="text-amber-200 font-medium">Auto-tuning SL/TP grid…</div>
+              <div className="text-xs text-slate-400 mt-0.5">
+                Running 20 backtests (4 SL values × 5 TP values). Data is cached after the first run, so the remaining 19 are fast.
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Auto-tune results */}
+      {tuneResult && tuneResult.grid && (
+        <div className="card mb-8 border-amber-500/30">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <h2 className="text-lg font-semibold">
+              🔬 Auto-tune results — {tuneResult.strategy}
+            </h2>
+            <span className="text-xs text-slate-500">{tuneResult.runs} combos tested</span>
+          </div>
+
+          {/* Verdict + best combo */}
+          <div className={`rounded-lg p-3 mb-4 border ${
+            tuneResult.verdict === 'found_positive_ev'
+              ? 'border-emerald-500/40 bg-emerald-500/5 text-emerald-200'
+              : 'border-red-500/40 bg-red-500/5 text-red-200'
+          }`}>
+            {tuneResult.verdict === 'found_positive_ev' ? (
+              <>
+                <div className="font-medium text-sm">
+                  ✓ Best combo found: SL <b>{tuneResult.best.sl_pct}%</b> · TP <b>{tuneResult.best.tp_pct}%</b> (1:{tuneResult.best.rr_ratio})
+                </div>
+                <div className="text-xs mt-1 text-slate-300">
+                  Profit <b className={tuneResult.best.total_profit_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                    {tuneResult.best.total_profit_pct >= 0 ? '+' : ''}{tuneResult.best.total_profit_pct.toFixed(2)}%
+                  </b>{' · '}
+                  Win rate <b>{(tuneResult.best.win_rate * 100).toFixed(1)}%</b> vs breakeven {(tuneResult.best.breakeven_wr * 100).toFixed(1)}%{' · '}
+                  EV <b>{tuneResult.best.expected_value >= 0 ? '+' : ''}{tuneResult.best.expected_value.toFixed(2)}%</b>/trade{' · '}
+                  {tuneResult.best.total_trades} trades
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="font-medium text-sm">
+                  ⚠️ No positive-EV combination in the tested grid
+                </div>
+                <div className="text-xs mt-1 text-slate-300 leading-snug">
+                  Every SL/TP combination produced negative expected value. This is strong evidence the strategy's <b>signal logic</b> has no edge on this market — not just a tuning problem. Best-of-bad: SL {tuneResult.best.sl_pct}% · TP {tuneResult.best.tp_pct}% (still loses {tuneResult.best.total_profit_pct.toFixed(2)}%). Consider: changing timeframe, adding a trend filter, or trying a different strategy.
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Grid heatmap */}
+          <div className="overflow-x-auto">
+            <table className="text-xs">
+              <thead>
+                <tr>
+                  <th className="px-2 py-1 text-slate-500 text-right">SL ↓ / TP →</th>
+                  {tuneResult.tp_grid.map((tp: number) => (
+                    <th key={tp} className="px-3 py-1 text-slate-400 font-medium">TP {tp}%</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {tuneResult.sl_grid.map((sl: number) => (
+                  <tr key={sl} className="border-t border-[#2a3a52]/50">
+                    <th className="px-2 py-1 text-slate-400 text-right font-medium">SL {sl}%</th>
+                    {tuneResult.tp_grid.map((tp: number) => {
+                      const cell = tuneResult.grid.find(
+                        (g: any) => g.sl_pct === sl && g.tp_pct === tp
+                      );
+                      if (!cell) return <td key={tp} className="px-3 py-1 text-slate-600">—</td>;
+                      const isBest = cell.sl_pct === tuneResult.best.sl_pct
+                                  && cell.tp_pct === tuneResult.best.tp_pct;
+                      const profit = cell.total_profit_pct;
+                      const cellColor = isBest
+                        ? 'bg-amber-500/30 border-amber-400 ring-1 ring-amber-300'
+                        : profit > 5  ? 'bg-emerald-500/25'
+                        : profit > 0  ? 'bg-emerald-500/10'
+                        : profit > -5 ? 'bg-red-500/10'
+                                       : 'bg-red-500/25';
+                      return (
+                        <td key={tp} className={`px-3 py-1.5 text-center ${cellColor} border border-[#2a3a52]/30`}>
+                          <div className={`font-mono font-semibold ${
+                            profit >= 0 ? 'text-emerald-300' : 'text-red-300'
+                          }`}>
+                            {profit >= 0 ? '+' : ''}{profit.toFixed(1)}%
+                          </div>
+                          <div className="text-[9px] text-slate-500 mt-0.5">
+                            WR {(cell.win_rate * 100).toFixed(0)}% · {cell.total_trades}t
+                          </div>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[10px] text-slate-500 mt-2">
+            Each cell = a full backtest at that SL/TP combo. Top number is total profit %, bottom is win rate · trade count.
+            Brighter green = better; brighter red = worse. The amber-bordered cell is the recommended combo.
+          </p>
         </div>
       )}
 

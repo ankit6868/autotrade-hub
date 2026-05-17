@@ -735,3 +735,98 @@ def run_futures_backtest(
         # their custom code wasn't used.
         "user_strategy_error": user_strategy_error,
     }
+
+
+# ── Auto-tune SL/TP grid ──────────────────────────────────────────────────
+#
+# Runs the SAME backtest with a small grid of SL/TP combinations and reports
+# which combo gave the best result. Helps the user find the configuration
+# that fits the strategy's actual signal quality on the chosen market —
+# tight stops get whipsawed by noise, wide TPs are never reached, etc.
+#
+# The grid is small (3 × 4 = 12 runs) because each run is a real backtest
+# (~5-30s); larger grids would time out the request. Data is cached at the
+# load_futures_ohlcv / load_funding_history layer so all 12 runs share ONE
+# KuCoin download.
+
+AUTO_TUNE_SL_GRID = [1.5, 2.5, 3.5, 5.0]       # SL percentages to try
+AUTO_TUNE_TP_GRID = [1.5, 3.0, 5.0, 7.5, 10.0] # TP percentages to try
+
+
+def auto_tune_sltp(
+    strategy_name:    str,
+    pairs:            list[str],
+    timeframe:        str,
+    timerange:        str,
+    leverage:         int = 10,
+    starting_balance: float = 1000.0,
+    risk_per_trade:   float = 0.05,
+    generated_code:   str | None = None,
+    sl_grid:          list[float] | None = None,
+    tp_grid:          list[float] | None = None,
+) -> dict:
+    """Run the SL/TP grid and return a ranked list of results.
+
+    Each result row carries the metrics that matter for picking a config:
+    total_profit_pct, win_rate, breakeven_wr, is_negative_ev, total_trades.
+    The 'best' row is the one with the highest total_profit_pct that ALSO
+    has positive expected value (positive EV without profit is useless;
+    profit without positive EV is luck).
+    """
+    sl_grid = sl_grid or AUTO_TUNE_SL_GRID
+    tp_grid = tp_grid or AUTO_TUNE_TP_GRID
+
+    grid: list[dict] = []
+    for sl in sl_grid:
+        for tp in tp_grid:
+            res = run_futures_backtest(
+                strategy_name    = strategy_name,
+                pairs            = pairs,
+                timeframe        = timeframe,
+                timerange        = timerange,
+                leverage         = leverage,
+                starting_balance = starting_balance,
+                stoploss_pct     = sl,
+                take_profit_pct  = tp,
+                risk_per_trade   = risk_per_trade,
+                generated_code   = generated_code,
+            )
+            m = res.get("metrics", {})
+            grid.append({
+                "sl_pct":            sl,
+                "tp_pct":            tp,
+                "rr_ratio":          m.get("risk_reward_ratio", 0),
+                "total_trades":      m.get("total_trades", 0),
+                "win_rate":          m.get("win_rate", 0),
+                "breakeven_wr":      m.get("breakeven_win_rate", 0),
+                "expected_value":    m.get("expected_value_pct", 0),
+                "is_negative_ev":    m.get("is_negative_ev", True),
+                "total_profit_pct":  m.get("total_profit_pct", 0),
+                "max_drawdown":      m.get("max_drawdown", 0),
+                "liquidations":      m.get("liquidations", 0),
+            })
+
+    # Best = highest profit among positive-EV rows; if no row has positive
+    # EV, the best one is the LEAST bad (highest profit overall) with a
+    # clear "no positive-EV combination found" warning attached.
+    positive_ev = [r for r in grid if not r["is_negative_ev"]]
+    if positive_ev:
+        best = max(positive_ev, key=lambda r: r["total_profit_pct"])
+        verdict = "found_positive_ev"
+    else:
+        best = max(grid, key=lambda r: r["total_profit_pct"])
+        verdict = "no_positive_ev_in_grid"
+
+    return {
+        "verdict":      verdict,
+        "best":         best,
+        "grid":         grid,
+        "sl_grid":      sl_grid,
+        "tp_grid":      tp_grid,
+        "strategy":     strategy_name,
+        "pair":         pairs[0] if pairs else "",
+        "timeframe":    timeframe,
+        "timerange":    timerange,
+        "leverage":     leverage,
+        "runs":         len(grid),
+    }

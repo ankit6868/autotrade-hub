@@ -154,12 +154,28 @@ def _fetch_futures_klines(symbol: str, granularity_min: int,
     return rows
 
 
+# Process-local TTL caches so auto-tune (which runs the same backtest with
+# N different SL/TP combos) doesn't re-download identical candles + funding
+# data N times. 10 minutes is long enough for a 12-combo grid to complete
+# but short enough that fresh runs pick up new market data.
+import time as _time_mod_for_cache
+_OHLCV_CACHE: dict[tuple, tuple[float, "pd.DataFrame"]]   = {}
+_FUNDING_CACHE: dict[tuple, tuple[float, list]] = {}
+_CACHE_TTL_SECS = 600  # 10 minutes
+
+
 def load_futures_ohlcv(pair: str, timeframe: str, start_ts: int, end_ts: int) -> pd.DataFrame:
     """Load FUTURES OHLCV for the perpetual contract of `pair`.
 
     Returns a DataFrame with columns [date, open, high, low, close, vol] —
     same shape as load_ohlcv() so the rest of the backtester is unchanged.
+    Result is cached in-process for 10 minutes keyed on the request args.
     """
+    key = (pair, timeframe, start_ts, end_ts)
+    now = _time_mod_for_cache.time()
+    hit = _OHLCV_CACHE.get(key)
+    if hit and now - hit[0] < _CACHE_TTL_SECS:
+        return hit[1].copy()   # copy so callers can mutate without affecting cache
     # KuCoin Futures granularity is in MINUTES (see _fetch_futures_klines docstring).
     TF_MIN = {
         "1m": 1, "3m": 3, "5m": 5, "15m": 15,
@@ -179,10 +195,12 @@ def load_futures_ohlcv(pair: str, timeframe: str, start_ts: int, end_ts: int) ->
     df["date"] = pd.to_datetime(df["ts_ms"].astype("int64"), unit="ms", utc=True)
     for c in ["open", "high", "low", "close", "vol"]:
         df[c] = df[c].astype(float)
-    return (df[["date", "open", "high", "low", "close", "vol"]]
-              .drop_duplicates(subset=["date"])
-              .sort_values("date")
-              .reset_index(drop=True))
+    result = (df[["date", "open", "high", "low", "close", "vol"]]
+                .drop_duplicates(subset=["date"])
+                .sort_values("date")
+                .reset_index(drop=True))
+    _OHLCV_CACHE[key] = (now, result)
+    return result.copy()
 
 
 def load_funding_history(pair: str, start_ts: int, end_ts: int) -> list[tuple[int, float]]:
@@ -192,8 +210,13 @@ def load_funding_history(pair: str, start_ts: int, end_ts: int) -> list[tuple[in
     Returns a sorted list of (timepoint_seconds, rate) tuples — caller can
     binary-search this in the backtest bar loop. Returns [] on any error
     so the caller can fall back to a constant rate without aborting the
-    whole backtest.
+    whole backtest. Cached in-process for 10 min keyed on request args.
     """
+    key = (pair, start_ts, end_ts)
+    now = _time_mod_for_cache.time()
+    hit = _FUNDING_CACHE.get(key)
+    if hit and now - hit[0] < _CACHE_TTL_SECS:
+        return list(hit[1])
     from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
     symbol = _pair_to_futures_symbol(pair)
     qs = urllib.parse.urlencode({
@@ -220,7 +243,8 @@ def load_funding_history(pair: str, start_ts: int, end_ts: int) -> list[tuple[in
         except (KeyError, TypeError, ValueError):
             continue
     out.sort(key=lambda x: x[0])
-    return out
+    _FUNDING_CACHE[key] = (now, out)
+    return list(out)
 
 
 # ─────────────────────────── indicators ───────────────────────────────────
