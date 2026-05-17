@@ -357,8 +357,22 @@ def run_futures_backtest(
                             exit_p = tp; exit_rsn = "take_profit"; exited = True
 
                     if not exited:
-                        balance -= funding_cost
-                        continue
+                        # Did the strategy emit a NEW entry signal this bar?
+                        # If so we close the current trade at this bar's close
+                        # (TradingView-style "new signal flips position") so
+                        # every signal edge actually results in a trade.
+                        # Without this, signals that fire during an open
+                        # position get silently dropped by the `continue`
+                        # below — which is exactly what was causing
+                        # "26 long edges → only 3 long trades".
+                        peek = signal_fn(df, i) if use_user_strategy else None
+                        if peek is not None:
+                            exit_p   = float(row["close"])
+                            exit_rsn = "new_signal"
+                            exited   = True
+                        else:
+                            balance -= funding_cost
+                            continue
 
                     # Compute leveraged P&L
                     if direction == "long":
