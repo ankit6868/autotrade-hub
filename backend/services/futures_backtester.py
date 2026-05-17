@@ -211,25 +211,42 @@ def run_futures_backtest(
     # data) and the funding history loaded as expected.
     data_diagnostics: dict[str, dict] = {}
 
+    # Resolve buffer: extra candles fetched AFTER `end_ts` so positions
+    # opened near the end of the backtest can still hit their SL/TP/
+    # liquidation rather than being excluded as "still open". Capped at
+    # 30 days so we don't blow up downloads on small backtests.
+    RESOLVE_BUFFER_SECS = 30 * 24 * 3600
+
     for pair in pairs:
-        # ── Load FUTURES OHLCV (not spot — see comment in native_backtester) ─
-        try:
-            df = load_futures_ohlcv(pair, timeframe, start_ts, end_ts)
-        except Exception as e:
-            return {"error": f"Futures data download failed for {pair}: {e}"}
-        # ── Load real funding rates from KuCoin (replaces hardcoded 0.03%) ─
-        funding_sorted = load_funding_history(pair, start_ts, end_ts)
-        # Per-pair coverage diagnostics
         tf_secs_per_bar = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
                            "1h": 3600, "4h": 14400, "1d": 86400}.get(timeframe, 900)
+        # ── Load FUTURES OHLCV (not spot — see comment in native_backtester) ─
+        # Extended range = user's window + resolve buffer.
+        fetch_end_ts = end_ts + RESOLVE_BUFFER_SECS
+        try:
+            df = load_futures_ohlcv(pair, timeframe, start_ts, fetch_end_ts)
+        except Exception as e:
+            return {"error": f"Futures data download failed for {pair}: {e}"}
+        # ── Load real funding rates over the same extended range ─────────
+        funding_sorted = load_funding_history(pair, start_ts, fetch_end_ts)
+        # Per-pair coverage diagnostics — measured against the USER'S
+        # requested window, not the extended fetch. Buffer bars are an
+        # implementation detail; the user only cares whether their
+        # requested period is well-covered.
+        in_window_mask = df["date"].astype("int64") // 10**9 <= end_ts
+        in_window_count = int(in_window_mask.sum())
         expected_bars = max(1, (end_ts - start_ts) // tf_secs_per_bar)
+        # Index of the last bar inside the user's window — beyond this
+        # the main loop only manages open positions, no new entries.
+        last_in_window_idx = in_window_count - 1
         data_diagnostics[pair] = {
-            "candles_loaded":    len(df),
+            "candles_loaded":    in_window_count,
             "candles_expected":  int(expected_bars),
-            "coverage_pct":      round(100.0 * len(df) / expected_bars, 1),
+            "coverage_pct":      round(100.0 * in_window_count / expected_bars, 1),
             "funding_records":   len(funding_sorted),
             "funding_source":    "kucoin_history" if funding_sorted else "fallback_0.03%",
             "signal_source":     "user_strategy" if use_user_strategy else f"builtin:{strategy_name}",
+            "resolve_buffer_bars": int(len(df) - in_window_count),
         }
         df = add_indicators(df)
 
@@ -329,6 +346,11 @@ def run_futures_backtest(
 
         n = len(df)
         for i in range(3, n):
+            # Once we're past the user's window AND every position has
+            # resolved, there's nothing left to simulate — exit early so
+            # we don't burn through 30 days of buffer bars uselessly.
+            if i > last_in_window_idx and not open_positions and not pending_entries:
+                break
             row   = df.iloc[i]
             bar_o = row["open"]
             lo, hi = row["low"], row["high"]
@@ -508,7 +530,11 @@ def run_futures_backtest(
             # ── C. Check for new entry signal — concurrent mode ───────────
             # Signal ALWAYS queues a new pending entry (subject to free
             # margin at next bar's open). Existing positions are unaffected.
-            sig = signal_fn(df, i) if i >= 3 else None
+            # Buffer bars (past the user's end_ts) only manage existing
+            # positions — no new entries — so the trade list reflects only
+            # signals fired within the requested window.
+            in_window = i <= last_in_window_idx
+            sig = signal_fn(df, i) if (i >= 3 and in_window) else None
             if sig is not None:
                 sig_entry, sl_raw, tp_raw, sig_dir = sig
                 if balance <= 0:
