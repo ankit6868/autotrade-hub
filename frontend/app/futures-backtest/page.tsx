@@ -723,10 +723,18 @@ function FuturesBacktestInner() {
                           )}
                           {(d.override_sl_from_class || d.override_tp_from_class) && (
                             <div className="text-sky-300 text-[10px] mt-0.5 border-l-2 border-sky-500/40 pl-2"
-                                 title="Your strategy class declared its own stoploss / minimal_roi. The engine used THOSE instead of the slider values, since the class is the source of truth for its risk parameters. The slider settings are reported in parentheses for reference.">
+                                 title="Your strategy class declared its own stoploss / minimal_roi within sane bounds (SL: 0.1-25%, TP: 0.1-50%). The engine used THOSE instead of the slider values, since the class is the source of truth for its risk parameters.">
                               ⚙ Engine used strategy-declared SL/TP (overrode slider):
                               {d.override_sl_from_class && <> SL → <b className="text-sky-200">{d.override_sl_from_class}</b></>}
                               {d.override_tp_from_class && <> · TP → <b className="text-sky-200">{d.override_tp_from_class}</b></>}
+                            </div>
+                          )}
+                          {(d.class_stoploss_ignored || d.class_take_profit_ignored) && (
+                            <div className="text-amber-300 text-[10px] mt-0.5 border-l-2 border-amber-500/40 pl-2"
+                                 title="Your strategy class declared SL/TP values outside the sane retail-trading range. Common cause: placeholder values like stoploss=-0.99 (no-stop, handled by custom_stoploss) or minimal_roi={0: 100} (ROI handled by custom_exit). These would liquidate every trade or never take profit, so the engine kept the slider values instead.">
+                              ⚠ Ignored insane strategy-declared values, kept slider:
+                              {d.class_stoploss_ignored && <> SL <b>{d.class_stoploss_ignored}</b></>}
+                              {d.class_take_profit_ignored && <> · TP <b>{d.class_take_profit_ignored}</b></>}
                             </div>
                           )}
                           {d.resolve_buffer_bars !== undefined && d.resolve_buffer_bars > 0 && (

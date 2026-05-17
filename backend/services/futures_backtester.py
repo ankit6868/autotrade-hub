@@ -343,29 +343,40 @@ def run_futures_backtest(
                 # Even when code execution fails, still try to extract the
                 # strategy's intended SL/TP from the source via regex so the
                 # backtest doesn't run with stale DB-default values that
-                # invert the RR ratio. This is a best-effort parse — if it
-                # finds nothing, the slider values stand.
+                # invert the RR ratio. Same sanity-bounds as the AST path:
+                # values like -0.99 (no-stop) or 100 (placeholder ROI) are
+                # IGNORED so we don't apply nonsense overrides.
                 import re
                 m_sl = re.search(
                     r"^\s*stoploss\s*=\s*(-?\d+(?:\.\d+)?)",
                     generated_code or "", re.MULTILINE,
                 )
                 if m_sl:
-                    parsed_sl = abs(float(m_sl.group(1))) * 100
-                    data_diagnostics[pair]["override_sl_from_class"] = (
-                        f"{parsed_sl}% (slider was {stoploss_pct}%, parsed from source)"
-                    )
-                    stoploss_pct = parsed_sl
+                    parsed_sl = abs(float(m_sl.group(1)))
+                    if 0.001 <= parsed_sl <= 0.25:
+                        data_diagnostics[pair]["override_sl_from_class"] = (
+                            f"{parsed_sl*100}% (slider was {stoploss_pct}%, parsed from source)"
+                        )
+                        stoploss_pct = parsed_sl * 100
+                    else:
+                        data_diagnostics[pair]["class_stoploss_ignored"] = (
+                            f"{parsed_sl*100:.1f}% — outside sane range, keeping slider {stoploss_pct}%"
+                        )
                 m_tp = re.search(
                     r"minimal_roi\s*=\s*\{\s*[\"']0[\"']\s*:\s*(\d+(?:\.\d+)?)",
                     generated_code or "",
                 )
                 if m_tp:
-                    parsed_tp = float(m_tp.group(1)) * 100
-                    data_diagnostics[pair]["override_tp_from_class"] = (
-                        f"{parsed_tp}% (slider was {take_profit_pct}%, parsed from source)"
-                    )
-                    take_profit_pct = parsed_tp
+                    parsed_tp = float(m_tp.group(1))
+                    if 0.001 <= parsed_tp <= 0.50:
+                        data_diagnostics[pair]["override_tp_from_class"] = (
+                            f"{parsed_tp*100}% (slider was {take_profit_pct}%, parsed from source)"
+                        )
+                        take_profit_pct = parsed_tp * 100
+                    else:
+                        data_diagnostics[pair]["class_take_profit_ignored"] = (
+                            f"{parsed_tp*100:.1f}% — outside sane range, keeping slider {take_profit_pct}%"
+                        )
 
         # ── Concurrent-position state ─────────────────────────────────
         # Every entry signal opens a NEW position alongside any already-
