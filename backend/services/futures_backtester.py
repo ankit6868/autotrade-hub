@@ -675,6 +675,25 @@ def run_futures_backtest(
     total_slippage        = sum(t.get("slippage_paid", 0)     for t in all_trades)
     total_hyp_kucoin_fees = sum(t.get("hyp_kucoin_fee", 0)    for t in all_trades)
 
+    # ── Math-check rails: break-even WR + expected-value per trade ────────
+    # Breakeven WR = SL / (SL + TP). If actual WR is below this, the
+    # strategy is MATHEMATICALLY guaranteed to lose money (before fees)
+    # — no amount of code tweaking fixes that, it's arithmetic. We surface
+    # both numbers so users can see immediately whether their result is
+    # noise around a viable edge or a doomed setup.
+    sl_pct = abs(stoploss_pct)
+    tp_pct = abs(take_profit_pct)
+    if sl_pct + tp_pct > 0:
+        breakeven_wr = sl_pct / (sl_pct + tp_pct)
+        rr_ratio     = tp_pct / sl_pct if sl_pct > 0 else 0
+    else:
+        breakeven_wr = 0
+        rr_ratio     = 0
+    # Expected-value per trade in % of margin (positive = profitable
+    # expectation; negative = guaranteed loss given infinite trades).
+    ev_per_trade_pct = (win_rate * tp_pct - (1 - win_rate) * sl_pct) * leverage
+    is_negative_ev   = win_rate < breakeven_wr
+
     return {
         "metrics": {
             "total_trades":     len(all_trades),
@@ -698,6 +717,11 @@ def run_futures_backtest(
             "total_hyp_kucoin_fees": round(total_hyp_kucoin_fees, 4),
             "kucoin_taker_fee_pct": KUCOIN_TAKER_FEE * 100,
             "kucoin_maker_fee_pct": KUCOIN_MAKER_FEE * 100,
+            # Math-check rails (see comment above the computation)
+            "breakeven_win_rate":   round(breakeven_wr, 4),
+            "risk_reward_ratio":    round(rr_ratio, 3),
+            "expected_value_pct":   round(ev_per_trade_pct, 3),
+            "is_negative_ev":       bool(is_negative_ev),
         },
         "trades":              all_trades,
         "equity_curve":        equity_curve,
