@@ -66,6 +66,11 @@ function FuturesBacktestInner() {
   const [leverage,        setLeverage]        = useState(10);
   const [stoploss,        setStoploss]        = useState(1.5);   // SL ≤ TP for positive R:R
   const [takeProfit,      setTakeProfit]      = useState(3.0);   // TP should be ≥ SL (2:1 R:R)
+  // Pyramiding cap — matches TradingView's `pyramiding` setting. Default 1
+  // means "only one position open per direction at a time"; when a strategy
+  // fires the same condition for 4 bars in a row, the engine opens ONE trade,
+  // not four. Set to N>1 to allow N stacked positions per direction.
+  const [pyramiding,      setPyramiding]      = useState(1);
   // Track WHERE each parameter's current value came from so we can label
   // the control with "from strategy" or "default" — transparent to the
   // user about what was inherited vs what's a fallback we picked.
@@ -217,6 +222,7 @@ function FuturesBacktestInner() {
         starting_balance: startBalance,
         stoploss_pct:     stoploss,
         take_profit_pct:  takeProfit,
+        max_concurrent_positions: pyramiding,
       });
       if (data.error) setError(data.error);
       else {
@@ -506,6 +512,44 @@ function FuturesBacktestInner() {
           </div>
         </div>
 
+        {/* ── Position model (pyramiding) ──────────────────────────────────
+            Most users assume "1 trade per signal cluster" — that's TradingView
+            default behaviour. The previous unlimited-concurrent mode opened a
+            new position every bar a condition was true, inflating trade
+            counts (a single SMC setup could become 4-6 trades). The dropdown
+            here exposes the cap explicitly so the user knows what they're
+            getting. */}
+        <div className="mb-5 flex items-center gap-3 flex-wrap">
+          <label className="label !mb-0 flex items-center gap-2">
+            <span>Position model</span>
+            <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30"
+                  title="Matches TradingView's `pyramiding` setting. 'Single' = only one open position per direction (TV default). 'Pyramiding N' lets the engine stack up to N positions per direction when the strategy keeps firing the same condition.">
+              TradingView parity
+            </span>
+          </label>
+          <select className="input !py-1.5 !w-auto text-sm"
+                  value={pyramiding}
+                  onChange={e => setPyramiding(Number(e.target.value))}>
+            <option value={1}>Single position (TV default)</option>
+            <option value={2}>Pyramiding × 2</option>
+            <option value={3}>Pyramiding × 3</option>
+            <option value={5}>Pyramiding × 5</option>
+            <option value={10}>Pyramiding × 10 (max)</option>
+          </select>
+          {pyramiding === 1 && (
+            <span className="text-[11px] text-slate-400 leading-snug max-w-md">
+              While in a position, new signals in the same direction are <b>skipped</b>{' '}
+              (counted under "in-trade" below). Opposite-direction signals always open a new trade.
+            </span>
+          )}
+          {pyramiding > 1 && (
+            <span className="text-[11px] text-amber-300 leading-snug max-w-md">
+              Up to {pyramiding} positions per direction can stack. Trade count will be higher
+              and consecutive winners/losers will be correlated (same setup, multiple entries).
+            </span>
+          )}
+        </div>
+
         {/* Run + Auto-tune buttons */}
         <div className="flex items-center gap-3 flex-wrap">
           <button onClick={runBacktest}
@@ -533,6 +577,9 @@ function FuturesBacktestInner() {
             <span>⚡ Leverage: <span className="text-slate-300">{leverage}x</span></span>
             <span>🛑 Stop-loss: <span className="text-slate-300">{stoploss}%</span></span>
             <span>🎯 Take-profit: <span className="text-slate-300">{takeProfit}%</span></span>
+            <span>📐 Position: <span className="text-slate-300">
+              {pyramiding === 1 ? 'Single (TV default)' : `Pyramiding ×${pyramiding}`}
+            </span></span>
           </div>
         )}
       </div>
@@ -1137,7 +1184,14 @@ function FuturesBacktestInner() {
                     <tr key={i} className={`border-b border-[#2a3a52]/50 hover:bg-[#2a3a52]/20 ${
                       t.exit_reason === 'liquidated' ? 'bg-orange-500/5' : ''
                     }`}>
-                      <td className="py-2 px-2 text-slate-500">{i + 1}</td>
+                      <td className="py-2 px-2 text-slate-500"
+                          title={
+                            t.signal_bar_index !== undefined
+                              ? `Signal fired at bar #${t.signal_bar_index} → filled at bar #${t.entry_bar_index} `
+                                + `(next bar's open, TV parity) → exited at bar #${t.exit_bar_index} `
+                                + `(held ${t.candles_held} bars). SL/TP source: ${t.sltp_source ?? '?'}.`
+                              : undefined
+                          }>{i + 1}</td>
                       <td className="py-2 px-2 font-medium">{t.pair}</td>
                       <td className={`py-2 px-2 text-right font-semibold text-xs ${
                         t.direction === 'long' ? 'text-emerald-400' : 'text-red-400'

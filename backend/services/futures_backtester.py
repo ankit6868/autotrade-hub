@@ -171,6 +171,12 @@ def run_futures_backtest(
                                         # cell actually tests a different SL/TP combo even
                                         # for strategies like SMCStrategyTV that normally
                                         # use their own structural levels.
+    max_concurrent_positions: int = 1,  # TradingView-default pyramiding=0 → only 1 position
+                                        # open at a time. Set to N to allow up to N positions
+                                        # to stack (matches Pine's `pyramiding = N-1`). The
+                                        # earlier "concurrent" mode (∞) inflated trade counts
+                                        # because the same condition firing 4 bars in a row
+                                        # would open 4 separate positions instead of 1.
 ) -> dict:
     """
     Run a leveraged futures backtest matching TradingView's methodology:
@@ -428,7 +434,8 @@ def run_futures_backtest(
             # (Signal at bar[i-1] close → fill at bar[i] open; matches TV.)
             new_pending: list[tuple] = []
             for pe in pending_entries:
-                sig_dir, _, sig_sl, sig_tp, _, sig_margin, use_signal_sltp = pe
+                (sig_dir, _, sig_sl, sig_tp, _, sig_margin, use_signal_sltp,
+                 signal_bar_idx, signal_bar_ts) = pe
 
                 # Free-margin check: don't open if we can't afford the margin.
                 free_margin = balance - committed_margin
@@ -471,6 +478,12 @@ def run_futures_backtest(
                     "funding_paid":     0.0,
                     "slippage_paid":    abs(bar_o - entry_price) * (pos_value / max(bar_o, 1e-9)),
                     "hyp_commission":   pos_value * KUCOIN_TAKER_FEE,
+                    # Signal-trace fields — let the user prove the chain
+                    # signal-bar → fill-bar → exit-bar without ambiguity.
+                    "signal_bar_index": signal_bar_idx,
+                    "signal_bar_ts":    signal_bar_ts,
+                    "entry_bar_index":  i,
+                    "sltp_source":      "strategy" if use_signal_sltp else "slider",
                 })
             pending_entries = new_pending
 
@@ -591,12 +604,15 @@ def run_futures_backtest(
                     "slippage_paid":     round(float(pos["slippage_paid"]),   4),
                     "hyp_kucoin_fee":    round(float(pos["hyp_commission"]),  4),
                     "exit_slippage_bps": int(exit_slippage_bps),
+                    # Signal-trace: prove this trade came from a real signal.
+                    "signal_bar_index": pos["signal_bar_index"],
+                    "entry_bar_index":  pos["entry_bar_index"],
+                    "exit_bar_index":   i,
+                    "sltp_source":      pos["sltp_source"],
                 })
             open_positions = still_open
 
-            # ── C. Check for new entry signal — concurrent mode ───────────
-            # Signal ALWAYS queues a new pending entry (subject to free
-            # margin at next bar's open). Existing positions are unaffected.
+            # ── C. Check for new entry signal ─────────────────────────────
             # Buffer bars (past the user's end_ts) only manage existing
             # positions — no new entries — so the trade list reflects only
             # signals fired within the requested window.
@@ -607,6 +623,28 @@ def run_futures_backtest(
                 if balance <= 0:
                     # Wiped out — no more trades possible.
                     continue
+
+                # Pyramiding cap — matches TradingView's `pyramiding` setting.
+                # Default 1 = single position at a time (most common). When a
+                # strategy fires the same condition for several bars in a row,
+                # the unlimited-concurrent mode would open 4 separate trades
+                # with near-identical outcomes; the user reads those as "4
+                # trades" when conceptually it's the same setup. The cap
+                # collapses those into ONE trade — matches how you'd actually
+                # trade by hand or via Pine Script default.
+                #
+                # We count BOTH already-open positions AND pending entries
+                # that haven't filled yet, so a cluster of signals at the
+                # same bar can't all sneak through together.
+                open_in_dir = sum(1 for p in open_positions if p["direction"] == sig_dir)
+                pending_in_dir = sum(1 for pe in pending_entries if pe[0] == sig_dir)
+                total_in_dir = open_in_dir + pending_in_dir
+                if total_in_dir >= max_concurrent_positions:
+                    # The signal fired, but we already hold the max number of
+                    # positions in this direction. Tracked under "in-trade".
+                    skipped_in_trade += 1
+                    continue
+
                 free_margin = balance - committed_margin
                 sig_margin = balance * risk_per_trade
                 # Cap by free margin; skip if can't even commit $1.
@@ -680,9 +718,18 @@ def run_futures_backtest(
 
                 sig_liq = _calc_liquidation(sig_entry, sig_dir, leverage,
                                             sig_margin * leverage)
+                # Carry the bar index where the signal fired AND the bar
+                # timestamp through to the open position so the trade
+                # record can prove the chain: "signal fired at bar X
+                # (time T1) → entry filled at bar X+1 (time T2) → exit
+                # at bar Y (time T3)". The user can match these against
+                # the strategy's signal function to verify nothing fired
+                # without a real condition.
+                signal_bar_idx = i
+                signal_bar_ts  = bar_ts_secs
                 pending_entries.append(
                     (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq,
-                     sig_margin, use_signal_sltp)
+                     sig_margin, use_signal_sltp, signal_bar_idx, signal_bar_ts)
                 )
 
         # ── End of bar loop: handle leftover open positions ───────────────
@@ -722,9 +769,13 @@ def run_futures_backtest(
         data_diagnostics[pair]["signals_skipped_in_trade"] = skipped_in_trade
         data_diagnostics[pair]["signals_skipped_cooldown"] = skipped_cooldown
         data_diagnostics[pair]["cooldown_bars"]        = cooldown_bars
-        # Concurrent-positions diagnostics
+        # Pyramiding / position-model diagnostics
         data_diagnostics[pair]["signals_skipped_no_margin"] = skipped_no_margin
-        data_diagnostics[pair]["position_model"]            = "concurrent"
+        data_diagnostics[pair]["max_concurrent_positions"]  = max_concurrent_positions
+        data_diagnostics[pair]["position_model"] = (
+            "single" if max_concurrent_positions == 1
+            else f"pyramiding_{max_concurrent_positions}"
+        )
         data_diagnostics[pair]["trades_still_open_at_end"]  = trades_still_open_at_end
         data_diagnostics[pair]["unrealised_pnl_at_end"]     = round(unrealised_pnl_at_end, 4)
         # How the engine decided SL/TP per trade. When sltp_from_signal
