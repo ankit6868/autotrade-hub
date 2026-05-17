@@ -577,10 +577,16 @@ function FuturesBacktestInner() {
                           {d.trades_still_open_at_end !== undefined && d.trades_still_open_at_end > 0 && (
                             <div
                               className="text-amber-300 text-[10px] mt-0.5"
-                              title="These trades hadn't hit their SL/TP/liquidation when the backtest period ended, so we don't count them as real outcomes. Their margin is released back to the available balance. To see them resolve, extend the backtest period."
+                              title="Trades still open after the 30-day resolve buffer past the end of your backtest window. These didn't hit SL/TP/liquidation even with the extra time — likely SL/TP set too wide, or strategy held through low volatility. Margin released back to balance; not counted in win-rate."
                             >
-                              ⏳ {d.trades_still_open_at_end} position{d.trades_still_open_at_end === 1 ? '' : 's'} still
-                              open at end of period (excluded from results — unrealised P&amp;L ${(d.unrealised_pnl_at_end ?? 0).toFixed(2)})
+                              ⏳ {d.trades_still_open_at_end} position{d.trades_still_open_at_end === 1 ? '' : 's'} unresolved
+                              even after 30-day buffer (excluded — unrealised P&amp;L ${(d.unrealised_pnl_at_end ?? 0).toFixed(2)})
+                            </div>
+                          )}
+                          {d.resolve_buffer_bars !== undefined && d.resolve_buffer_bars > 0 && (
+                            <div className="text-sky-400/70 text-[10px]"
+                                 title="Extra candles fetched beyond your end date so positions opened late in the period can hit their SL/TP/liquidation properly. New entries don't fire in this buffer — only existing positions resolve.">
+                              ↳ +{d.resolve_buffer_bars} buffer candles fetched past end date for trade resolution
                             </div>
                           )}
                         </div>
