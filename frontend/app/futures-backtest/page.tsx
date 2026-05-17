@@ -102,18 +102,14 @@ function FuturesBacktestInner() {
       .catch(() => {});
   }, []);
 
-  // Auto-fill from the selected strategy. For each field we record whether
-  // the value was actually defined on the strategy ("strategy"), or whether
-  // we had to fall back to a sensible futures default ("default"). The
-  // source is rendered next to each control so the user can see at a glance
-  // what was inherited.
-  useEffect(() => {
-    if (!strategyId || strategies.length === 0) return;
-    const s = strategies.find((x: any) => x.id === strategyId);
-    if (!s) return;
+  // Pull all risk parameters from a strategy row and write them into the
+  // form. Used (a) automatically when the selected strategy changes, and
+  // (b) on demand via the "Apply strategy params" button so the user can
+  // revert manual edits without having to remember the original values.
+  function applyStrategyParams(s: any | null | undefined): boolean {
+    if (!s) return false;
 
-    // Stoploss: strategy stores as negative decimal (-0.03 = -3%).
-    // Treat null/undefined/0 as "not set on the strategy".
+    // Stoploss: stored as negative decimal (-0.03 = -3%). Null/0 = "not set".
     const rawSl = s.stoploss;
     if (rawSl !== null && rawSl !== undefined && Number(rawSl) !== 0) {
       setStoploss(Math.abs(Number(rawSl) * 100));
@@ -123,7 +119,7 @@ function FuturesBacktestInner() {
       setSlSrc('default');
     }
 
-    // Take profit: strategy stores as positive decimal (0.015 = 1.5%).
+    // Take profit: stored as positive decimal (0.015 = 1.5%).
     const rawTp = s.take_profit;
     if (rawTp !== null && rawTp !== undefined && Number(rawTp) > 0) {
       setTakeProfit(Number(rawTp) * 100);
@@ -133,9 +129,7 @@ function FuturesBacktestInner() {
       setTpSrc('default');
     }
 
-    // Leverage: strategy stores as integer. We treat 1× as "not set"
-    // because that's the SQLAlchemy default — a real futures strategy
-    // wouldn't deliberately ship at 1× leverage.
+    // Leverage: stored as integer. 1× treated as "not set" (DB default).
     const rawLev = s.default_leverage;
     if (rawLev !== null && rawLev !== undefined && Number(rawLev) > 1) {
       setLeverage(Number(rawLev));
@@ -145,20 +139,43 @@ function FuturesBacktestInner() {
       setLevSrc('default');
     }
 
-    // Timeframe.
-    if (s.timeframe && s.timeframe !== '15m') {
+    if (s.timeframe) {
       setTimeframe(s.timeframe);
-      setTfSrc('strategy');
-    } else if (s.timeframe === '15m') {
-      // Strategy explicitly chose 15m (could be the default too, but we
-      // treat the explicit field as authoritative if present).
-      setTimeframe('15m');
       setTfSrc('strategy');
     } else {
       setTimeframe('15m');
       setTfSrc('default');
     }
+    return true;
+  }
+
+  // Auto-fill on strategy change so opening a fresh backtest pre-populates
+  // SL/TP/leverage from the strategy without the user having to click anything.
+  useEffect(() => {
+    if (!strategyId || strategies.length === 0) return;
+    const s = strategies.find((x: any) => x.id === strategyId);
+    applyStrategyParams(s);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [strategyId, strategies]);
+
+  // True when ALL inherited risk params on the form still match the
+  // currently-selected strategy (i.e. nothing was tweaked by hand).
+  // Used to disable the "Apply strategy params" button so the user can
+  // see at a glance whether reverting would actually change anything.
+  const selectedStrategy = strategies.find((x: any) => x.id === strategyId);
+  const alreadyMatchesStrategy = selectedStrategy
+    && slSrc !== 'manual'
+    && tpSrc !== 'manual'
+    && levSrc !== 'manual'
+    && tfSrc !== 'manual';
+
+  // Detect whether the selected strategy is one of the names whose engine
+  // overrides slider SL/TP with structural levels (currently only
+  // SMCStrategyTV). Used to warn the user that the slider values are
+  // INFORMATIONAL for these strategies — the trade-level SL/TP comes from
+  // pivot structure, not the slider.
+  const strategyOverridesSlTp =
+    selectedStrategy?.name === 'SMCStrategyTV';
 
   // Small reusable badge that shows where a field's current value came from.
   function SourceBadge({ src }: { src: Src }) {
@@ -206,8 +223,28 @@ function FuturesBacktestInner() {
         setResult(data);
         api.futures.backtest.history().then(d => setHistory(d.backtests ?? [])).catch(() => {});
       }
-    } catch (e) { setError(String(e)); }
+    } catch (e) { setError(friendlyError(e)); }
     setRunning(false);
+  }
+
+  // Convert raw errors (often JSON blobs from Railway like
+  // `{"status":"error","code":502,"message":"Application failed to respond"}`)
+  // into a single human-readable line. Falls back to String(e) for anything
+  // it can't parse.
+  function friendlyError(e: unknown): string {
+    const raw = e instanceof Error ? e.message : String(e);
+    try {
+      const j = JSON.parse(raw.replace(/^Error:\s*/, ''));
+      if (j && typeof j === 'object') {
+        if (Number(j.code) === 502 || /failed to respond/i.test(String(j.message ?? ''))) {
+          return 'Backend timed out (502). The request exceeded the 60s edge-proxy window. '
+               + 'Try a shorter timerange (1W/1M) or a higher timeframe (1h/4h).';
+        }
+        if (j.message) return String(j.message);
+        if (j.error)   return String(j.error);
+      }
+    } catch { /* not JSON — fall through */ }
+    return raw.replace(/^Error:\s*/, '');
   }
 
   async function autoTune() {
@@ -225,7 +262,7 @@ function FuturesBacktestInner() {
       });
       if (data.error) setError(data.error);
       else setTuneResult(data);
-    } catch (e) { setError(String(e)); }
+    } catch (e) { setError(friendlyError(e)); }
     setTuning(false);
   }
 
@@ -339,13 +376,34 @@ function FuturesBacktestInner() {
         {/* ── Strategy / Pairs / Timeframe ───────────────────────────── */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
           <div className="col-span-2">
-            <label className="label">Strategy</label>
+            <label className="label flex items-center justify-between">
+              <span>Strategy</span>
+              <button
+                type="button"
+                onClick={() => applyStrategyParams(selectedStrategy)}
+                disabled={!selectedStrategy || alreadyMatchesStrategy}
+                title={
+                  alreadyMatchesStrategy
+                    ? 'All risk parameters already match the selected strategy'
+                    : "Reset leverage, stop-loss, take-profit and timeframe to this strategy's declared values"
+                }
+                className="text-[10px] font-medium px-2 py-0.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-30 disabled:cursor-not-allowed"
+              >
+                ⚙ Apply strategy params
+              </button>
+            </label>
             <select className="input" value={strategyId ?? ''}
               onChange={e => setStrategyId(Number(e.target.value))}>
               {strategies.map((s: any) => (
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
             </select>
+            {strategyOverridesSlTp && (
+              <p className="mt-1 text-[10px] text-sky-300/80 leading-snug"
+                 title="SMCStrategyTV uses structural pivot levels for SL and 2R targets for TP, computed per trade. The slider SL/TP are ignored unless you run Auto-tune (which forces slider values to test different combos).">
+                ℹ Uses structural SL/TP per trade — sliders below are ignored.
+              </p>
+            )}
           </div>
 
           {/* Pair search — same component as spot backtest */}
@@ -843,6 +901,12 @@ function FuturesBacktestInner() {
                       EV/trade: <b className={(m.expected_value_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
                         {(m.expected_value_pct ?? 0) >= 0 ? '+' : ''}{(m.expected_value_pct ?? 0).toFixed(2)}%
                       </b>
+                      {m.sltp_source_for_ev === 'realised' && (
+                        <span className="ml-2 text-[9px] px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30"
+                              title={`Computed from realised average SL ${m.realised_avg_sl_pct?.toFixed?.(2)}% / TP ${m.realised_avg_tp_pct?.toFixed?.(2)}% across actual trades — slider values were ignored by this strategy's engine.`}>
+                          from realised SL/TP
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -853,6 +917,41 @@ function FuturesBacktestInner() {
                     Code fixes can't beat this arithmetic.
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+
+          {/* Cost-drag insight — the single most useful piece of information
+              when a strategy has positive gross EV but the balance still
+              ended negative. Without this card, the user sees
+              "Positive expected value" + "-7.92% total profit" and can't
+              reconcile the contradiction. */}
+          {m.cost_drag_per_trade_pct !== undefined
+            && !m.is_negative_ev
+            && m.total_profit_pct < 0 && (
+            <div className="card mb-4 border-amber-500/40 bg-amber-500/5">
+              <div className="flex items-start gap-3 flex-wrap">
+                <span className="text-2xl">💸</span>
+                <div className="flex-1">
+                  <div className="text-sm font-semibold text-amber-200">
+                    Real-trading costs are eating the edge
+                  </div>
+                  <div className="text-[11px] text-slate-300 mt-1 leading-relaxed">
+                    Your strategy has a <b className="text-emerald-300">+{(m.expected_value_pct ?? 0).toFixed(2)}%</b>{' '}
+                    gross edge per trade, but funding + slippage drag <b className="text-red-300">
+                    -{(m.cost_drag_per_trade_pct ?? 0).toFixed(2)}%</b> per trade,
+                    leaving net EV of <b className={(m.net_expected_value_pct ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'}>
+                    {(m.net_expected_value_pct ?? 0) >= 0 ? '+' : ''}{(m.net_expected_value_pct ?? 0).toFixed(2)}%</b>.
+                    Across <b>{m.total_trades}</b> trades that compounded to a{' '}
+                    <b className="text-red-300">{m.total_profit_pct.toFixed(2)}%</b> balance change.
+                  </div>
+                  <div className="text-[10px] text-slate-400 mt-2 leading-snug">
+                    → Reduce trade frequency (add a cooldown / stricter filter),
+                    increase TP so each winner pays for the cost overhead,
+                    or move to a higher timeframe (15m → 1h cuts trade count ~4×
+                    so total funding/slippage falls proportionally).
+                  </div>
+                </div>
               </div>
             </div>
           )}

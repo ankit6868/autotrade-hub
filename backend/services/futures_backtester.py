@@ -166,6 +166,11 @@ def run_futures_backtest(
     take_profit_pct: float = 1.5,     # % e.g. 1.5 → +1.5%
     risk_per_trade: float = 0.05,     # fraction of balance used as margin per trade
     generated_code: str | None = None,  # user's IStrategy Python class (Freqtrade-style)
+    force_slider_sltp: bool = False,    # when True, override strategy-defined structural SL/TP
+                                        # with slider values. Used by auto-tune so each grid
+                                        # cell actually tests a different SL/TP combo even
+                                        # for strategies like SMCStrategyTV that normally
+                                        # use their own structural levels.
 ) -> dict:
     """
     Run a leveraged futures backtest matching TradingView's methodology:
@@ -612,7 +617,16 @@ def run_futures_backtest(
                 else:
                     trades_opened_short += 1
 
-                if strategy_name in ("SMCStrategyTV",):
+                # Strategy-defined SL/TP only applies when the strategy
+                # explicitly returns structural levels AND the caller hasn't
+                # asked for the slider values. The `force_slider_sltp` flag
+                # is set by auto-tune so the SL/TP grid actually tests
+                # different SL/TP combos — without it, SMCStrategyTV would
+                # ignore the grid and produce identical results for every cell.
+                strategy_owns_sltp = (
+                    strategy_name in ("SMCStrategyTV",) and not force_slider_sltp
+                )
+                if strategy_owns_sltp:
                     sig_sl, sig_tp = sl_raw, tp_raw
                 else:
                     sl_dist = sig_entry * stoploss_pct / 100
@@ -626,7 +640,7 @@ def run_futures_backtest(
 
                 sig_liq = _calc_liquidation(sig_entry, sig_dir, leverage,
                                             sig_margin * leverage)
-                use_signal_sltp = strategy_name in ("SMCStrategyTV",)
+                use_signal_sltp = strategy_owns_sltp
                 pending_entries.append(
                     (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq,
                      sig_margin, use_signal_sltp)
@@ -735,11 +749,34 @@ def run_futures_backtest(
     # ── Math-check rails: break-even WR + expected-value per trade ────────
     # Breakeven WR = SL / (SL + TP). If actual WR is below this, the
     # strategy is MATHEMATICALLY guaranteed to lose money (before fees)
-    # — no amount of code tweaking fixes that, it's arithmetic. We surface
-    # both numbers so users can see immediately whether their result is
-    # noise around a viable edge or a doomed setup.
-    sl_pct = abs(stoploss_pct)
-    tp_pct = abs(take_profit_pct)
+    # — no amount of code tweaking fixes that, it's arithmetic.
+    #
+    # For strategies whose engine uses *structural* SL/TP per trade
+    # (SMCStrategyTV — pivot-based stops + 2R targets), the slider values
+    # are NOT what trades actually used, so deriving breakeven from sliders
+    # is misleading. We compute the realised average SL% / TP% from the
+    # ACTUAL trade outcomes and use those for the verdict — that's the
+    # arithmetic the user is really running.
+    realised_sl_pct: float | None = None
+    realised_tp_pct: float | None = None
+    sl_trades = [t for t in all_trades if t.get("exit_reason") == "stop_loss"]
+    tp_trades = [t for t in all_trades if t.get("exit_reason") == "take_profit"]
+    if sl_trades:
+        realised_sl_pct = abs(sum(
+            abs(t["close_rate"] - t["open_rate"]) / t["open_rate"] * 100
+            for t in sl_trades
+        ) / len(sl_trades))
+    if tp_trades:
+        realised_tp_pct = abs(sum(
+            abs(t["close_rate"] - t["open_rate"]) / t["open_rate"] * 100
+            for t in tp_trades
+        ) / len(tp_trades))
+
+    # Use realised values when both are present (strategy-defined SL/TP path),
+    # otherwise fall back to the slider values (which match what the engine used).
+    using_realised = realised_sl_pct is not None and realised_tp_pct is not None
+    sl_pct = realised_sl_pct if using_realised else abs(stoploss_pct)
+    tp_pct = realised_tp_pct if using_realised else abs(take_profit_pct)
     if sl_pct + tp_pct > 0:
         breakeven_wr = sl_pct / (sl_pct + tp_pct)
         rr_ratio     = tp_pct / sl_pct if sl_pct > 0 else 0
@@ -750,6 +787,19 @@ def run_futures_backtest(
     # expectation; negative = guaranteed loss given infinite trades).
     ev_per_trade_pct = (win_rate * tp_pct - (1 - win_rate) * sl_pct) * leverage
     is_negative_ev   = win_rate < breakeven_wr
+
+    # Cost-drag per trade — the headline number for "why is my profitable
+    # strategy losing money?". Realistic answer is almost always: too many
+    # trades + thin edge + slippage compounding.
+    cost_drag_usdt   = total_funding + total_slippage
+    cost_drag_per_trade_usdt = (cost_drag_usdt / len(all_trades)) if all_trades else 0
+    # Estimate avg margin used per trade (declines as balance changes).
+    avg_margin = (sum(t.get("margin", 0) for t in all_trades) / len(all_trades)) if all_trades else 0
+    cost_drag_per_trade_pct = (
+        (cost_drag_per_trade_usdt / avg_margin) * 100 if avg_margin > 0 else 0
+    )
+    net_ev_per_trade_pct = ev_per_trade_pct - cost_drag_per_trade_pct
+    is_negative_ev_after_costs = net_ev_per_trade_pct < 0
 
     return {
         "metrics": {
@@ -779,6 +829,19 @@ def run_futures_backtest(
             "risk_reward_ratio":    round(rr_ratio, 3),
             "expected_value_pct":   round(ev_per_trade_pct, 3),
             "is_negative_ev":       bool(is_negative_ev),
+            # Cost-drag analysis — explains the gap between "WR above
+            # breakeven, EV positive" and "balance ended negative". The
+            # UI shows this when net EV flips sign vs gross EV.
+            "cost_drag_per_trade_usdt": round(cost_drag_per_trade_usdt, 4),
+            "cost_drag_per_trade_pct":  round(cost_drag_per_trade_pct, 3),
+            "net_expected_value_pct":   round(net_ev_per_trade_pct, 3),
+            "is_negative_ev_after_costs": bool(is_negative_ev_after_costs),
+            # Source of the SL/TP used in the breakeven math. "realised"
+            # means we measured actual trade outcomes (correct for strategies
+            # that override SL/TP); "slider" means we used the UI values.
+            "sltp_source_for_ev":   "realised" if using_realised else "slider",
+            "realised_avg_sl_pct":  round(realised_sl_pct, 3) if realised_sl_pct is not None else None,
+            "realised_avg_tp_pct":  round(realised_tp_pct, 3) if realised_tp_pct is not None else None,
         },
         "trades":              all_trades,
         "equity_curve":        equity_curve,
@@ -806,14 +869,19 @@ def run_futures_backtest(
 # load_futures_ohlcv / load_funding_history layer so all 12 runs share ONE
 # KuCoin download.
 
-# Smaller default grid (3×3 = 9 combos) so the whole auto-tune fits
-# inside Railway's HTTP timeout. The previous 4×5 = 20 grid took
-# 2–5 min and reliably timed out with a 502 "Application failed to
-# respond". Three SL × three TP values still covers tight/medium/wide
-# for both axes, which is enough to spot the cliff in most strategies.
-AUTO_TUNE_SL_GRID = [2.0, 3.5, 5.0]       # SL percentages to try
-AUTO_TUNE_TP_GRID = [3.0, 6.0, 10.0]      # TP percentages to try
-AUTO_TUNE_BUDGET_SECS = 45                 # hard deadline; returns partial
+# Default grid is intentionally tiny (2 SL × 3 TP = 6 cells) so the whole
+# auto-tune fits inside Vercel's ~60s edge-proxy window — the previous 3×3
+# grid still took 70-120s on 6M of 15m candles (≈35k bars × ≈10s/cell) and
+# 502'd via "Application failed to respond". Six cells covers tight/medium
+# SL with low/balanced/wide TP — enough to spot the breakeven cliff for
+# most strategies, and the full grid completes in ~40-50s.
+#
+# Users who want a denser grid can pass sl_grid / tp_grid explicitly in the
+# request body; the budget still applies so they always get partial results
+# rather than a 502.
+AUTO_TUNE_SL_GRID = [2.0, 4.0]                  # SL percentages
+AUTO_TUNE_TP_GRID = [3.0, 6.0, 10.0]            # TP percentages
+AUTO_TUNE_BUDGET_SECS = 50                       # hard deadline; returns partial
 
 
 def auto_tune_sltp(
@@ -858,6 +926,11 @@ def auto_tune_sltp(
                 take_profit_pct  = tp,
                 risk_per_trade   = risk_per_trade,
                 generated_code   = generated_code,
+                # Force slider SL/TP so each grid cell ACTUALLY tests its
+                # configured combo — otherwise SMCStrategyTV (and any other
+                # strategy with structural SL/TP) would produce identical
+                # results in every cell and the grid would be useless.
+                force_slider_sltp = True,
             )
             m = res.get("metrics", {})
             grid.append({
