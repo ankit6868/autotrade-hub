@@ -652,6 +652,49 @@ function FuturesBacktestInner() {
             </div>
           )}
 
+          {/* Math-check verdict — flags strategies that mathematically can't
+              break even given their SL/TP ratio + observed win rate. */}
+          {m.breakeven_win_rate !== undefined && (
+            <div className={`card mb-4 ${
+              m.is_negative_ev
+                ? 'border-red-500/40 bg-red-500/5'
+                : 'border-emerald-500/30 bg-emerald-500/5'
+            }`}>
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div className="flex items-center gap-3">
+                  <span className="text-2xl">{m.is_negative_ev ? '⚠️' : '✓'}</span>
+                  <div>
+                    <div className={`text-sm font-semibold ${
+                      m.is_negative_ev ? 'text-red-300' : 'text-emerald-300'
+                    }`}>
+                      {m.is_negative_ev
+                        ? 'Negative expected value — strategy loses on average'
+                        : 'Positive expected value — strategy has mathematical edge'}
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-0.5">
+                      Win rate <b className={m.is_negative_ev ? 'text-red-400' : 'text-emerald-400'}>
+                        {(m.win_rate * 100).toFixed(1)}%
+                      </b>{' '}
+                      vs break-even <b className="text-slate-300">{(m.breakeven_win_rate * 100).toFixed(1)}%</b>{' '}
+                      at 1:{(m.risk_reward_ratio ?? 0).toFixed(2)} risk/reward
+                      {' · '}
+                      EV/trade: <b className={(m.expected_value_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                        {(m.expected_value_pct ?? 0) >= 0 ? '+' : ''}{(m.expected_value_pct ?? 0).toFixed(2)}%
+                      </b>
+                    </div>
+                  </div>
+                </div>
+                {m.is_negative_ev && (
+                  <div className="text-[10px] text-red-300/90 max-w-md leading-snug">
+                    Either tighten SL, widen TP (need RR ≥ 1:{(1 / Math.max(m.win_rate, 0.01) - 1).toFixed(2)}{' '}
+                    at this win rate), or add filters to lift WR above {(m.breakeven_win_rate * 100).toFixed(1)}%.
+                    Code fixes can't beat this arithmetic.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Production-grade cost-transparency card.
               Funding + slippage are deducted from balance (real-cost
               modelling); the KuCoin fee line is informational — it shows
