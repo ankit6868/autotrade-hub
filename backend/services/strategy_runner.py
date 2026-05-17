@@ -354,6 +354,12 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
         raise RuntimeError(f"Strategy class could not be instantiated: {e}")
 
     work = df.copy()
+    # Freqtrade convention uses `volume`; our KuCoin loader uses `vol`.
+    # Alias before the user's code runs, otherwise any reference to
+    # dataframe["volume"] raises KeyError → strategy_runner falls back to
+    # name-matched built-in → user's edits silently ignored.
+    if "vol" in work.columns and "volume" not in work.columns:
+        work["volume"] = work["vol"]
     metadata = {"pair": "BTC/USDT"}
 
     # Diagnostic: log the user-defined methods on their strategy so we can
