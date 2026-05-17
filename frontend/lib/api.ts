@@ -77,19 +77,32 @@ function _isRetryableNetworkError(e: unknown): boolean {
   return false;
 }
 
+// Cheap structural check for "the backend says my JWT is no good" — we
+// retry the request once with a freshly-minted token before bubbling up.
+function _isAuthExpiredResponse(status: number, body: string): boolean {
+  if (status !== 401 && status !== 403) return false;
+  const b = body.toLowerCase();
+  return b.includes('token expired') || b.includes('jwt expired')
+      || b.includes('invalid token') || b.includes('unauthorized');
+}
+
 async function _tryOnce(base: string, path: string, options: RequestInit) {
   const res = await _fetchWithTimeout(`${base}${path}`, options, FETCH_TIMEOUT_MS);
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(text || `HTTP ${res.status}`);
+    // Tag with status so the caller can distinguish auth-expiry from other failures.
+    const err: Error & { status?: number; rawBody?: string } = new Error(text || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.rawBody = text;
+    throw err;
   }
   return res.json();
 }
 
-async function request<T = any>(path: string, options?: RequestInit): Promise<T> {
+async function _buildAuthHeaders(extra?: Record<string, string>): Promise<Record<string, string>> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
-    ...((options?.headers as Record<string, string>) || {}),
+    ...(extra || {}),
   };
   if (_getToken) {
     try {
@@ -99,17 +112,38 @@ async function request<T = any>(path: string, options?: RequestInit): Promise<T>
       // Anonymous request — backend allows when Clerk isn't configured.
     }
   }
-  const finalOpts: RequestInit = { ...options, headers };
+  return headers;
+}
+
+async function request<T = any>(path: string, options?: RequestInit): Promise<T> {
+  let headers = await _buildAuthHeaders(options?.headers as Record<string, string>);
+  const buildOpts = (h: Record<string, string>): RequestInit => ({ ...options, headers: h });
+  let finalOpts: RequestInit = buildOpts(headers);
 
   // Try same-origin (Vercel rewrite → Railway) up to N times with backoff.
   // Retries handle: Railway cold-start, transient edge routing flaps, and
   // mobile-carrier TCP resets. Each retry has the full FETCH_TIMEOUT_MS budget.
   let lastErr: unknown;
+  let authRetried = false;
   for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt++) {
     try {
       return await _tryOnce(API_BASE, path, finalOpts) as T;
     } catch (e) {
       lastErr = e;
+      // ── Auth-expiry retry ───────────────────────────────────────
+      // If the backend said the JWT is expired/invalid, ask Clerk for
+      // a brand-new token and retry once. This handles the common case
+      // where the cached Clerk session token aged past its ~60s TTL
+      // between the time the user opened the page and clicked the
+      // button (Run Backtest, etc.).
+      const status = (e as { status?: number })?.status;
+      const body   = (e as { rawBody?: string })?.rawBody || (e as Error)?.message || '';
+      if (!authRetried && _getToken && _isAuthExpiredResponse(status ?? 0, body)) {
+        authRetried = true;
+        headers = await _buildAuthHeaders(options?.headers as Record<string, string>);
+        finalOpts = buildOpts(headers);
+        continue;   // same attempt count; try again with fresh token
+      }
       if (!_isRetryableNetworkError(e)) throw e;          // hard failure — surface immediately
       if (attempt < RETRY_BACKOFF_MS.length) {
         await new Promise(r => setTimeout(r, RETRY_BACKOFF_MS[attempt]));
