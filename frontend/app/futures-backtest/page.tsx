@@ -517,8 +517,16 @@ function FuturesBacktestInner() {
             <h2 className="text-lg font-semibold">
               🔬 Auto-tune results — {tuneResult.strategy}
             </h2>
-            <span className="text-xs text-slate-500">{tuneResult.runs} combos tested</span>
+            <span className="text-xs text-slate-500">
+              {tuneResult.runs} / {tuneResult.expected_runs ?? tuneResult.runs} combos tested
+            </span>
           </div>
+          {tuneResult.timed_out && (
+            <div className="mb-3 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200">
+              ⏱ Partial results: hit the {tuneResult.budget_secs}s time budget before finishing the full grid.
+              The cells shown are real — but for a complete grid, try a shorter timerange (1W or 1M) or a higher timeframe (1h / 4h).
+            </div>
+          )}
 
           {/* Verdict + best combo */}
           <div className={`rounded-lg p-3 mb-4 border ${

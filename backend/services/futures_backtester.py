@@ -806,8 +806,14 @@ def run_futures_backtest(
 # load_futures_ohlcv / load_funding_history layer so all 12 runs share ONE
 # KuCoin download.
 
-AUTO_TUNE_SL_GRID = [1.5, 2.5, 3.5, 5.0]       # SL percentages to try
-AUTO_TUNE_TP_GRID = [1.5, 3.0, 5.0, 7.5, 10.0] # TP percentages to try
+# Smaller default grid (3×3 = 9 combos) so the whole auto-tune fits
+# inside Railway's HTTP timeout. The previous 4×5 = 20 grid took
+# 2–5 min and reliably timed out with a 502 "Application failed to
+# respond". Three SL × three TP values still covers tight/medium/wide
+# for both axes, which is enough to spot the cliff in most strategies.
+AUTO_TUNE_SL_GRID = [2.0, 3.5, 5.0]       # SL percentages to try
+AUTO_TUNE_TP_GRID = [3.0, 6.0, 10.0]      # TP percentages to try
+AUTO_TUNE_BUDGET_SECS = 45                 # hard deadline; returns partial
 
 
 def auto_tune_sltp(
@@ -824,18 +830,23 @@ def auto_tune_sltp(
 ) -> dict:
     """Run the SL/TP grid and return a ranked list of results.
 
-    Each result row carries the metrics that matter for picking a config:
-    total_profit_pct, win_rate, breakeven_wr, is_negative_ev, total_trades.
-    The 'best' row is the one with the highest total_profit_pct that ALSO
-    has positive expected value (positive EV without profit is useless;
-    profit without positive EV is luck).
+    Wrapped in a time budget so we always return SOMETHING within
+    Railway's HTTP timeout window — if half the grid completes in
+    45s, we return those 4-5 results instead of letting the whole
+    request 502 with the upstream proxy.
     """
     sl_grid = sl_grid or AUTO_TUNE_SL_GRID
     tp_grid = tp_grid or AUTO_TUNE_TP_GRID
 
+    import time as _t
+    deadline = _t.time() + AUTO_TUNE_BUDGET_SECS
     grid: list[dict] = []
+    timed_out = False
     for sl in sl_grid:
         for tp in tp_grid:
+            if _t.time() > deadline:
+                timed_out = True
+                break
             res = run_futures_backtest(
                 strategy_name    = strategy_name,
                 pairs            = pairs,
@@ -862,6 +873,22 @@ def auto_tune_sltp(
                 "max_drawdown":      m.get("max_drawdown", 0),
                 "liquidations":      m.get("liquidations", 0),
             })
+        if timed_out:
+            break
+
+    if not grid:
+        # Even ONE cell didn't fit in the budget. Return diagnostic error
+        # the UI can show as a clean message instead of a 502.
+        return {
+            "error": (
+                f"Auto-tune timed out before completing any backtest "
+                f"({AUTO_TUNE_BUDGET_SECS}s budget). Try a shorter "
+                f"timerange (1W or 1M) or a higher timeframe (1h/4h)."
+            ),
+            "verdict": "timeout",
+            "grid":    [],
+            "runs":    0,
+        }
 
     # Best = highest profit among positive-EV rows; if no row has positive
     # EV, the best one is the LEAST bad (highest profit overall) with a
@@ -886,4 +913,7 @@ def auto_tune_sltp(
         "timerange":    timerange,
         "leverage":     leverage,
         "runs":         len(grid),
+        "expected_runs": len(sl_grid) * len(tp_grid),
+        "timed_out":    timed_out,
+        "budget_secs":  AUTO_TUNE_BUDGET_SECS,
     }
