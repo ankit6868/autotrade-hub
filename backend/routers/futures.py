@@ -321,6 +321,11 @@ def run_futures_backtest(
     starting_balance = float(req.get("starting_balance", 1000))
     stoploss_pct     = float(req.get("stoploss_pct", 3.0))
     take_profit_pct  = float(req.get("take_profit_pct", 1.5))
+    # Pyramiding cap — default 1 = single position at a time (matches
+    # TradingView's `pyramiding = 0` default). User can pass a larger
+    # value to allow signal-stacking. Clamped 1..10 because anything
+    # bigger is almost certainly a misconfiguration.
+    max_concurrent   = max(1, min(10, int(req.get("max_concurrent_positions", 1))))
 
     # Resolve strategy — pull generated_code so the backtester can actually
     # run the user's authored logic instead of pattern-matching the name to
@@ -349,6 +354,7 @@ def run_futures_backtest(
         stoploss_pct     = stoploss_pct,
         take_profit_pct  = take_profit_pct,
         generated_code   = generated_code,
+        max_concurrent_positions = max_concurrent,
     )
 
     if "error" in result:
