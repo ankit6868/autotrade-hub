@@ -258,6 +258,25 @@ def run_futures_backtest(
                     evaluate_strategy, make_signal_fn_from_df,
                 )
                 df = evaluate_strategy(generated_code, df)
+                # If the user's strategy class declares its OWN stoploss /
+                # minimal_roi, prefer those over slider values. The slider
+                # values usually come from stale DB column defaults; the
+                # class is the source of truth for its own risk math. Without
+                # this, a strategy authored for 1:3 RR gets backtested at
+                # 1:0.5 RR (DB default 3% SL / 1.5% TP), which is
+                # mathematically guaranteed to lose at any normal win rate.
+                class_sl = df.attrs.get("class_stoploss_pct")
+                class_tp = df.attrs.get("class_take_profit_pct")
+                if class_sl is not None:
+                    data_diagnostics[pair]["override_sl_from_class"] = (
+                        f"{class_sl}% (slider was {stoploss_pct}%)"
+                    )
+                    stoploss_pct = class_sl
+                if class_tp is not None:
+                    data_diagnostics[pair]["override_tp_from_class"] = (
+                        f"{class_tp}% (slider was {take_profit_pct}%)"
+                    )
+                    take_profit_pct = class_tp
                 signal_fn = make_signal_fn_from_df(
                     df, leverage, stoploss_pct, take_profit_pct,
                 )
