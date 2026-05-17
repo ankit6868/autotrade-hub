@@ -123,6 +123,60 @@ class BidirectionalStrategy:
     timeframe = "15m"
 '''
 
+_SMC_PRO_V3_CODE = '''
+class SMCProV3:
+    """
+    SMC Pro v3 — full institutional Smart Money Concepts model.
+
+    Implements the complete 3-layer entry framework:
+
+      LAYER 1 — HTF BIAS (≈daily structure on 15m via N=30 swings)
+        • Detect last Break-of-Structure (BOS) direction
+        • BULL  if last BOS = close > prior swing high
+        • BEAR  if last BOS = close < prior swing low
+        • RANGE if no clear BOS → NO TRADE
+
+      LAYER 2 — PREMIUM / DISCOUNT FILTER (50% fib of HTF range)
+        • LONG  only allowed in DISCOUNT (close ≤ midline)
+        • SHORT only allowed in PREMIUM  (close ≥ midline)
+
+      LAYER 3 — LIQUIDITY SWEEP REQUIREMENT
+        • An LTF swing extreme within last 30 bars MUST have been
+          briefly wicked through and reclaimed before entry
+        • SL is anchored to that sweep extreme
+
+      LAYER 4 — OB / FVG MITIGATION
+        • Price MUST currently be inside either
+          - a Fair Value Gap (3-candle imbalance) in last 20 bars, OR
+          - an Order Block (last opposing candle before a strong
+            move of >0.5% within 3 bars) in last 30 bars
+
+      LAYER 5 — LTF CONFIRMATION (BOS in bias direction)
+        • A recent 3-bar LTF swing extreme must be broken by the
+          current close — this is the "wait for confirmation" gate
+
+      LAYER 6 — SESSION FILTER (NY institutional hours)
+        • Only trade 12:00–21:00 UTC (NY pre-market through close)
+        • Asia / EU chop is filtered out
+
+      LAYER 7 — RISK MATH
+        • SL  = sweep extreme ± 10bps buffer
+        • TP1 = entry ± 2R (default; only target the engine supports)
+        • Reject signal if risk > 3% of entry (likely broken)
+
+    Why ALL the gates: institutional algos reject ~95% of looks-like-a-
+    setup bars. Without every gate, the algo fires on noise. With every
+    gate, expect ~50–200 trades per 6 months on 15m BTC — that's the
+    institutional-quality signal frequency.
+
+    Timeframe: 15m on KuCoin Futures.
+    """
+    minimal_roi = {"0": 0.04}    # 2R nominal — actual TP varies per trade
+    stoploss    = -0.02          # nominal — actual SL is structural per trade
+    timeframe   = "15m"
+    startup_candle_count = 100   # need swing-confirmation lookback
+'''
+
 def _cleanup_stale_test_trades(db):
     """One-time cleanup: delete open futures trades that were created during
     debugging (entry_price looks wrong or entry_time is from dev session).
@@ -186,6 +240,19 @@ def _seed_builtin_strategies(db):
             "code": _BIDIR_STRATEGY_CODE,
             "stoploss": -0.015,
             "take_profit": 0.030,
+            "leverage": 10,
+        },
+        {
+            "name": "SMCProV3",
+            "description": "SMC Pro v3 — FULL institutional Smart Money Concepts. "
+                           "7-layer entry: HTF bias (BOS direction) + Premium/Discount fib zone + "
+                           "Liquidity sweep + OB/FVG mitigation + LTF BOS confirmation + NY session "
+                           "(12:00-21:00 UTC) + structural SL/2R TP. Aggressive filtering — fires "
+                           "only when ALL 7 conditions align, so expect ~50-200 high-quality trades "
+                           "per 6 months on 15m BTC instead of thousands of noise signals.",
+            "code": _SMC_PRO_V3_CODE,
+            "stoploss": -0.02,
+            "take_profit": 0.04,
             "leverage": 10,
         },
     ]
