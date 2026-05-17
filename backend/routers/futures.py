@@ -397,6 +397,59 @@ def select_desc_json(result: dict) -> str:
     })
 
 
+@router.post("/backtest/auto-tune")
+def auto_tune_futures_backtest(
+    req: dict,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Run the strategy with a small SL/TP grid and return ranked results.
+
+    Used by the 'Auto-tune SL/TP' button on the futures backtest page.
+    Each grid cell is a real backtest, so this takes longer than a single
+    run (typically 30s-3min for the 4×5 = 20 cell grid). KuCoin data is
+    cached across cells so all runs share ONE candle/funding download.
+
+    Returns the best combo + the full grid for the UI to render as a
+    heatmap, so the user can see WHICH SL/TP combinations were tested
+    and where the cliff is (e.g. 'tight stops always lose, wide TPs
+    are never reached').
+    """
+    from sqlalchemy import or_
+    from backend.models.strategy import Strategy
+    from backend.services.futures_backtester import auto_tune_sltp
+
+    strategy_id      = req.get("strategy_id")
+    pairs            = req.get("pairs", ["BTC/USDT"])
+    timeframe        = req.get("timeframe", "15m")
+    timerange        = req.get("timerange", "20240101-20240401")
+    leverage         = min(LEAD_MAX_LEVERAGE, int(req.get("leverage", 10)))
+    starting_balance = float(req.get("starting_balance", 1000))
+
+    strategy_name = req.get("strategy_name", "SimpleTargetStrategy")
+    generated_code: str | None = None
+    if strategy_id:
+        strategy = db.execute(
+            select(Strategy).where(
+                Strategy.id == strategy_id,
+                or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa
+            )
+        ).scalar_one_or_none()
+        if strategy:
+            strategy_name  = strategy.name
+            generated_code = strategy.generated_code
+
+    return auto_tune_sltp(
+        strategy_name    = strategy_name,
+        pairs            = pairs,
+        timeframe        = timeframe,
+        timerange        = timerange,
+        leverage         = leverage,
+        starting_balance = starting_balance,
+        generated_code   = generated_code,
+    )
+
+
 @router.get("/backtest/history")
 def futures_backtest_history(
     limit: int = 20,
