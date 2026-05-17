@@ -127,13 +127,25 @@ def _build_talib_stub() -> types.ModuleType:
         macd = ef - es
         signal = macd.ewm(span=signalperiod, adjust=False).mean()
         hist = macd - signal
-        return macd, signal, hist
+        # Freqtrade strategies use `ta.MACD(df)["macd"]` (dict-style key
+        # access on the returned DataFrame). Returning a tuple breaks
+        # `macd["macd"]` with TypeError. DataFrame supports both styles.
+        return pd.DataFrame({
+            "macd":       macd,
+            "macdsignal": signal,
+            "macdhist":   hist,
+        })
 
     def BBANDS(close, timeperiod: int = 20, nbdevup: float = 2, nbdevdn: float = 2, matype: int = 0):
         s = _to_series(close)
         mid = s.rolling(timeperiod).mean()
         std = s.rolling(timeperiod).std()
-        return mid + nbdevup * std, mid, mid - nbdevdn * std
+        # Freqtrade uses bb["upperband"], bb["middleband"], bb["lowerband"]
+        return pd.DataFrame({
+            "upperband":  mid + nbdevup * std,
+            "middleband": mid,
+            "lowerband":  mid - nbdevdn * std,
+        })
 
     def ATR(high, low, close, timeperiod: int = 14):
         h, l, c = _to_series(high), _to_series(low), _to_series(close)
@@ -252,12 +264,20 @@ def _safe_builtins(freqtrade_mod) -> dict[str, Any]:
     original_import = _b.__import__
     talib_stub = _build_talib_stub()
     qtpylib_stub = _build_qtpylib_stub()
+    # `talib.abstract` is the most common import in Freqtrade strategies
+    # (e.g. `import talib.abstract as ta`). Without exposing the same stub
+    # under that submodule name, the import fails → user's whole strategy
+    # is rejected and the engine falls back to a name-matched built-in
+    # with stale DB-default SL/TP. Aliasing the submodule to the same
+    # stub object means every `ta.EMA(...)` / `ta.RSI(...)` works.
+    talib_stub.abstract = talib_stub
     safe_modules = {
         "freqtrade":              freqtrade_mod,
         "freqtrade.strategy":     freqtrade_mod.strategy,
         "freqtrade.exchange":     freqtrade_mod.exchange,
         "freqtrade.persistence":  freqtrade_mod.persistence,
         "talib":                  talib_stub,
+        "talib.abstract":         talib_stub,   # import talib.abstract as ta
         "pandas_ta":              talib_stub,   # close enough for most LLM-emitted code
         "qtpylib":                qtpylib_stub,
         "qtpylib.indicators":     qtpylib_stub.indicators,

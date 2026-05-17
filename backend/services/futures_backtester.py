@@ -340,6 +340,33 @@ def run_futures_backtest(
                 data_diagnostics[pair]["fallback_intended"] = is_intended_fallback
                 signal_fn = _guess_strategy(strategy_name)
 
+                # Even when code execution fails, still try to extract the
+                # strategy's intended SL/TP from the source via regex so the
+                # backtest doesn't run with stale DB-default values that
+                # invert the RR ratio. This is a best-effort parse — if it
+                # finds nothing, the slider values stand.
+                import re
+                m_sl = re.search(
+                    r"^\s*stoploss\s*=\s*(-?\d+(?:\.\d+)?)",
+                    generated_code or "", re.MULTILINE,
+                )
+                if m_sl:
+                    parsed_sl = abs(float(m_sl.group(1))) * 100
+                    data_diagnostics[pair]["override_sl_from_class"] = (
+                        f"{parsed_sl}% (slider was {stoploss_pct}%, parsed from source)"
+                    )
+                    stoploss_pct = parsed_sl
+                m_tp = re.search(
+                    r"minimal_roi\s*=\s*\{\s*[\"']0[\"']\s*:\s*(\d+(?:\.\d+)?)",
+                    generated_code or "",
+                )
+                if m_tp:
+                    parsed_tp = float(m_tp.group(1)) * 100
+                    data_diagnostics[pair]["override_tp_from_class"] = (
+                        f"{parsed_tp}% (slider was {take_profit_pct}%, parsed from source)"
+                    )
+                    take_profit_pct = parsed_tp
+
         # ── Concurrent-position state ─────────────────────────────────
         # Every entry signal opens a NEW position alongside any already-
         # open ones (subject to free-margin checks). Each position runs
