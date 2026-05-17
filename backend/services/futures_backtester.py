@@ -549,56 +549,32 @@ def run_futures_backtest(
                      sig_margin, use_signal_sltp)
                 )
 
-        # ── End of bar loop: force-close any leftover open positions ──────
-        # We close at the last bar's close. Without this, positions opened
-        # near the end of the backtest period would never appear in the
-        # trade list and the metrics would silently exclude them.
+        # ── End of bar loop: handle leftover open positions ───────────────
+        # Trades still open when the data window ends NEVER hit their
+        # strategy-defined exit (SL/TP/liquidation), so their P&L is
+        # unrealised — including them in the trade table would mix real
+        # strategy outcomes with arbitrary mark-to-market snapshots and
+        # distort win-rate / drawdown / avg P&L.
+        # Correct behaviour: release the committed margin so balance is
+        # honest, record the count for the diagnostics panel, but DON'T
+        # add them to the trade list or affect realised P&L.
+        trades_still_open_at_end = len(open_positions)
+        unrealised_pnl_at_end    = 0.0
         if open_positions:
-            last_row = df.iloc[-1]
+            last_row   = df.iloc[-1]
             last_close = float(last_row["close"])
             for pos in open_positions:
                 direction   = pos["direction"]
                 entry_price = pos["entry_price"]
                 margin      = pos["margin"]
-                raw_exit_p  = last_close
-                exit_p      = _apply_slippage(raw_exit_p, direction, "exit",
-                                              SLIPPAGE_BPS_FLIP)
+                # Compute (but don't realise) mark-to-market P&L so the user
+                # can see what their open exposure is worth at end of period.
                 if direction == "long":
-                    price_move_pct = (exit_p - entry_price) / entry_price
+                    move_pct = (last_close - entry_price) / entry_price
                 else:
-                    price_move_pct = (entry_price - exit_p) / entry_price
-                pnl_abs = max(margin * price_move_pct * leverage, -margin)
+                    move_pct = (entry_price - last_close) / entry_price
+                unrealised_pnl_at_end += max(margin * move_pct * leverage, -margin)
                 committed_margin -= margin
-                balance += pnl_abs
-                balance = max(balance, 0)
-                pos_value_exit = margin * leverage
-                units = pos_value_exit / max(entry_price, 1e-9)
-                pos["slippage_paid"]  += abs(raw_exit_p - exit_p) * units
-                pos["hyp_commission"] += pos_value_exit * KUCOIN_TAKER_FEE
-                profit_pct = (pnl_abs / margin * 100) if margin > 0 else 0
-                all_trades.append({
-                    "pair":        pair,
-                    "direction":   direction,
-                    "leverage":    leverage,
-                    "open_date":   str(pos["entry_date"]),
-                    "close_date":  str(last_row["date"]),
-                    "entry":       round(float(entry_price), 4),
-                    "open_rate":   round(float(entry_price), 4),
-                    "close_rate":  round(float(exit_p), 4),
-                    "sl_price":    round(float(pos["sl"]), 4),
-                    "tp_price":    round(float(pos["tp"]), 4),
-                    "liq_price":   round(float(pos["liq_price"]), 4),
-                    "margin":      round(float(margin), 4),
-                    "profit_pct":  round(float(profit_pct), 3),
-                    "profit_abs":  round(float(pnl_abs), 4),
-                    "exit_reason": "end_of_data",
-                    "balance":     round(float(balance), 2),
-                    "candles_held": pos["candles_held"],
-                    "funding_paid":      round(float(pos["funding_paid"]),    4),
-                    "slippage_paid":     round(float(pos["slippage_paid"]),   4),
-                    "hyp_kucoin_fee":    round(float(pos["hyp_commission"]),  4),
-                    "exit_slippage_bps": SLIPPAGE_BPS_FLIP,
-                })
             open_positions = []
 
         # End of per-pair bar loop — write per-pair signal-disposition counts
@@ -613,6 +589,8 @@ def run_futures_backtest(
         # Concurrent-positions diagnostics
         data_diagnostics[pair]["signals_skipped_no_margin"] = skipped_no_margin
         data_diagnostics[pair]["position_model"]            = "concurrent"
+        data_diagnostics[pair]["trades_still_open_at_end"]  = trades_still_open_at_end
+        data_diagnostics[pair]["unrealised_pnl_at_end"]     = round(unrealised_pnl_at_end, 4)
 
     # ── Compute aggregate metrics ─────────────────────────────────────────
     if not all_trades:
