@@ -721,6 +721,14 @@ function FuturesBacktestInner() {
                               even after 30-day buffer (excluded — unrealised P&amp;L ${(d.unrealised_pnl_at_end ?? 0).toFixed(2)})
                             </div>
                           )}
+                          {(d.override_sl_from_class || d.override_tp_from_class) && (
+                            <div className="text-sky-300 text-[10px] mt-0.5 border-l-2 border-sky-500/40 pl-2"
+                                 title="Your strategy class declared its own stoploss / minimal_roi. The engine used THOSE instead of the slider values, since the class is the source of truth for its risk parameters. The slider settings are reported in parentheses for reference.">
+                              ⚙ Engine used strategy-declared SL/TP (overrode slider):
+                              {d.override_sl_from_class && <> SL → <b className="text-sky-200">{d.override_sl_from_class}</b></>}
+                              {d.override_tp_from_class && <> · TP → <b className="text-sky-200">{d.override_tp_from_class}</b></>}
+                            </div>
+                          )}
                           {d.resolve_buffer_bars !== undefined && d.resolve_buffer_bars > 0 && (
                             <div className="text-sky-400/70 text-[10px]"
                                  title="Extra candles fetched beyond your end date so positions opened late in the period can hit their SL/TP/liquidation properly. New entries don't fire in this buffer — only existing positions resolve.">

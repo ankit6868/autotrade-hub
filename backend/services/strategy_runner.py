@@ -472,6 +472,27 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
     work.attrs["strategy_methods"] = user_methods
     work.attrs["strategy_class"]   = strategy_cls.__name__
     work.attrs["signal_columns"]   = non_zero_cols
+
+    # Extract the strategy's OWN risk parameters so the backtester can use
+    # them instead of stale DB defaults. The Strategy SQLAlchemy model
+    # carries column defaults (stoploss=-0.03, take_profit=0.015) that
+    # leak through whenever a row was created without explicit values,
+    # silently flipping a 1:3 RR strategy into a 1:0.5 RR run that's
+    # mathematically guaranteed to lose. The class is the source of truth.
+    cls_stoploss = getattr(strategy_cls, "stoploss", None)
+    if isinstance(cls_stoploss, (int, float)) and cls_stoploss != 0:
+        work.attrs["class_stoploss_pct"] = abs(float(cls_stoploss)) * 100
+
+    cls_roi = getattr(strategy_cls, "minimal_roi", None)
+    if isinstance(cls_roi, dict) and cls_roi:
+        # minimal_roi maps minute-since-entry → required profit fraction.
+        # The "0" key is the IMMEDIATE take-profit; use it as the static TP.
+        # (Time-decayed ROIs are a Freqtrade concept our engine doesn't
+        # honour bar-by-bar — picking the t=0 value is the closest
+        # approximation that preserves the strategy author's intent.)
+        roi_at_zero = cls_roi.get("0") or cls_roi.get(0)
+        if isinstance(roi_at_zero, (int, float)) and roi_at_zero > 0:
+            work.attrs["class_take_profit_pct"] = float(roi_at_zero) * 100
     return work
 
 
