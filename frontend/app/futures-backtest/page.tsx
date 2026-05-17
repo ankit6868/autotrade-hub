@@ -764,6 +764,17 @@ function FuturesBacktestInner() {
                               <span className="text-slate-600"> (0→1 transitions — matches TV)</span>
                             </div>
                           )}
+                          {(d.sltp_from_signal !== undefined || d.sltp_from_slider !== undefined) && (
+                            (d.sltp_from_signal ?? 0) + (d.sltp_from_slider ?? 0) > 0 && (
+                              <div title="Per-trade SL/TP source. When the strategy returns structural levels (swing/pivot-based), the engine uses those instead of slider values — the slider becomes a fallback for the rare trades where structural levels look implausible.">
+                                SL/TP source: <b className="text-sky-300">{d.sltp_from_signal ?? 0} from strategy</b>
+                                {' · '}<b className="text-amber-300">{d.sltp_from_slider ?? 0} from slider</b>
+                                {(d.sltp_from_signal ?? 0) > 0 && (d.sltp_from_slider ?? 0) === 0 && (
+                                  <span className="text-sky-400/80"> · slider values are inert for this strategy</span>
+                                )}
+                              </div>
+                            )
+                          )}
                           {(d.trades_opened_long !== undefined || d.trades_opened_short !== undefined) && (
                             <div>
                               Trades opened: <b className="text-emerald-200">{d.trades_opened_long ?? 0} long</b>

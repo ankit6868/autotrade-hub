@@ -405,6 +405,11 @@ def run_futures_backtest(
         skipped_in_trade    = 0
         skipped_cooldown    = 0
         cooldown_bars       = 0   # not used in concurrent mode
+        # How often the engine actually used the strategy's SL/TP vs falling
+        # back to slider values — surfaced in diagnostics so the user can
+        # see at a glance whether the slider is doing anything.
+        sltp_from_signal    = 0
+        sltp_from_slider    = 0
 
         n = len(df)
         for i in range(3, n):
@@ -617,18 +622,27 @@ def run_futures_backtest(
                 else:
                     trades_opened_short += 1
 
-                # Strategy-defined SL/TP only applies when the strategy
-                # explicitly returns structural levels AND the caller hasn't
-                # asked for the slider values. The `force_slider_sltp` flag
-                # is set by auto-tune so the SL/TP grid actually tests
-                # different SL/TP combos — without it, SMCStrategyTV would
-                # ignore the grid and produce identical results for every cell.
-                strategy_owns_sltp = (
-                    strategy_name in ("SMCStrategyTV",) and not force_slider_sltp
-                )
-                if strategy_owns_sltp:
-                    sig_sl, sig_tp = sl_raw, tp_raw
-                else:
+                # Every built-in signal function returns its OWN (entry, sl,
+                # tp, dir). Those values are the strategy's design intent —
+                # MissCandle ports use prev-candle high/low, SMC uses swing
+                # pivots + 2R, MACD/RSI use fixed-% targets matched to the
+                # signal's expected hold time. The previous behaviour (only
+                # SMCStrategyTV was whitelisted) silently discarded the
+                # SL/TP from every other strategy and forced slider values,
+                # which is why a real-SMC backtest showed every trade
+                # exiting at exactly slider_sl × leverage (e.g. -15.49%) —
+                # totally inconsistent with what an SMC strategy actually does.
+                #
+                # New default: honour whatever the signal function returned,
+                # IF the values look plausible (positive risk, capped at 25%
+                # so a buggy signal can't blow up the run). The slider only
+                # wins when:
+                #   • the strategy is user-authored (no signal function — we
+                #     don't reach this code path for those; signal_fn comes
+                #     from make_signal_fn_from_df which already builds SL/TP
+                #     from sliders), or
+                #   • force_slider_sltp=True (auto-tune grid sweep).
+                if force_slider_sltp:
                     sl_dist = sig_entry * stoploss_pct / 100
                     tp_dist = sig_entry * take_profit_pct / 100
                     if sig_dir == "long":
@@ -637,10 +651,35 @@ def run_futures_backtest(
                     else:
                         sig_sl = sig_entry + sl_dist
                         sig_tp = sig_entry - tp_dist
+                    use_signal_sltp = False
+                else:
+                    # Sanity-cap the strategy's SL distance: anything wider
+                    # than 25% of entry price is almost certainly a bug
+                    # (would imply 250% leveraged loss at 10x — instant
+                    # liquidation) and we fall back to slider values rather
+                    # than open the trade with garbage levels.
+                    risk_dist = abs(sig_entry - sl_raw)
+                    if risk_dist > 0 and risk_dist <= sig_entry * 0.25:
+                        sig_sl, sig_tp = sl_raw, tp_raw
+                        use_signal_sltp = True
+                    else:
+                        sl_dist = sig_entry * stoploss_pct / 100
+                        tp_dist = sig_entry * take_profit_pct / 100
+                        if sig_dir == "long":
+                            sig_sl = sig_entry - sl_dist
+                            sig_tp = sig_entry + tp_dist
+                        else:
+                            sig_sl = sig_entry + sl_dist
+                            sig_tp = sig_entry - tp_dist
+                        use_signal_sltp = False
+
+                if use_signal_sltp:
+                    sltp_from_signal += 1
+                else:
+                    sltp_from_slider += 1
 
                 sig_liq = _calc_liquidation(sig_entry, sig_dir, leverage,
                                             sig_margin * leverage)
-                use_signal_sltp = strategy_owns_sltp
                 pending_entries.append(
                     (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq,
                      sig_margin, use_signal_sltp)
@@ -688,6 +727,12 @@ def run_futures_backtest(
         data_diagnostics[pair]["position_model"]            = "concurrent"
         data_diagnostics[pair]["trades_still_open_at_end"]  = trades_still_open_at_end
         data_diagnostics[pair]["unrealised_pnl_at_end"]     = round(unrealised_pnl_at_end, 4)
+        # How the engine decided SL/TP per trade. When sltp_from_signal
+        # dominates, the slider is functionally inert for this strategy —
+        # the UI uses this to explain "your slider is for reference; this
+        # strategy defines its own SL/TP per signal".
+        data_diagnostics[pair]["sltp_from_signal"]          = sltp_from_signal
+        data_diagnostics[pair]["sltp_from_slider"]          = sltp_from_slider
 
     # ── Compute aggregate metrics ─────────────────────────────────────────
     if not all_trades:
