@@ -788,11 +788,13 @@ function FuturesBacktestInner() {
                     <th className="text-left py-3 px-2">Pair</th>
                     <th className="text-right py-3 px-2">Dir</th>
                     <th className="text-right py-3 px-2">Lev</th>
+                    <th className="text-right py-3 px-2" title="Margin used as collateral for this trade (= your money at risk)">Margin $</th>
+                    <th className="text-right py-3 px-2" title="Notional position size = margin × leverage (= what KuCoin trades on your behalf)">Position $</th>
                     <th className="text-right py-3 px-2">Entry</th>
                     <th className="text-right py-3 px-2">Exit</th>
                     <th className="text-right py-3 px-2">Liq.</th>
                     <th className="text-right py-3 px-2">Profit %</th>
-                    <th className="text-right py-3 px-2">Profit USDT</th>
+                    <th className="text-right py-3 px-2">P&amp;L USDT</th>
                     <th className="text-right py-3 px-2">Balance</th>
                     <th className="text-left py-3 px-2">Open Date</th>
                     <th className="text-left py-3 px-2">Exit Reason</th>
@@ -809,6 +811,14 @@ function FuturesBacktestInner() {
                         t.direction === 'long' ? 'text-emerald-400' : 'text-red-400'
                       }`}>{t.direction?.toUpperCase()}</td>
                       <td className="py-2 px-2 text-right text-blue-400 text-xs font-bold">{t.leverage}x</td>
+                      <td className="py-2 px-2 text-right font-mono text-xs text-amber-300"
+                          title="Your margin (real $ at risk on this trade)">
+                        ${Number(t.margin ?? 0).toFixed(2)}
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono text-xs text-slate-400"
+                          title={`Notional = margin × leverage = $${Number(t.margin ?? 0).toFixed(2)} × ${t.leverage}x`}>
+                        ${(Number(t.margin ?? 0) * Number(t.leverage ?? 1)).toFixed(2)}
+                      </td>
                       <td className="py-2 px-2 text-right font-mono text-xs">{Number(t.open_rate).toFixed(2)}</td>
                       <td className="py-2 px-2 text-right font-mono text-xs">{Number(t.close_rate).toFixed(2)}</td>
                       <td className="py-2 px-2 text-right font-mono text-xs text-orange-400">{Number(t.liq_price).toFixed(2)}</td>
