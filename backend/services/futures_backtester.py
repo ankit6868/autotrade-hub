@@ -25,11 +25,41 @@ from backend.services.native_backtester import (
     _guess_strategy,
 )
 
-# Fallback funding fee per 8-hour period if KuCoin's history endpoint
-# returns no data for the range (e.g. very old contracts). The real
-# applied rate comes from /api/v1/contract/funding-rates per settlement.
+# ── Production-grade market-realism constants ─────────────────────────────
+#
+# These constants represent what KuCoin would CHARGE in real trading. They
+# are tracked per-trade for transparency but DO NOT reduce the simulated
+# P&L — the app is not a broker and shouldn't claim to model KuCoin's exact
+# fee schedule as a hard deduction. Instead we surface them as
+# informational rows ("KuCoin would have charged $X in fees") in the UI.
+#
+# Slippage IS applied to the simulated balance because it represents the
+# real fill quality you'd get on stops/liquidations — not a fee the
+# exchange collects.
+
+# KuCoin futures fee tiers (public schedule, retail VIP0):
+KUCOIN_TAKER_FEE = 0.0006        # 0.06% — applies to market orders, SL, liquidation
+KUCOIN_MAKER_FEE = 0.0002        # 0.02% — applies to limit fills
+
+# Slippage in basis points (1bp = 0.01%). Applied AGAINST the position on
+# exits. Stops typically fill worse than the trigger price; take-profits
+# usually fill at or near the limit (favourable book) so we apply less.
+SLIPPAGE_BPS_STOP  = 5    # 5 bps = 0.05% adverse slippage on stop_loss
+SLIPPAGE_BPS_TP    = 2    # 2 bps = 0.02% slippage on take_profit
+SLIPPAGE_BPS_LIQ   = 15   # 15 bps on liquidation — books are typically thin
+SLIPPAGE_BPS_ENTRY = 2    # 2 bps on entry (market fill)
+SLIPPAGE_BPS_FLIP  = 5    # 5 bps when force-closing on new signal (market exit)
+
+# Fallback funding fee per settlement if KuCoin's history endpoint
+# returns no data for the range. Real applied rate comes from
+# /api/v1/contract/funding-rates per settlement.
 FUNDING_RATE_FALLBACK = 0.0003   # 0.03%
-CANDLES_PER_8H = {"1m": 480, "5m": 96, "15m": 32, "30m": 16, "1h": 8, "4h": 2}
+
+# KuCoin funding settlements happen at fixed UTC clock times, not at
+# arbitrary 8h intervals from trade open. We check these for each open
+# position bar-by-bar and apply funding when a settlement falls inside
+# the bar's window.
+FUNDING_SETTLEMENT_HOURS_UTC = (0, 8, 16)   # 00:00, 08:00, 16:00 UTC
 
 
 def _funding_rate_for_ts(funding_sorted: list[tuple[int, float]],
@@ -51,16 +81,78 @@ def _funding_rate_for_ts(funding_sorted: list[tuple[int, float]],
     return funding_sorted[idx][1]
 
 
-def _calc_liquidation(entry: float, direction: str, leverage: int) -> float:
-    """Return the liquidation price (simplified isolated margin)."""
-    mm = 0.005   # 0.5% maintenance margin
+def _funding_settlements_in_window(window_start: int, window_end: int) -> list[int]:
+    """Return UTC timestamps of any funding settlements occurring strictly
+    inside (window_start, window_end] — used to charge funding on the bars
+    that actually contain a 00/08/16 UTC settlement, instead of every Nth
+    bar from trade open (which is what the legacy code did and which can
+    mis-charge by up to 8 hours depending on entry time).
+    """
+    if window_end <= window_start:
+        return []
+    # Walk forward in 1h chunks from the first hour after window_start
+    # until we pass window_end. 8 candidate hours per day → cheap.
+    out = []
+    start_dt = datetime.utcfromtimestamp(window_start)
+    # Round up to next hour
+    next_hour_ts = (window_start // 3600 + 1) * 3600
+    cur = next_hour_ts
+    while cur <= window_end:
+        hour = datetime.utcfromtimestamp(cur).hour
+        if hour in FUNDING_SETTLEMENT_HOURS_UTC:
+            out.append(cur)
+        cur += 3600
+    return out
+
+
+# Maintenance-margin schedule for liquidation. KuCoin uses a tiered
+# system where larger positions have higher maintenance margin. For the
+# starting balances this app supports ($100–$10k paper), the smallest
+# tier (0.5%) is correct. Documented here so a future bump to position-
+# sizing tiers is one place to change.
+def _maintenance_margin_for_notional(notional_usdt: float) -> float:
+    """Return the maintenance margin fraction for a given notional size."""
+    # KuCoin BTC perpetual tier schedule (truncated; matches retail sizes):
+    if   notional_usdt < 50_000:    return 0.005    # 0.5%
+    elif notional_usdt < 250_000:   return 0.01     # 1%
+    elif notional_usdt < 1_000_000: return 0.025    # 2.5%
+    else:                           return 0.05     # 5%
+
+
+def _calc_liquidation(entry: float, direction: str, leverage: int,
+                      notional_usdt: float = 0.0) -> float:
+    """Return the liquidation price using tiered maintenance margin."""
+    mm = _maintenance_margin_for_notional(notional_usdt)
     if direction == "long":
         return round(entry * (1 - 1.0 / leverage + mm), 6)
     else:
         return round(entry * (1 + 1.0 / leverage - mm), 6)
 
 
-COMMISSION_RATE = 0.0   # No commission (user preference — pure P&L accuracy)
+def _apply_slippage(price: float, direction: str, side: str, bps: float) -> float:
+    """Apply slippage to an exit price.
+
+    Slippage is ADVERSE — it makes the trade worse than the trigger level.
+    For a long exit: slippage moves the fill DOWN (sells lower).
+    For a short exit: slippage moves the fill UP (buys higher).
+    """
+    if bps <= 0:
+        return price
+    factor = bps / 10_000.0
+    if side == "exit":
+        if direction == "long":
+            return price * (1 - factor)   # sell lower
+        else:
+            return price * (1 + factor)   # buy higher
+    else:   # entry
+        if direction == "long":
+            return price * (1 + factor)   # buy higher
+        else:
+            return price * (1 - factor)   # sell lower
+
+
+COMMISSION_RATE = 0.0   # Engine doesn't deduct commission; we DISPLAY
+                         # KuCoin's fees separately as a transparency row.
 
 
 def run_futures_backtest(
@@ -262,8 +354,10 @@ def run_futures_backtest(
             if pending_entry is not None and not in_trade:
                 direction, entry_price, sl, tp, liq_price, margin, use_signal_sltp = pending_entry
                 pending_entry = None
-                # Use actual open price as fill (matches TradingView's next-bar-open fill)
-                actual_fill = bar_o
+                # Apply realistic ENTRY slippage to bar-open fill price.
+                # Real market orders pay a bit through the spread + book depth.
+                actual_fill = _apply_slippage(bar_o, direction, "entry",
+                                              SLIPPAGE_BPS_ENTRY)
 
                 if use_signal_sltp:
                     # SMCStrategyTV: keep structural SL/TP from the signal as-is.
@@ -283,98 +377,131 @@ def run_futures_backtest(
                         sl = entry_price + sl_dist
                         tp = entry_price - tp_dist
 
-                liq_price = _calc_liquidation(entry_price, direction, leverage)
-                entry_date   = row["date"]
-                candles_held = 0
-                in_trade     = True
-                # Entry commission: 0.05% of position value
                 pos_value     = margin * leverage
-                entry_commission = pos_value * COMMISSION_RATE
-                balance      -= entry_commission
+                liq_price     = _calc_liquidation(entry_price, direction, leverage, pos_value)
+                entry_date    = row["date"]
+                entry_bar_ts  = int(row["date"].timestamp())
+                candles_held  = 0
+                in_trade      = True
+                # KuCoin would charge taker fee on entry. We TRACK it but
+                # don't deduct from balance — the UI shows "KuCoin would have
+                # charged $X total in fees" so the user understands the real
+                # cost of running this strategy live.
+                hyp_entry_fee = pos_value * KUCOIN_TAKER_FEE
+                # Initialise per-trade accumulators.
+                trade_funding_paid       = 0.0
+                trade_slippage_paid      = abs(bar_o - entry_price) * (pos_value / max(bar_o, 1e-9))
+                trade_hyp_commission     = hyp_entry_fee
 
             # ── B. Manage open position ───────────────────────────────────
             if in_trade:
                 candles_held += 1
 
-                # Funding fee every 8h (on position value = margin × leverage).
-                # Use the REAL historical funding rate KuCoin would have
-                # applied at this bar's timestamp — not a constant. Falls
-                # back to 0.03% only if KuCoin's history endpoint returned
-                # nothing for this range.
+                # Funding fee: charge ONLY on bars whose time window contains
+                # an actual KuCoin settlement (00/08/16 UTC) — not every Nth
+                # bar from entry. This means a position opened at 07:55 UTC
+                # pays funding on its FIRST bar (since 08:00 UTC settlement
+                # falls inside), exactly as it would on the real exchange.
                 funding_cost = 0.0
-                if candles_held % candles_per_8h == 0:
-                    pos_value     = margin * leverage
-                    bar_ts_secs   = int(row["date"].timestamp())
-                    applied_rate  = _funding_rate_for_ts(funding_sorted, bar_ts_secs)
-                    # Funding charged on longs when rate>0, credited when rate<0
-                    # (and vice-versa for shorts). Backtest from holder side:
-                    signed_rate   = applied_rate if direction == "long" else -applied_rate
-                    funding_cost  = pos_value * signed_rate
+                bar_ts_secs  = int(row["date"].timestamp())
+                bar_start_ts = bar_ts_secs - tf_secs_per_bar
+                # First bar: window starts at the actual entry timestamp,
+                # not the bar's start (otherwise we'd over-charge on bars
+                # the position wasn't open for the whole interval).
+                window_lo = max(bar_start_ts, entry_bar_ts) if candles_held == 1 else bar_start_ts
+                settlements = _funding_settlements_in_window(window_lo, bar_ts_secs)
+                if settlements:
+                    pos_value    = margin * leverage
+                    for settle_ts in settlements:
+                        applied_rate = _funding_rate_for_ts(funding_sorted, settle_ts)
+                        signed_rate  = applied_rate if direction == "long" else -applied_rate
+                        funding_cost += pos_value * signed_rate
+                    trade_funding_paid += funding_cost
 
-                # Check liquidation first (instant full loss)
+                # Check liquidation first (instant full loss).
+                # Liquidation fills are particularly bad — book is thin and
+                # the engine runs through stop orders. Apply LIQ slippage.
                 liquidated = False
+                exit_slippage_bps = 0
                 if direction == "long" and lo <= liq_price:
-                    exit_p     = liq_price
+                    raw_exit_p = liq_price
+                    exit_p     = _apply_slippage(raw_exit_p, direction, "exit",
+                                                 SLIPPAGE_BPS_LIQ)
                     pnl_abs    = -margin
                     liquidated = True
+                    exit_slippage_bps = SLIPPAGE_BPS_LIQ
                 elif direction == "short" and hi >= liq_price:
-                    exit_p     = liq_price
+                    raw_exit_p = liq_price
+                    exit_p     = _apply_slippage(raw_exit_p, direction, "exit",
+                                                 SLIPPAGE_BPS_LIQ)
                     pnl_abs    = -margin
                     liquidated = True
+                    exit_slippage_bps = SLIPPAGE_BPS_LIQ
 
                 if not liquidated:
                     # SL/TP resolution — TradingView logic:
                     # If both SL and TP are hit in the same bar, check bar open
                     # to determine which was crossed first.
-                    exited   = False
-                    exit_rsn = ""
+                    exited     = False
+                    exit_rsn   = ""
+                    raw_exit_p = None
                     if direction == "long":
                         sl_hit = lo <= sl
                         tp_hit = hi >= tp
                         if sl_hit and tp_hit:
-                            # Use bar open to decide order
                             if abs(bar_o - tp) < abs(bar_o - sl):
-                                exit_p = tp; exit_rsn = "take_profit"  # TP closer to open → TP first
+                                raw_exit_p = tp; exit_rsn = "take_profit"
+                                exit_slippage_bps = SLIPPAGE_BPS_TP
                             else:
-                                exit_p = sl; exit_rsn = "stop_loss"
+                                raw_exit_p = sl; exit_rsn = "stop_loss"
+                                exit_slippage_bps = SLIPPAGE_BPS_STOP
                             exited = True
                         elif sl_hit:
-                            exit_p = sl; exit_rsn = "stop_loss"; exited = True
+                            raw_exit_p = sl; exit_rsn = "stop_loss"
+                            exit_slippage_bps = SLIPPAGE_BPS_STOP
+                            exited = True
                         elif tp_hit:
-                            exit_p = tp; exit_rsn = "take_profit"; exited = True
+                            raw_exit_p = tp; exit_rsn = "take_profit"
+                            exit_slippage_bps = SLIPPAGE_BPS_TP
+                            exited = True
                     else:  # short
                         sl_hit = hi >= sl
                         tp_hit = lo <= tp
                         if sl_hit and tp_hit:
                             if abs(bar_o - tp) < abs(bar_o - sl):
-                                exit_p = tp; exit_rsn = "take_profit"
+                                raw_exit_p = tp; exit_rsn = "take_profit"
+                                exit_slippage_bps = SLIPPAGE_BPS_TP
                             else:
-                                exit_p = sl; exit_rsn = "stop_loss"
+                                raw_exit_p = sl; exit_rsn = "stop_loss"
+                                exit_slippage_bps = SLIPPAGE_BPS_STOP
                             exited = True
                         elif sl_hit:
-                            exit_p = sl; exit_rsn = "stop_loss"; exited = True
+                            raw_exit_p = sl; exit_rsn = "stop_loss"
+                            exit_slippage_bps = SLIPPAGE_BPS_STOP
+                            exited = True
                         elif tp_hit:
-                            exit_p = tp; exit_rsn = "take_profit"; exited = True
+                            raw_exit_p = tp; exit_rsn = "take_profit"
+                            exit_slippage_bps = SLIPPAGE_BPS_TP
+                            exited = True
 
                     if not exited:
-                        # Did the strategy emit a NEW entry signal this bar?
-                        # If so we close the current trade at this bar's close
-                        # (TradingView-style "new signal flips position") so
-                        # every signal edge actually results in a trade.
-                        # Without this, signals that fire during an open
-                        # position get silently dropped by the `continue`
-                        # below — which is exactly what was causing
-                        # "26 long edges → only 3 long trades".
+                        # New entry signal this bar → close at this bar's
+                        # close (market) and let section E queue the new entry.
                         peek = signal_fn(df, i) if use_user_strategy else None
                         if peek is not None:
-                            exit_p   = float(row["close"])
-                            exit_rsn = "new_signal"
-                            exited   = True
+                            raw_exit_p = float(row["close"])
+                            exit_rsn   = "new_signal"
+                            exit_slippage_bps = SLIPPAGE_BPS_FLIP
+                            exited     = True
                         else:
                             balance -= funding_cost
                             continue
 
-                    # Compute leveraged P&L
+                    # Apply exit slippage to the trigger price
+                    exit_p = _apply_slippage(raw_exit_p, direction, "exit",
+                                             exit_slippage_bps)
+
+                    # Compute leveraged P&L using the slipped exit price.
                     if direction == "long":
                         price_move_pct = (exit_p - entry_price) / entry_price
                     else:
@@ -382,9 +509,31 @@ def run_futures_backtest(
 
                     leveraged_pnl_pct = price_move_pct * leverage
                     pos_value         = margin * leverage
-                    exit_commission   = pos_value * COMMISSION_RATE
-                    pnl_abs = margin * leveraged_pnl_pct - funding_cost - exit_commission
+                    # Engine doesn't deduct commission (user choice) — we
+                    # only track what KuCoin WOULD have charged so we can
+                    # display it as a transparency row.
+                    pnl_abs = margin * leveraged_pnl_pct - funding_cost
                     pnl_abs = max(pnl_abs, -margin)   # cap loss at full margin
+
+                # Per-trade tracking: slippage (in USDT) = |raw - slipped| × position size in units.
+                # raw_exit_p is None only on the very-rare exit-on-first-bar
+                # case; in that case it's the liquidation branch and we
+                # already set it above (raw_exit_p == liq_price).
+                if not liquidated and raw_exit_p is not None:
+                    units = pos_value / max(entry_price, 1e-9)
+                    trade_slippage_paid += abs(raw_exit_p - exit_p) * units
+                elif liquidated:
+                    units = (margin * leverage) / max(entry_price, 1e-9)
+                    trade_slippage_paid += abs(liq_price - exit_p) * units
+
+                # Hypothetical KuCoin EXIT commission (taker on SL / liq /
+                # new_signal market close; maker on TP if you assume the TP
+                # is a resting limit order — common case for retail).
+                pos_value_exit = (margin * leverage)
+                if exit_rsn == "take_profit":
+                    trade_hyp_commission += pos_value_exit * KUCOIN_MAKER_FEE
+                else:
+                    trade_hyp_commission += pos_value_exit * KUCOIN_TAKER_FEE
 
                 balance += pnl_abs
                 balance  = max(balance, 0)
@@ -409,6 +558,11 @@ def run_futures_backtest(
                     "exit_reason": "liquidated" if liquidated else exit_rsn,
                     "balance":     round(float(balance), 2),
                     "candles_held": candles_held,
+                    # Production-grade transparency fields:
+                    "funding_paid":     round(float(trade_funding_paid), 4),
+                    "slippage_paid":    round(float(trade_slippage_paid), 4),
+                    "hyp_kucoin_fee":   round(float(trade_hyp_commission), 4),
+                    "exit_slippage_bps": int(exit_slippage_bps),
                 })
                 in_trade = False
                 cooldown_remain = cooldown_bars   # start cooldown after each trade
@@ -455,8 +609,9 @@ def run_futures_backtest(
                             sig_sl = sig_entry + sl_dist
                             sig_tp = sig_entry - tp_dist
 
-                    sig_liq = _calc_liquidation(sig_entry, sig_dir, leverage)
                     sig_margin = balance * risk_per_trade
+                    sig_liq    = _calc_liquidation(sig_entry, sig_dir, leverage,
+                                                   sig_margin * leverage)
                     use_signal_sltp = strategy_name in ("SMCStrategyTV",)
                     # Queue entry for execution at NEXT bar's open
                     pending_entry = (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq, sig_margin, use_signal_sltp)
@@ -520,6 +675,14 @@ def run_futures_backtest(
 
     equity_curve = [{"date": t["close_date"], "balance": t["balance"]} for t in all_trades]
 
+    # Aggregate cost transparency rows. funding & slippage ARE applied to
+    # balance. hyp_kucoin_fee is informational only — what the user would
+    # pay KuCoin if they ran this strategy live, NOT a deduction from the
+    # simulated P&L.
+    total_funding         = sum(t.get("funding_paid", 0)      for t in all_trades)
+    total_slippage        = sum(t.get("slippage_paid", 0)     for t in all_trades)
+    total_hyp_kucoin_fees = sum(t.get("hyp_kucoin_fee", 0)    for t in all_trades)
+
     return {
         "metrics": {
             "total_trades":     len(all_trades),
@@ -536,6 +699,13 @@ def run_futures_backtest(
             "avg_leverage_pnl": round(avg_pnl, 3),
             "leverage":         leverage,
             "starting_balance": starting_balance,
+            # Production-grade cost-transparency rows. The first two reduce
+            # P&L; the third does not (informational only).
+            "total_funding_paid":   round(total_funding, 4),
+            "total_slippage_paid":  round(total_slippage, 4),
+            "total_hyp_kucoin_fees": round(total_hyp_kucoin_fees, 4),
+            "kucoin_taker_fee_pct": KUCOIN_TAKER_FEE * 100,
+            "kucoin_maker_fee_pct": KUCOIN_MAKER_FEE * 100,
         },
         "trades":              all_trades,
         "equity_curve":        equity_curve,
