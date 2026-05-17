@@ -498,10 +498,26 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
     # carries column defaults (stoploss=-0.03, take_profit=0.015) that
     # leak through whenever a row was created without explicit values,
     # silently flipping a 1:3 RR strategy into a 1:0.5 RR run that's
-    # mathematically guaranteed to lose. The class is the source of truth.
+    # mathematically guaranteed to lose. The class is the source of truth
+    # — but only when its values are SANE. Some strategies use
+    # placeholder values like stoploss=-0.99 (a Freqtrade idiom for
+    # "no engine-level stop, use custom_stoploss") or minimal_roi={"0": 100}
+    # (a placeholder for "ROI handled by custom_exit"). Taking those
+    # literally would mean liquidating every trade on the first bar or
+    # never taking profit. Sanity-cap: only honour declared values that
+    # are inside a realistic retail-trading band.
+    SANE_SL_MIN, SANE_SL_MAX = 0.001, 0.25   # 0.1% to 25%
+    SANE_TP_MIN, SANE_TP_MAX = 0.001, 0.50   # 0.1% to 50%
+
     cls_stoploss = getattr(strategy_cls, "stoploss", None)
     if isinstance(cls_stoploss, (int, float)) and cls_stoploss != 0:
-        work.attrs["class_stoploss_pct"] = abs(float(cls_stoploss)) * 100
+        sl_abs = abs(float(cls_stoploss))
+        if SANE_SL_MIN <= sl_abs <= SANE_SL_MAX:
+            work.attrs["class_stoploss_pct"] = sl_abs * 100
+        else:
+            work.attrs["class_stoploss_ignored"] = (
+                f"{sl_abs*100:.1f}% — outside sane range [{SANE_SL_MIN*100}%–{SANE_SL_MAX*100}%]"
+            )
 
     cls_roi = getattr(strategy_cls, "minimal_roi", None)
     if isinstance(cls_roi, dict) and cls_roi:
@@ -512,7 +528,13 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
         # approximation that preserves the strategy author's intent.)
         roi_at_zero = cls_roi.get("0") or cls_roi.get(0)
         if isinstance(roi_at_zero, (int, float)) and roi_at_zero > 0:
-            work.attrs["class_take_profit_pct"] = float(roi_at_zero) * 100
+            tp_abs = float(roi_at_zero)
+            if SANE_TP_MIN <= tp_abs <= SANE_TP_MAX:
+                work.attrs["class_take_profit_pct"] = tp_abs * 100
+            else:
+                work.attrs["class_take_profit_ignored"] = (
+                    f"{tp_abs*100:.1f}% — outside sane range [{SANE_TP_MIN*100}%–{SANE_TP_MAX*100}%]"
+                )
     return work
 
 
