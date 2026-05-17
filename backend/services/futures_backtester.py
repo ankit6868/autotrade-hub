@@ -206,7 +206,6 @@ def run_futures_backtest(
         signal_fn = _guess_strategy(strategy_name)
     all_trades: list[dict] = []
     balance = starting_balance
-    candles_per_8h = CANDLES_PER_8H.get(timeframe, 32)
     # Sanity-check tallies surfaced in the response so the user can see if
     # the kline range was incomplete (KuCoin sometimes has gaps on older
     # data) and the funding history loaded as expected.
