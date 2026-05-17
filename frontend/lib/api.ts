@@ -246,6 +246,11 @@ export const api = {
       request<any>(`/api/strategy/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     delete: (id: number) => request<any>(`/api/strategy/${id}`, { method: 'DELETE' }),
     dedupe: () => request<any>('/api/strategy/dedupe', { method: 'POST' }),
+    // Re-run the strategy's stored natural-language text through the LLM
+    // with the latest strict prompt — converts a config-only stub into a
+    // complete IStrategy class with populate_* methods.
+    regenerate: (id: number) =>
+      request<any>(`/api/strategy/${id}/regenerate`, { method: 'POST', body: JSON.stringify({}) }),
   },
 
   backtest: {

@@ -389,6 +389,95 @@ def get_strategy(
     }
 
 
+@router.post("/{strategy_id}/regenerate")
+async def regenerate_strategy(
+    strategy_id: int,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Re-run the strategy's ORIGINAL natural-language text through the
+    (now stricter) LLM prompt and replace the stored generated_code with
+    a complete IStrategy class.
+
+    This is the one-click upgrade path for strategies that were stored
+    as config-only stubs by the older lax prompt. After regen the
+    backtester's strategy_runner will exec the user's code instead of
+    falling back to a name-matched built-in.
+    """
+    result = db.execute(
+        select(Strategy).where(
+            Strategy.id == strategy_id,
+            or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa: E712
+        )
+    )
+    strategy = result.scalar_one_or_none()
+    if not strategy:
+        return {"error": "Strategy not found"}
+
+    source_text = (strategy.original_text or strategy.description or "").strip()
+    if not source_text:
+        return {
+            "error": (
+                "This strategy has no original natural-language text saved, "
+                "so it can't be regenerated automatically. Open the Strategy "
+                "Editor and re-upload the description, or paste a new "
+                "IStrategy class directly."
+            ),
+        }
+
+    try:
+        api_key = _get_openrouter_key(db, user_id)
+    except ValueError as e:
+        return {"error": str(e)}
+
+    use_model = _get_preferred_model(db, user_id)
+    try:
+        from backend.services.strategy_parser import parse_with_retry
+        result_p = await parse_with_retry(source_text, api_key, use_model)
+    except Exception as e:
+        return {"error": f"LLM regeneration failed: {e}"}
+
+    new_code = result_p.get("code") or ""
+    if not new_code:
+        return {"error": "LLM returned empty code"}
+
+    # Carry forward strategy params from the new code (stoploss / take_profit /
+    # timeframe / leverage) so the editor + backtest auto-fill stays in sync.
+    import re as _re
+    sl_match  = _re.search(r'stoploss\s*=\s*(-?\d+\.?\d*)', new_code)
+    roi_match = _re.search(r'minimal_roi\s*=\s*\{[^}]*["\']0["\']\s*:\s*(\d+\.?\d*)', new_code)
+    tf_match  = _re.search(r'timeframe\s*=\s*["\'](\w+)["\']', new_code)
+
+    if sl_match:
+        strategy.stoploss    = float(sl_match.group(1))
+    if roi_match:
+        strategy.take_profit = float(roi_match.group(1))
+    if tf_match:
+        strategy.timeframe   = tf_match.group(1)
+    strategy.generated_code  = new_code
+    strategy.model_used      = result_p.get("model_used")
+    db.commit()
+
+    # Persist file mirror (used by Freqtrade subprocess fallback on local dev)
+    user_dir = USER_STRATEGIES_DIR / user_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    with open(user_dir / f"strategy_{strategy_id}.py", "w") as f:
+        f.write(new_code)
+
+    return {
+        "id":         strategy_id,
+        "code":       new_code,
+        "model_used": result_p.get("model_used"),
+        "ai_validation": {
+            "passed":  result_p.get("validation_passed", True),
+            "missing": result_p.get("validation_missing", []),
+        },
+        "stoploss":    strategy.stoploss,
+        "take_profit": strategy.take_profit,
+        "timeframe":   strategy.timeframe,
+    }
+
+
 @router.put("/{strategy_id}")
 def update_strategy(
     strategy_id: int,

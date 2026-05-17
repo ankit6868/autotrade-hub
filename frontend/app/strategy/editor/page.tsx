@@ -22,6 +22,7 @@ function EditorContent() {
   const [pairs, setPairs] = useState('BTC/USDT');
   const [saving, setSaving] = useState(false);
   const [validating, setValidating] = useState(false);
+  const [regenerating, setRegenerating] = useState(false);
   const [validation, setValidation] = useState<Record<string, unknown> | null>(null);
   const [aiPrompt, setAiPrompt] = useState('');
   const [aiLoading, setAiLoading] = useState(false);
@@ -82,6 +83,45 @@ function EditorContent() {
       alert(`Error: ${e}`);
     }
     setSaving(false);
+  }
+
+  // Re-run the strategy's original natural-language description through
+  // the LLM using the current (stricter) prompt + auto-repair logic.
+  // Replaces a config-only stub with a complete IStrategy that the
+  // backtester can actually execute.
+  async function handleRegenerate() {
+    if (!selectedId) return;
+    if (!confirm(
+      'Regenerate this strategy from its original description?\n\n' +
+      'This will replace the current code with a fresh AI-generated ' +
+      'IStrategy class. Use this for older strategies stored as ' +
+      'config-only stubs.'
+    )) return;
+    setRegenerating(true);
+    try {
+      const r = await api.strategy.regenerate(selectedId);
+      if (r?.error) {
+        alert(`Regenerate failed: ${r.error}`);
+      } else {
+        setCode(String(r.code || ''));
+        if (r.stoploss    !== undefined) setStoploss(Math.abs(Number(r.stoploss) * 100));
+        if (r.take_profit !== undefined) setTakeProfit(Number(r.take_profit) * 100);
+        if (r.timeframe)                 setTimeframe(String(r.timeframe));
+        const v = r.ai_validation || {};
+        if (v.passed === false && Array.isArray(v.missing) && v.missing.length > 0) {
+          alert(
+            'Regenerated, but the new code is still missing: ' +
+            v.missing.join(', ') +
+            '. Try again, or click Save then edit the code manually.'
+          );
+        } else {
+          alert(`Strategy regenerated using ${r.model_used || 'AI'}!`);
+        }
+      }
+    } catch (e) {
+      alert(`Regenerate error: ${e}`);
+    }
+    setRegenerating(false);
   }
 
   async function handleValidate() {
@@ -280,6 +320,14 @@ function EditorContent() {
         <div className="space-y-2">
           <button onClick={handleValidate} disabled={validating} className="btn-secondary w-full">
             {validating ? 'Validating...' : 'Validate'}
+          </button>
+          <button
+            onClick={handleRegenerate}
+            disabled={regenerating || !selectedId}
+            className="w-full px-4 py-2.5 rounded-lg text-sm font-medium bg-amber-500/15 text-amber-200 border border-amber-500/30 hover:bg-amber-500/25 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            title="Re-runs the original natural-language description through the AI with the current strict prompt — upgrades older stub strategies to complete IStrategy classes."
+          >
+            {regenerating ? 'Regenerating from description…' : '↻ Regenerate with AI (fix stub strategies)'}
           </button>
           <button onClick={handleSave} disabled={saving || !selectedId} className="btn-primary w-full">
             {saving ? 'Saving...' : 'Save Strategy'}
