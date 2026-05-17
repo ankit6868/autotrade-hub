@@ -547,9 +547,31 @@ function FuturesBacktestInner() {
                         </span>
                       </div>
                       {(d.entry_signals_long !== undefined || d.entry_signals_short !== undefined) && (
-                        <div className="text-[10px] text-slate-500">
-                          Entries fired: <b className="text-emerald-400">{d.entry_signals_long ?? 0} long</b>
-                          {' · '}<b className="text-red-400">{d.entry_signals_short ?? 0} short</b>
+                        <div className="text-[10px] text-slate-500 space-y-0.5">
+                          <div>
+                            Signal bars: <b className="text-emerald-400">{d.entry_signals_long ?? 0} long</b>
+                            {' · '}<b className="text-red-400">{d.entry_signals_short ?? 0} short</b>
+                            <span className="text-slate-600"> (every bar where condition is true)</span>
+                          </div>
+                          {(d.entry_clusters_long !== undefined || d.entry_clusters_short !== undefined) && (
+                            <div>
+                              Trade signals (edges): <b className="text-emerald-300">{d.entry_clusters_long ?? 0} long</b>
+                              {' · '}<b className="text-red-300">{d.entry_clusters_short ?? 0} short</b>
+                              <span className="text-slate-600"> (0→1 transitions — matches TV)</span>
+                            </div>
+                          )}
+                          {(d.trades_opened_long !== undefined || d.trades_opened_short !== undefined) && (
+                            <div>
+                              Trades opened: <b className="text-emerald-200">{d.trades_opened_long ?? 0} long</b>
+                              {' · '}<b className="text-red-200">{d.trades_opened_short ?? 0} short</b>
+                              {(d.signals_skipped_in_trade || d.signals_skipped_cooldown) ? (
+                                <span className="text-slate-600">
+                                  {' '}· skipped: {d.signals_skipped_in_trade || 0} in-trade
+                                  {d.signals_skipped_cooldown ? `, ${d.signals_skipped_cooldown} cooldown` : ''}
+                                </span>
+                              ) : null}
+                            </div>
+                          )}
                         </div>
                       )}
                       {/* When the strategy fired 0 signals, show which class
