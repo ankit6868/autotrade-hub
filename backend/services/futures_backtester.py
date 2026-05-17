@@ -304,241 +304,182 @@ def run_futures_backtest(
                 data_diagnostics[pair]["fallback_intended"] = is_intended_fallback
                 signal_fn = _guess_strategy(strategy_name)
 
-        in_trade      = False
-        pending_entry = None     # (direction, entry_px, sl, tp, liq, margin) from previous bar
-        entry_price   = sl = tp = liq_price = None
-        direction     = None
-        entry_date    = None
-        candles_held  = 0
-        margin        = 0.0
-        # Cooldown: minimum bars between trades.
-        # SMCStrategyTV uses NO cooldown (matches TradingView behaviour exactly —
-        # TV allows back-to-back trades when conditions re-trigger).
-        # Other strategies use a 2-day cooldown to prevent signal noise.
+        # ── Concurrent-position state ─────────────────────────────────
+        # Every entry signal opens a NEW position alongside any already-
+        # open ones (subject to free-margin checks). Each position runs
+        # independently until it hits its own SL / TP / liquidation —
+        # signals NEVER force-close existing positions. This matches
+        # TradingView pyramiding>=N behaviour and the user's explicit
+        # requirement that "every signal should be its own trade and
+        # exit only on strategy rules, not on the next signal arriving".
+        open_positions: list[dict] = []   # active trades
+        pending_entries: list[tuple]= []  # to fill at next bar's open
+        committed_margin = 0.0            # sum of margin across open_positions
         tf_secs_map = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
                        "1h": 3600, "4h": 14400}
         tf_secs = tf_secs_map.get(timeframe, 900)
-        # Cooldown policy:
-        #   • User-strategy path: NO cooldown. The user's enter_long/enter_short
-        #     columns are now edge-only (see strategy_runner.make_signal_fn_from_df).
-        #     Every 0→1 transition is treated as its own entry signal — matching
-        #     TradingView's strategy.entry() semantics. An artificial cooldown
-        #     here would suppress legitimate back-to-back setups.
-        #   • Built-in name-matched strategies: keep the legacy cooldown so
-        #     existing backtests don't shift.
-        if use_user_strategy:
-            cooldown_bars = 0
-        elif strategy_name in ("SMCStrategyTV",):
-            cooldown_bars = 4
-        else:
-            cooldown_secs = 2 * 24 * 3600   # 2-day cooldown for other strategies
-            cooldown_bars = max(1, int(cooldown_secs / tf_secs))
-        cooldown_remain = 0
-        # Track how many signal bars we skipped because we were already
-        # in a trade — surfaced in diagnostics so the user can see the gap
-        # between "26 signal bars" and "3 trades opened".
-        skipped_in_trade   = 0
-        skipped_cooldown   = 0
-        trades_opened_long = 0
+        # Per-pair counters for the data-quality panel.
+        trades_opened_long  = 0
         trades_opened_short = 0
+        skipped_no_margin   = 0   # signal fired but free margin < threshold
+        # Legacy fields kept for response-shape compatibility.
+        skipped_in_trade    = 0
+        skipped_cooldown    = 0
+        cooldown_bars       = 0   # not used in concurrent mode
 
         n = len(df)
         for i in range(3, n):
-            row  = df.iloc[i]
+            row   = df.iloc[i]
             bar_o = row["open"]
             lo, hi = row["low"], row["high"]
+            bar_ts_secs  = int(row["date"].timestamp())
+            bar_start_ts = bar_ts_secs - tf_secs_per_bar
 
-            # ── A. Execute pending entry at this bar's OPEN ───────────────
-            # (TradingView: signal fires at bar[i-1] close → entry at bar[i] open)
-            if pending_entry is not None and not in_trade:
-                direction, entry_price, sl, tp, liq_price, margin, use_signal_sltp = pending_entry
-                pending_entry = None
-                # Apply realistic ENTRY slippage to bar-open fill price.
-                # Real market orders pay a bit through the spread + book depth.
-                actual_fill = _apply_slippage(bar_o, direction, "entry",
+            # ── A. Open any pending entries at THIS bar's OPEN ────────────
+            # (Signal at bar[i-1] close → fill at bar[i] open; matches TV.)
+            new_pending: list[tuple] = []
+            for pe in pending_entries:
+                sig_dir, _, sig_sl, sig_tp, _, sig_margin, use_signal_sltp = pe
+
+                # Free-margin check: don't open if we can't afford the margin.
+                free_margin = balance - committed_margin
+                if sig_margin > free_margin:
+                    if free_margin > 1.0:
+                        sig_margin = free_margin   # cap
+                    else:
+                        skipped_no_margin += 1
+                        continue
+
+                entry_price = _apply_slippage(bar_o, sig_dir, "entry",
                                               SLIPPAGE_BPS_ENTRY)
 
                 if use_signal_sltp:
-                    # SMCStrategyTV: keep structural SL/TP from the signal as-is.
-                    # SL/TP are absolute price levels (swing-based), not relative
-                    # to entry price — keep them even though fill is at next bar open.
-                    entry_price = actual_fill
-                    # sl and tp already set from signal
+                    sl, tp = sig_sl, sig_tp
                 else:
-                    # Fixed-% strategies: recalculate SL/TP from actual fill price
-                    entry_price = actual_fill
                     sl_dist = abs(entry_price * stoploss_pct / 100)
                     tp_dist = abs(entry_price * take_profit_pct / 100)
-                    if direction == "long":
+                    if sig_dir == "long":
                         sl = entry_price - sl_dist
                         tp = entry_price + tp_dist
                     else:
                         sl = entry_price + sl_dist
                         tp = entry_price - tp_dist
 
-                pos_value     = margin * leverage
-                liq_price     = _calc_liquidation(entry_price, direction, leverage, pos_value)
-                entry_date    = row["date"]
-                entry_bar_ts  = int(row["date"].timestamp())
-                candles_held  = 0
-                in_trade      = True
-                # KuCoin would charge taker fee on entry. We TRACK it but
-                # don't deduct from balance — the UI shows "KuCoin would have
-                # charged $X total in fees" so the user understands the real
-                # cost of running this strategy live.
-                hyp_entry_fee = pos_value * KUCOIN_TAKER_FEE
-                # Initialise per-trade accumulators.
-                trade_funding_paid       = 0.0
-                trade_slippage_paid      = abs(bar_o - entry_price) * (pos_value / max(bar_o, 1e-9))
-                trade_hyp_commission     = hyp_entry_fee
+                pos_value = sig_margin * leverage
+                liq_price = _calc_liquidation(entry_price, sig_dir, leverage, pos_value)
+                committed_margin += sig_margin
 
-            # ── B. Manage open position ───────────────────────────────────
-            if in_trade:
-                candles_held += 1
+                open_positions.append({
+                    "direction":    sig_dir,
+                    "entry_price":  entry_price,
+                    "sl":           sl,
+                    "tp":           tp,
+                    "liq_price":    liq_price,
+                    "margin":       sig_margin,
+                    "entry_date":   row["date"],
+                    "entry_bar_ts": bar_ts_secs,
+                    "candles_held": 0,
+                    "funding_paid":     0.0,
+                    "slippage_paid":    abs(bar_o - entry_price) * (pos_value / max(bar_o, 1e-9)),
+                    "hyp_commission":   pos_value * KUCOIN_TAKER_FEE,
+                })
+            pending_entries = new_pending
 
-                # Funding fee: charge ONLY on bars whose time window contains
-                # an actual KuCoin settlement (00/08/16 UTC) — not every Nth
-                # bar from entry. This means a position opened at 07:55 UTC
-                # pays funding on its FIRST bar (since 08:00 UTC settlement
-                # falls inside), exactly as it would on the real exchange.
+            # ── B. Manage every open position (independent SL/TP/liq) ─────
+            still_open: list[dict] = []
+            for pos in open_positions:
+                pos["candles_held"] += 1
+                direction    = pos["direction"]
+                entry_price  = pos["entry_price"]
+                sl, tp       = pos["sl"], pos["tp"]
+                liq_price    = pos["liq_price"]
+                margin       = pos["margin"]
+                entry_date   = pos["entry_date"]
+
+                # Funding settlements that fall inside this bar's time window.
                 funding_cost = 0.0
-                bar_ts_secs  = int(row["date"].timestamp())
-                bar_start_ts = bar_ts_secs - tf_secs_per_bar
-                # First bar: window starts at the actual entry timestamp,
-                # not the bar's start (otherwise we'd over-charge on bars
-                # the position wasn't open for the whole interval).
-                window_lo = max(bar_start_ts, entry_bar_ts) if candles_held == 1 else bar_start_ts
+                window_lo = (max(bar_start_ts, pos["entry_bar_ts"])
+                             if pos["candles_held"] == 1 else bar_start_ts)
                 settlements = _funding_settlements_in_window(window_lo, bar_ts_secs)
                 if settlements:
-                    pos_value    = margin * leverage
+                    pos_value = margin * leverage
                     for settle_ts in settlements:
                         applied_rate = _funding_rate_for_ts(funding_sorted, settle_ts)
                         signed_rate  = applied_rate if direction == "long" else -applied_rate
                         funding_cost += pos_value * signed_rate
-                    trade_funding_paid += funding_cost
+                    pos["funding_paid"] += funding_cost
 
-                # Check liquidation first (instant full loss).
-                # Liquidation fills are particularly bad — book is thin and
-                # the engine runs through stop orders. Apply LIQ slippage.
+                # Exit detection
                 liquidated = False
                 exit_slippage_bps = 0
+                raw_exit_p = None
+                exit_rsn   = ""
+
                 if direction == "long" and lo <= liq_price:
                     raw_exit_p = liq_price
-                    exit_p     = _apply_slippage(raw_exit_p, direction, "exit",
-                                                 SLIPPAGE_BPS_LIQ)
-                    pnl_abs    = -margin
                     liquidated = True
                     exit_slippage_bps = SLIPPAGE_BPS_LIQ
                 elif direction == "short" and hi >= liq_price:
                     raw_exit_p = liq_price
-                    exit_p     = _apply_slippage(raw_exit_p, direction, "exit",
-                                                 SLIPPAGE_BPS_LIQ)
-                    pnl_abs    = -margin
                     liquidated = True
                     exit_slippage_bps = SLIPPAGE_BPS_LIQ
-
-                if not liquidated:
-                    # SL/TP resolution — TradingView logic:
-                    # If both SL and TP are hit in the same bar, check bar open
-                    # to determine which was crossed first.
-                    exited     = False
-                    exit_rsn   = ""
-                    raw_exit_p = None
+                else:
                     if direction == "long":
                         sl_hit = lo <= sl
                         tp_hit = hi >= tp
-                        if sl_hit and tp_hit:
-                            if abs(bar_o - tp) < abs(bar_o - sl):
-                                raw_exit_p = tp; exit_rsn = "take_profit"
-                                exit_slippage_bps = SLIPPAGE_BPS_TP
-                            else:
-                                raw_exit_p = sl; exit_rsn = "stop_loss"
-                                exit_slippage_bps = SLIPPAGE_BPS_STOP
-                            exited = True
-                        elif sl_hit:
-                            raw_exit_p = sl; exit_rsn = "stop_loss"
-                            exit_slippage_bps = SLIPPAGE_BPS_STOP
-                            exited = True
-                        elif tp_hit:
-                            raw_exit_p = tp; exit_rsn = "take_profit"
-                            exit_slippage_bps = SLIPPAGE_BPS_TP
-                            exited = True
-                    else:  # short
+                    else:
                         sl_hit = hi >= sl
                         tp_hit = lo <= tp
-                        if sl_hit and tp_hit:
-                            if abs(bar_o - tp) < abs(bar_o - sl):
-                                raw_exit_p = tp; exit_rsn = "take_profit"
-                                exit_slippage_bps = SLIPPAGE_BPS_TP
-                            else:
-                                raw_exit_p = sl; exit_rsn = "stop_loss"
-                                exit_slippage_bps = SLIPPAGE_BPS_STOP
-                            exited = True
-                        elif sl_hit:
-                            raw_exit_p = sl; exit_rsn = "stop_loss"
-                            exit_slippage_bps = SLIPPAGE_BPS_STOP
-                            exited = True
-                        elif tp_hit:
+                    if sl_hit and tp_hit:
+                        if abs(bar_o - tp) < abs(bar_o - sl):
                             raw_exit_p = tp; exit_rsn = "take_profit"
                             exit_slippage_bps = SLIPPAGE_BPS_TP
-                            exited = True
-
-                    if not exited:
-                        # New entry signal this bar → close at this bar's
-                        # close (market) and let section E queue the new entry.
-                        peek = signal_fn(df, i) if use_user_strategy else None
-                        if peek is not None:
-                            raw_exit_p = float(row["close"])
-                            exit_rsn   = "new_signal"
-                            exit_slippage_bps = SLIPPAGE_BPS_FLIP
-                            exited     = True
                         else:
-                            balance -= funding_cost
-                            continue
+                            raw_exit_p = sl; exit_rsn = "stop_loss"
+                            exit_slippage_bps = SLIPPAGE_BPS_STOP
+                    elif sl_hit:
+                        raw_exit_p = sl; exit_rsn = "stop_loss"
+                        exit_slippage_bps = SLIPPAGE_BPS_STOP
+                    elif tp_hit:
+                        raw_exit_p = tp; exit_rsn = "take_profit"
+                        exit_slippage_bps = SLIPPAGE_BPS_TP
 
-                    # Apply exit slippage to the trigger price
-                    exit_p = _apply_slippage(raw_exit_p, direction, "exit",
-                                             exit_slippage_bps)
+                # Still running this bar → carry forward, deduct funding.
+                if raw_exit_p is None:
+                    balance -= funding_cost
+                    still_open.append(pos)
+                    continue
 
-                    # Compute leveraged P&L using the slipped exit price.
+                # Position closes this bar — compute final P&L.
+                exit_p = _apply_slippage(raw_exit_p, direction, "exit",
+                                         exit_slippage_bps)
+
+                if liquidated:
+                    pnl_abs = -margin
+                else:
                     if direction == "long":
                         price_move_pct = (exit_p - entry_price) / entry_price
                     else:
                         price_move_pct = (entry_price - exit_p) / entry_price
-
                     leveraged_pnl_pct = price_move_pct * leverage
-                    pos_value         = margin * leverage
-                    # Engine doesn't deduct commission (user choice) — we
-                    # only track what KuCoin WOULD have charged so we can
-                    # display it as a transparency row.
                     pnl_abs = margin * leveraged_pnl_pct - funding_cost
-                    pnl_abs = max(pnl_abs, -margin)   # cap loss at full margin
+                    pnl_abs = max(pnl_abs, -margin)
 
-                # Per-trade tracking: slippage (in USDT) = |raw - slipped| × position size in units.
-                # raw_exit_p is None only on the very-rare exit-on-first-bar
-                # case; in that case it's the liquidation branch and we
-                # already set it above (raw_exit_p == liq_price).
-                if not liquidated and raw_exit_p is not None:
-                    units = pos_value / max(entry_price, 1e-9)
-                    trade_slippage_paid += abs(raw_exit_p - exit_p) * units
-                elif liquidated:
-                    units = (margin * leverage) / max(entry_price, 1e-9)
-                    trade_slippage_paid += abs(liq_price - exit_p) * units
-
-                # Hypothetical KuCoin EXIT commission (taker on SL / liq /
-                # new_signal market close; maker on TP if you assume the TP
-                # is a resting limit order — common case for retail).
-                pos_value_exit = (margin * leverage)
+                # Track slippage (USDT) and hypothetical commission.
+                pos_value_exit = margin * leverage
+                units = pos_value_exit / max(entry_price, 1e-9)
+                pos["slippage_paid"] += abs(raw_exit_p - exit_p) * units
                 if exit_rsn == "take_profit":
-                    trade_hyp_commission += pos_value_exit * KUCOIN_MAKER_FEE
+                    pos["hyp_commission"] += pos_value_exit * KUCOIN_MAKER_FEE
                 else:
-                    trade_hyp_commission += pos_value_exit * KUCOIN_TAKER_FEE
+                    pos["hyp_commission"] += pos_value_exit * KUCOIN_TAKER_FEE
 
+                # Settle: release margin, apply P&L.
+                committed_margin -= margin
                 balance += pnl_abs
                 balance  = max(balance, 0)
 
                 profit_pct = (pnl_abs / margin * 100) if margin > 0 else 0
-
                 all_trades.append({
                     "pair":        pair,
                     "direction":   direction,
@@ -556,64 +497,109 @@ def run_futures_backtest(
                     "profit_abs":  round(float(pnl_abs), 4),
                     "exit_reason": "liquidated" if liquidated else exit_rsn,
                     "balance":     round(float(balance), 2),
-                    "candles_held": candles_held,
-                    # Production-grade transparency fields:
-                    "funding_paid":     round(float(trade_funding_paid), 4),
-                    "slippage_paid":    round(float(trade_slippage_paid), 4),
-                    "hyp_kucoin_fee":   round(float(trade_hyp_commission), 4),
+                    "candles_held": pos["candles_held"],
+                    "funding_paid":      round(float(pos["funding_paid"]),    4),
+                    "slippage_paid":     round(float(pos["slippage_paid"]),   4),
+                    "hyp_kucoin_fee":    round(float(pos["hyp_commission"]),  4),
                     "exit_slippage_bps": int(exit_slippage_bps),
                 })
-                in_trade = False
-                cooldown_remain = cooldown_bars   # start cooldown after each trade
+            open_positions = still_open
 
-            # Decrement cooldown each bar
-            if cooldown_remain > 0 and not in_trade:
-                cooldown_remain -= 1
-
-            # ── C. Check for new entry signal (only when flat + cooldown elapsed) ──
-            # Track WHY signals are skipped for diagnostics. We call signal_fn
-            # unconditionally so we can count "would have entered but blocked";
-            # the cost is negligible (it's just an array lookup).
-            sig_peek = signal_fn(df, i) if i >= 3 else None
-            if sig_peek is not None:
-                if in_trade or pending_entry is not None:
-                    skipped_in_trade += 1
-                elif cooldown_remain > 0:
-                    skipped_cooldown += 1
-
-            if not in_trade and pending_entry is None and cooldown_remain == 0:
+            # ── C. Check for new entry signal — concurrent mode ───────────
+            # Signal ALWAYS queues a new pending entry (subject to free
+            # margin at next bar's open). Existing positions are unaffected.
+            sig = signal_fn(df, i) if i >= 3 else None
+            if sig is not None:
+                sig_entry, sl_raw, tp_raw, sig_dir = sig
                 if balance <= 0:
-                    break
-                sig = sig_peek
-                if sig:
-                    sig_entry, sl_raw, tp_raw, sig_dir = sig
+                    # Wiped out — no more trades possible.
+                    continue
+                free_margin = balance - committed_margin
+                sig_margin = balance * risk_per_trade
+                # Cap by free margin; skip if can't even commit $1.
+                if sig_margin > free_margin:
+                    if free_margin > 1.0:
+                        sig_margin = free_margin
+                    else:
+                        skipped_no_margin += 1
+                        continue
+
+                if sig_dir == "long":
+                    trades_opened_long += 1
+                else:
+                    trades_opened_short += 1
+
+                if strategy_name in ("SMCStrategyTV",):
+                    sig_sl, sig_tp = sl_raw, tp_raw
+                else:
+                    sl_dist = sig_entry * stoploss_pct / 100
+                    tp_dist = sig_entry * take_profit_pct / 100
                     if sig_dir == "long":
-                        trades_opened_long += 1
+                        sig_sl = sig_entry - sl_dist
+                        sig_tp = sig_entry + tp_dist
                     else:
-                        trades_opened_short += 1
+                        sig_sl = sig_entry + sl_dist
+                        sig_tp = sig_entry - tp_dist
 
-                    # SMCStrategyTV uses structural (dynamic) SL/TP from signal.
-                    # All other strategies use the user-defined fixed SL/TP %.
-                    if strategy_name in ("SMCStrategyTV",):
-                        sig_sl = sl_raw
-                        sig_tp = tp_raw
-                    else:
-                        # Override with user-defined SL/TP %
-                        sl_dist = sig_entry * stoploss_pct / 100
-                        tp_dist = sig_entry * take_profit_pct / 100
-                        if sig_dir == "long":
-                            sig_sl = sig_entry - sl_dist
-                            sig_tp = sig_entry + tp_dist
-                        else:
-                            sig_sl = sig_entry + sl_dist
-                            sig_tp = sig_entry - tp_dist
+                sig_liq = _calc_liquidation(sig_entry, sig_dir, leverage,
+                                            sig_margin * leverage)
+                use_signal_sltp = strategy_name in ("SMCStrategyTV",)
+                pending_entries.append(
+                    (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq,
+                     sig_margin, use_signal_sltp)
+                )
 
-                    sig_margin = balance * risk_per_trade
-                    sig_liq    = _calc_liquidation(sig_entry, sig_dir, leverage,
-                                                   sig_margin * leverage)
-                    use_signal_sltp = strategy_name in ("SMCStrategyTV",)
-                    # Queue entry for execution at NEXT bar's open
-                    pending_entry = (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq, sig_margin, use_signal_sltp)
+        # ── End of bar loop: force-close any leftover open positions ──────
+        # We close at the last bar's close. Without this, positions opened
+        # near the end of the backtest period would never appear in the
+        # trade list and the metrics would silently exclude them.
+        if open_positions:
+            last_row = df.iloc[-1]
+            last_close = float(last_row["close"])
+            for pos in open_positions:
+                direction   = pos["direction"]
+                entry_price = pos["entry_price"]
+                margin      = pos["margin"]
+                raw_exit_p  = last_close
+                exit_p      = _apply_slippage(raw_exit_p, direction, "exit",
+                                              SLIPPAGE_BPS_FLIP)
+                if direction == "long":
+                    price_move_pct = (exit_p - entry_price) / entry_price
+                else:
+                    price_move_pct = (entry_price - exit_p) / entry_price
+                pnl_abs = max(margin * price_move_pct * leverage, -margin)
+                committed_margin -= margin
+                balance += pnl_abs
+                balance = max(balance, 0)
+                pos_value_exit = margin * leverage
+                units = pos_value_exit / max(entry_price, 1e-9)
+                pos["slippage_paid"]  += abs(raw_exit_p - exit_p) * units
+                pos["hyp_commission"] += pos_value_exit * KUCOIN_TAKER_FEE
+                profit_pct = (pnl_abs / margin * 100) if margin > 0 else 0
+                all_trades.append({
+                    "pair":        pair,
+                    "direction":   direction,
+                    "leverage":    leverage,
+                    "open_date":   str(pos["entry_date"]),
+                    "close_date":  str(last_row["date"]),
+                    "entry":       round(float(entry_price), 4),
+                    "open_rate":   round(float(entry_price), 4),
+                    "close_rate":  round(float(exit_p), 4),
+                    "sl_price":    round(float(pos["sl"]), 4),
+                    "tp_price":    round(float(pos["tp"]), 4),
+                    "liq_price":   round(float(pos["liq_price"]), 4),
+                    "margin":      round(float(margin), 4),
+                    "profit_pct":  round(float(profit_pct), 3),
+                    "profit_abs":  round(float(pnl_abs), 4),
+                    "exit_reason": "end_of_data",
+                    "balance":     round(float(balance), 2),
+                    "candles_held": pos["candles_held"],
+                    "funding_paid":      round(float(pos["funding_paid"]),    4),
+                    "slippage_paid":     round(float(pos["slippage_paid"]),   4),
+                    "hyp_kucoin_fee":    round(float(pos["hyp_commission"]),  4),
+                    "exit_slippage_bps": SLIPPAGE_BPS_FLIP,
+                })
+            open_positions = []
 
         # End of per-pair bar loop — write per-pair signal-disposition counts
         # so the UI can show the breakdown of "signal bars → clusters → trades
@@ -624,6 +610,9 @@ def run_futures_backtest(
         data_diagnostics[pair]["signals_skipped_in_trade"] = skipped_in_trade
         data_diagnostics[pair]["signals_skipped_cooldown"] = skipped_cooldown
         data_diagnostics[pair]["cooldown_bars"]        = cooldown_bars
+        # Concurrent-positions diagnostics
+        data_diagnostics[pair]["signals_skipped_no_margin"] = skipped_no_margin
+        data_diagnostics[pair]["position_model"]            = "concurrent"
 
     # ── Compute aggregate metrics ─────────────────────────────────────────
     if not all_trades:
