@@ -564,12 +564,23 @@ function FuturesBacktestInner() {
                             <div>
                               Trades opened: <b className="text-emerald-200">{d.trades_opened_long ?? 0} long</b>
                               {' · '}<b className="text-red-200">{d.trades_opened_short ?? 0} short</b>
-                              {(d.signals_skipped_in_trade || d.signals_skipped_cooldown) ? (
+                              {(d.signals_skipped_in_trade || d.signals_skipped_cooldown || d.signals_skipped_no_margin) ? (
                                 <span className="text-slate-600">
-                                  {' '}· skipped: {d.signals_skipped_in_trade || 0} in-trade
+                                  {' '}· skipped:
+                                  {d.signals_skipped_in_trade ? ` ${d.signals_skipped_in_trade} in-trade` : ''}
                                   {d.signals_skipped_cooldown ? `, ${d.signals_skipped_cooldown} cooldown` : ''}
+                                  {d.signals_skipped_no_margin ? `, ${d.signals_skipped_no_margin} no-free-margin` : ''}
                                 </span>
                               ) : null}
+                            </div>
+                          )}
+                          {d.trades_still_open_at_end !== undefined && d.trades_still_open_at_end > 0 && (
+                            <div
+                              className="text-amber-300 text-[10px] mt-0.5"
+                              title="These trades hadn't hit their SL/TP/liquidation when the backtest period ended, so we don't count them as real outcomes. Their margin is released back to the available balance. To see them resolve, extend the backtest period."
+                            >
+                              ⏳ {d.trades_still_open_at_end} position{d.trades_still_open_at_end === 1 ? '' : 's'} still
+                              open at end of period (excluded from results — unrealised P&amp;L ${(d.unrealised_pnl_at_end ?? 0).toFixed(2)})
                             </div>
                           )}
                         </div>
