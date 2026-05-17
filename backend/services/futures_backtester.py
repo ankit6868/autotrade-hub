@@ -160,6 +160,22 @@ def run_futures_backtest(
                 es_count = int((df.get("enter_short", 0) == 1).sum()) if "enter_short" in df.columns else 0
                 data_diagnostics[pair]["entry_signals_long"]  = el_count
                 data_diagnostics[pair]["entry_signals_short"] = es_count
+                # Edge count (0→1 transitions) = unique trade opportunities,
+                # which is what TradingView's strategy.entry() actually acts
+                # on. A signal staying True for 20 bars is ONE entry, not 20.
+                # The diff trick: shift by 1 and count rows where prev=0, cur=1.
+                if "enter_long" in df.columns:
+                    el = df["enter_long"].fillna(0).astype(int)
+                    el_edges = int(((el == 1) & (el.shift(1).fillna(0) == 0)).sum())
+                else:
+                    el_edges = 0
+                if "enter_short" in df.columns:
+                    es = df["enter_short"].fillna(0).astype(int)
+                    es_edges = int(((es == 1) & (es.shift(1).fillna(0) == 0)).sum())
+                else:
+                    es_edges = 0
+                data_diagnostics[pair]["entry_clusters_long"]  = el_edges
+                data_diagnostics[pair]["entry_clusters_short"] = es_edges
                 # Echo back what methods the user's class defines so the UI
                 # can show them when 0 signals fire (helps debug "why aren't
                 # my entries triggering?").
@@ -211,15 +227,29 @@ def run_futures_backtest(
         tf_secs_map = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
                        "1h": 3600, "4h": 14400}
         tf_secs = tf_secs_map.get(timeframe, 900)
-        if strategy_name in ("SMCStrategyTV",):
-            # TV has no artificial cooldown, but we use 4 bars minimum to prevent
-            # same-bar double-entry when BOS fires on adjacent candles.
-            # 4 bars × 15m = 1 hour minimum between trades.
+        # Cooldown policy:
+        #   • User-strategy path: NO cooldown. The user's enter_long/enter_short
+        #     columns are now edge-only (see strategy_runner.make_signal_fn_from_df).
+        #     Every 0→1 transition is treated as its own entry signal — matching
+        #     TradingView's strategy.entry() semantics. An artificial cooldown
+        #     here would suppress legitimate back-to-back setups.
+        #   • Built-in name-matched strategies: keep the legacy cooldown so
+        #     existing backtests don't shift.
+        if use_user_strategy:
+            cooldown_bars = 0
+        elif strategy_name in ("SMCStrategyTV",):
             cooldown_bars = 4
         else:
             cooldown_secs = 2 * 24 * 3600   # 2-day cooldown for other strategies
             cooldown_bars = max(1, int(cooldown_secs / tf_secs))
         cooldown_remain = 0
+        # Track how many signal bars we skipped because we were already
+        # in a trade — surfaced in diagnostics so the user can see the gap
+        # between "26 signal bars" and "3 trades opened".
+        skipped_in_trade   = 0
+        skipped_cooldown   = 0
+        trades_opened_long = 0
+        trades_opened_short = 0
 
         n = len(df)
         for i in range(3, n):
@@ -374,12 +404,26 @@ def run_futures_backtest(
                 cooldown_remain -= 1
 
             # ── C. Check for new entry signal (only when flat + cooldown elapsed) ──
+            # Track WHY signals are skipped for diagnostics. We call signal_fn
+            # unconditionally so we can count "would have entered but blocked";
+            # the cost is negligible (it's just an array lookup).
+            sig_peek = signal_fn(df, i) if i >= 3 else None
+            if sig_peek is not None:
+                if in_trade or pending_entry is not None:
+                    skipped_in_trade += 1
+                elif cooldown_remain > 0:
+                    skipped_cooldown += 1
+
             if not in_trade and pending_entry is None and cooldown_remain == 0:
                 if balance <= 0:
                     break
-                sig = signal_fn(df, i)
+                sig = sig_peek
                 if sig:
                     sig_entry, sl_raw, tp_raw, sig_dir = sig
+                    if sig_dir == "long":
+                        trades_opened_long += 1
+                    else:
+                        trades_opened_short += 1
 
                     # SMCStrategyTV uses structural (dynamic) SL/TP from signal.
                     # All other strategies use the user-defined fixed SL/TP %.
@@ -402,6 +446,16 @@ def run_futures_backtest(
                     use_signal_sltp = strategy_name in ("SMCStrategyTV",)
                     # Queue entry for execution at NEXT bar's open
                     pending_entry = (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq, sig_margin, use_signal_sltp)
+
+        # End of per-pair bar loop — write per-pair signal-disposition counts
+        # so the UI can show the breakdown of "signal bars → clusters → trades
+        # opened → skipped because in-trade / cooldown". Without this, the
+        # raw "26 long / 28 short" figure looks like a bug.
+        data_diagnostics[pair]["trades_opened_long"]   = trades_opened_long
+        data_diagnostics[pair]["trades_opened_short"]  = trades_opened_short
+        data_diagnostics[pair]["signals_skipped_in_trade"] = skipped_in_trade
+        data_diagnostics[pair]["signals_skipped_cooldown"] = skipped_cooldown
+        data_diagnostics[pair]["cooldown_bars"]        = cooldown_bars
 
     # ── Compute aggregate metrics ─────────────────────────────────────────
     if not all_trades:

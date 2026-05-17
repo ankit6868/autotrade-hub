@@ -484,17 +484,28 @@ def make_signal_fn_from_df(df: pd.DataFrame, leverage: int,
     enter_short = df["enter_short"].astype(int).values if "enter_short" in df.columns else None
 
     def signal_fn(_df, i):
-        # _df is the same dataframe; we use the pre-computed arrays for speed.
+        # Edge-only firing (matches TradingView's strategy.entry behaviour):
+        # we treat a signal as fired only on the bar where the condition
+        # *transitions* from False→True. If the strategy's enter_long stays
+        # True for 20 consecutive bars, that's ONE entry signal — not 20.
+        # This is what causes "26 signal bars → only 3 trades" confusion:
+        # without edge detection, the same setup re-fires every bar while
+        # the condition holds, but the engine can only act on the first.
+        # With edge detection, the signal count matches the trade count.
         if enter_long is not None and i < len(enter_long) and enter_long[i]:
-            entry = float(_df.iloc[i]["close"])
-            sl = entry * (1 - stoploss_pct / 100)
-            tp = entry * (1 + take_profit_pct / 100)
-            return entry, sl, tp, "long"
+            prev = enter_long[i - 1] if i > 0 else 0
+            if not prev:
+                entry = float(_df.iloc[i]["close"])
+                sl = entry * (1 - stoploss_pct / 100)
+                tp = entry * (1 + take_profit_pct / 100)
+                return entry, sl, tp, "long"
         if enter_short is not None and i < len(enter_short) and enter_short[i]:
-            entry = float(_df.iloc[i]["close"])
-            sl = entry * (1 + stoploss_pct / 100)
-            tp = entry * (1 - take_profit_pct / 100)
-            return entry, sl, tp, "short"
+            prev = enter_short[i - 1] if i > 0 else 0
+            if not prev:
+                entry = float(_df.iloc[i]["close"])
+                sl = entry * (1 + stoploss_pct / 100)
+                tp = entry * (1 - take_profit_pct / 100)
+                return entry, sl, tp, "short"
         return None
 
     return signal_fn
