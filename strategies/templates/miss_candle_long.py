@@ -75,23 +75,68 @@ class MissCandleLongStrategy(IStrategy):
         return df
 
     def custom_exit(self, pair, trade, current_time, current_rate, current_profit, **kw):
-        # 1:3 R:R on long side.
-        # SL distance % = (entry - miss_low) / entry approximated by entry * |stoploss|
-        # at open-time; use current_profit vs |stoploss| as R-multiple proxy.
-        sl_pct = abs(self.stoploss)
-        if sl_pct <= 0:
-            return None
-        r_multiple = current_profit / sl_pct
+        """1:3 R:R using the trade's actual structural SL distance (miss-candle
+        LOW → entry), not the fixed -2% fallback. Without using the structural
+        distance, R-multiples drift and the take-profit trigger is wrong on
+        any trade whose SL distance ≠ 2%."""
+        miss_low = getattr(trade, "_mc_miss_low", None)
+        entry    = trade.open_rate
+        if miss_low is None or entry <= 0:
+            # Fallback to fixed-SL R-multiple if structural data is missing.
+            sl_pct = abs(self.stoploss)
+            if sl_pct <= 0:
+                return None
+            r_multiple = current_profit / sl_pct
+        else:
+            sl_pct = (entry - miss_low) / entry   # positive for long
+            if sl_pct <= 0:
+                return None
+            fav_pct = (current_rate - entry) / entry   # positive when winning
+            r_multiple = fav_pct / sl_pct
         if r_multiple >= 3.0:
             return "tp_1to3"
         return None
 
     def custom_stoploss(self, pair, trade, current_time, current_rate, current_profit, **kw):
-        sl_pct = abs(self.stoploss)
-        if sl_pct <= 0 or current_profit <= 0:
+        """Static SL at miss-candle LOW until 1:1.5R, then trail to lock 50%
+        of favourable excursion. Without using `_mc_miss_low` stamped at
+        entry, SL is a fixed -2% which contradicts the strategy's docstring."""
+        miss_low = getattr(trade, "_mc_miss_low", None)
+        entry    = trade.open_rate
+        if miss_low is None or entry <= 0:
+            return self.stoploss   # safety fallback
+
+        # Distance from entry down to the structural SL (positive number).
+        sl_pct = (entry - miss_low) / entry
+        if sl_pct <= 0:
             return self.stoploss
-        r_multiple = current_profit / sl_pct
+
+        fav_pct    = (current_rate - entry) / entry
+        r_multiple = fav_pct / sl_pct if sl_pct > 0 else 0
+
         if r_multiple >= 1.5:
-            # Lock 50% of favourable excursion
-            return -(current_profit * 0.5)
-        return self.stoploss
+            # Lock 50% of favourable excursion. Freqtrade custom_stoploss
+            # returns a NEGATIVE value = stop-loss distance from current rate.
+            # We want SL pinned at +50% of fav_pct above entry → that's a
+            # positive return (profit lock), which Freqtrade treats as a
+            # stop ABOVE break-even.
+            return -(fav_pct * 0.5)
+        # Pre-1.5R: keep static SL at miss-candle low (= -sl_pct from entry).
+        return -sl_pct
+
+    def confirm_trade_entry(self, pair, order_type, amount, rate, time_in_force,
+                            current_time, entry_tag, side, **kw):
+        """Stamp the miss-candle LOW on the trade so custom_stoploss / custom_exit
+        can compute R-multiples against the actual structural SL, not a
+        constant 2%. Without this method, the structural-SL claim in the
+        docstring is unimplemented."""
+        df, _ = self.dp.get_analyzed_dataframe(pair, self.timeframe)
+        if df is None or len(df) < 2:
+            return True
+        row = df.iloc[-1]
+        self._pending_entry = {
+            "pair":     pair,
+            "miss_low": float(row["prev_low"]),
+            "miss_high": float(row["prev_high"]),
+        }
+        return True
