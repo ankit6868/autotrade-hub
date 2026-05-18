@@ -27,19 +27,25 @@ from backend.services.native_backtester import (
 
 # ── Production-grade market-realism constants ─────────────────────────────
 #
-# These constants represent what KuCoin would CHARGE in real trading. They
-# are tracked per-trade for transparency but DO NOT reduce the simulated
-# P&L — the app is not a broker and shouldn't claim to model KuCoin's exact
-# fee schedule as a hard deduction. Instead we surface them as
-# informational rows ("KuCoin would have charged $X in fees") in the UI.
+# Real KuCoin futures retail (VIP0) fee schedule, published at
+# https://www.kucoin.com/vip/level. These ARE deducted from the simulated
+# balance — backtests are only meaningful if they include the same costs
+# the strategy will pay in production. Treat the result as a realistic
+# net-of-fees P&L, not a hypothetical gross figure.
 #
-# Slippage IS applied to the simulated balance because it represents the
-# real fill quality you'd get on stops/liquidations — not a fee the
-# exchange collects.
+# Application rules per fill type:
+#   - ENTRY        : taker (strategy entries are market orders by default)
+#   - STOP_LOSS    : taker (stop triggers market sell on KuCoin futures)
+#   - LIQUIDATION  : taker (forced market liquidation)
+#   - TAKE_PROFIT  : maker (TP set as a limit order, fills passively)
+#
+# This is conservative — a strategy that places limit entries (post-only)
+# would pay maker on entry too, slightly improving net P&L. We assume
+# market entries because that's what most strategy.entry() calls produce.
 
 # KuCoin futures fee tiers (public schedule, retail VIP0):
-KUCOIN_TAKER_FEE = 0.0006        # 0.06% — applies to market orders, SL, liquidation
-KUCOIN_MAKER_FEE = 0.0002        # 0.02% — applies to limit fills
+KUCOIN_TAKER_FEE = 0.0006        # 0.06% — market orders, SL, liquidation
+KUCOIN_MAKER_FEE = 0.0002        # 0.02% — limit fills (TP)
 
 # Slippage in basis points (1bp = 0.01%). Applied AGAINST the position on
 # exits. Stops typically fill worse than the trigger price; take-profits
@@ -151,8 +157,11 @@ def _apply_slippage(price: float, direction: str, side: str, bps: float) -> floa
             return price * (1 - factor)   # sell lower
 
 
-COMMISSION_RATE = 0.0   # Engine doesn't deduct commission; we DISPLAY
-                         # KuCoin's fees separately as a transparency row.
+COMMISSION_RATE = KUCOIN_TAKER_FEE  # Real KuCoin taker fee, deducted from
+                                     # balance. Per-fill rate (taker vs maker)
+                                     # is decided at the call-site based on
+                                     # whether the exit was SL/liq (taker) or
+                                     # TP (maker).
 
 
 def run_futures_backtest(
@@ -463,6 +472,15 @@ def run_futures_backtest(
 
                 pos_value = sig_margin * leverage
                 liq_price = _calc_liquidation(entry_price, sig_dir, leverage, pos_value)
+
+                # ── Deduct real KuCoin entry fee (taker — market order) ──
+                # This is what a strategy entry actually costs on KuCoin
+                # Futures. Charged on notional position size, NOT margin.
+                # We deduct BEFORE the position opens so the balance reflects
+                # the real "cash you'd have at this moment" if you were
+                # trading live.
+                entry_fee = pos_value * KUCOIN_TAKER_FEE
+                balance  -= entry_fee
                 committed_margin += sig_margin
 
                 open_positions.append({
@@ -477,7 +495,7 @@ def run_futures_backtest(
                     "candles_held": 0,
                     "funding_paid":     0.0,
                     "slippage_paid":    abs(bar_o - entry_price) * (pos_value / max(bar_o, 1e-9)),
-                    "hyp_commission":   pos_value * KUCOIN_TAKER_FEE,
+                    "fees_paid":        entry_fee,   # accumulates exit fee at close
                     # Signal-trace fields — let the user prove the chain
                     # signal-bar → fill-bar → exit-bar without ambiguity.
                     "signal_bar_index": signal_bar_idx,
@@ -567,21 +585,34 @@ def run_futures_backtest(
                     pnl_abs = margin * leveraged_pnl_pct - funding_cost
                     pnl_abs = max(pnl_abs, -margin)
 
-                # Track slippage (USDT) and hypothetical commission.
+                # Track slippage (USDT).
                 pos_value_exit = margin * leverage
                 units = pos_value_exit / max(entry_price, 1e-9)
                 pos["slippage_paid"] += abs(raw_exit_p - exit_p) * units
+
+                # ── Deduct real KuCoin exit fee ─────────────────────────
+                # TP fills are limit orders → maker fee.
+                # SL / liquidation fills are market → taker fee.
                 if exit_rsn == "take_profit":
-                    pos["hyp_commission"] += pos_value_exit * KUCOIN_MAKER_FEE
+                    exit_fee = pos_value_exit * KUCOIN_MAKER_FEE
                 else:
-                    pos["hyp_commission"] += pos_value_exit * KUCOIN_TAKER_FEE
+                    exit_fee = pos_value_exit * KUCOIN_TAKER_FEE
+                pos["fees_paid"] += exit_fee
+                balance -= exit_fee
 
                 # Settle: release margin, apply P&L.
                 committed_margin -= margin
                 balance += pnl_abs
                 balance  = max(balance, 0)
 
-                profit_pct = (pnl_abs / margin * 100) if margin > 0 else 0
+                # Recompute realised profit AFTER all costs are out, so the
+                # trade row reflects what the user actually netted on this
+                # trade — not a gross-of-fees figure. pnl_abs already
+                # includes funding; subtract entry_fee (paid at open) and
+                # exit_fee (paid just now) to get the trade's true net P&L.
+                entry_fee_for_trade = pos["fees_paid"] - exit_fee  # i.e. the entry portion
+                net_pnl_abs = pnl_abs - entry_fee_for_trade - exit_fee
+                profit_pct = (net_pnl_abs / margin * 100) if margin > 0 else 0
                 all_trades.append({
                     "pair":        pair,
                     "direction":   direction,
@@ -596,13 +627,14 @@ def run_futures_backtest(
                     "liq_price":   round(float(liq_price), 4),
                     "margin":      round(float(margin), 4),
                     "profit_pct":  round(float(profit_pct), 3),
-                    "profit_abs":  round(float(pnl_abs), 4),
+                    "profit_abs":  round(float(net_pnl_abs), 4),     # NET of all costs
                     "exit_reason": "liquidated" if liquidated else exit_rsn,
                     "balance":     round(float(balance), 2),
                     "candles_held": pos["candles_held"],
                     "funding_paid":      round(float(pos["funding_paid"]),    4),
                     "slippage_paid":     round(float(pos["slippage_paid"]),   4),
-                    "hyp_kucoin_fee":    round(float(pos["hyp_commission"]),  4),
+                    "fees_paid":         round(float(pos["fees_paid"]),       4),  # real KuCoin
+                                                                                    # fees DEDUCTED
                     "exit_slippage_bps": int(exit_slippage_bps),
                     # Signal-trace: prove this trade came from a real signal.
                     "signal_bar_index": pos["signal_bar_index"],
@@ -834,13 +866,12 @@ def run_futures_backtest(
 
     equity_curve = [{"date": t["close_date"], "balance": t["balance"]} for t in all_trades]
 
-    # Aggregate cost transparency rows. funding & slippage ARE applied to
-    # balance. hyp_kucoin_fee is informational only — what the user would
-    # pay KuCoin if they ran this strategy live, NOT a deduction from the
-    # simulated P&L.
-    total_funding         = sum(t.get("funding_paid", 0)      for t in all_trades)
-    total_slippage        = sum(t.get("slippage_paid", 0)     for t in all_trades)
-    total_hyp_kucoin_fees = sum(t.get("hyp_kucoin_fee", 0)    for t in all_trades)
+    # Aggregate cost transparency rows. ALL THREE are deducted from the
+    # simulated balance (real-cost modelling — backtests are only useful
+    # if they include what production would actually charge).
+    total_funding   = sum(t.get("funding_paid",   0) for t in all_trades)
+    total_slippage  = sum(t.get("slippage_paid",  0) for t in all_trades)
+    total_fees      = sum(t.get("fees_paid",      0) for t in all_trades)
 
     # ── Math-check rails: break-even WR + expected-value per trade ────────
     # Breakeven WR = SL / (SL + TP). If actual WR is below this, the
@@ -885,9 +916,9 @@ def run_futures_backtest(
     is_negative_ev   = win_rate < breakeven_wr
 
     # Cost-drag per trade — the headline number for "why is my profitable
-    # strategy losing money?". Realistic answer is almost always: too many
-    # trades + thin edge + slippage compounding.
-    cost_drag_usdt   = total_funding + total_slippage
+    # strategy losing money?". Includes ALL real costs now (funding +
+    # slippage + fees), so this is the actual production-grade drag.
+    cost_drag_usdt   = total_funding + total_slippage + total_fees
     cost_drag_per_trade_usdt = (cost_drag_usdt / len(all_trades)) if all_trades else 0
     # Estimate avg margin used per trade (declines as balance changes).
     avg_margin = (sum(t.get("margin", 0) for t in all_trades) / len(all_trades)) if all_trades else 0
@@ -913,11 +944,12 @@ def run_futures_backtest(
             "avg_leverage_pnl": round(avg_pnl, 3),
             "leverage":         leverage,
             "starting_balance": starting_balance,
-            # Production-grade cost-transparency rows. The first two reduce
-            # P&L; the third does not (informational only).
+            # Production-grade cost-transparency rows. ALL THREE are
+            # DEDUCTED from the simulated balance — the final P&L you see
+            # is net of every cost you'd pay on KuCoin in production.
             "total_funding_paid":   round(total_funding, 4),
             "total_slippage_paid":  round(total_slippage, 4),
-            "total_hyp_kucoin_fees": round(total_hyp_kucoin_fees, 4),
+            "total_fees_paid":      round(total_fees, 4),     # real KuCoin fees, deducted
             "kucoin_taker_fee_pct": KUCOIN_TAKER_FEE * 100,
             "kucoin_maker_fee_pct": KUCOIN_MAKER_FEE * 100,
             # Math-check rails (see comment above the computation)
