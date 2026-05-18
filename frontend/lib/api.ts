@@ -172,6 +172,49 @@ async function request<T = any>(path: string, options?: RequestInit): Promise<T>
   throw lastErr;
 }
 
+// ── Long-running request path ───────────────────────────────────────────
+// Backtests can take 30s-4min (KuCoin data download + simulation across
+// hundreds of thousands of candles). Vercel's edge proxy kills any
+// rewrite that takes >60s with the cryptic ROUTER_EXTERNAL_TARGET_ERROR
+// the user has hit multiple times. Railway's proxy gives us 5 minutes,
+// which is enough for 1m × 30-day or 5m × 6-month combos.
+//
+// `requestLongRunning` bypasses the same-origin (Vercel) path entirely
+// and goes DIRECT to Railway when we're on Vercel, with a 4-minute
+// fetch timeout. Local dev uses the same same-origin path as `request`
+// (Next.js dev rewrite goes straight to localhost:8000, no proxy in
+// the way). Returns the same shape as `request<T>`.
+const LONG_REQUEST_TIMEOUT_MS = 240_000;   // 4 minutes
+
+async function requestLongRunning<T = any>(path: string, options?: RequestInit): Promise<T> {
+  const headers = await _buildAuthHeaders(options?.headers as Record<string, string>);
+  const finalOpts: RequestInit = { ...options, headers };
+  // Pick the URL: Railway direct on Vercel, same-origin in local dev.
+  const base = (typeof window !== 'undefined' && window.location.hostname.includes('vercel.app'))
+    ? RAILWAY_BACKEND
+    : API_BASE;
+  try {
+    const res = await _fetchWithTimeout(`${base}${path}`, finalOpts, LONG_REQUEST_TIMEOUT_MS);
+    if (!res.ok) {
+      const text = await res.text();
+      const err: Error & { status?: number; rawBody?: string } = new Error(text || `HTTP ${res.status}`);
+      err.status = res.status;
+      err.rawBody = text;
+      throw err;
+    }
+    return await res.json() as T;
+  } catch (e) {
+    if (_isRetryableNetworkError(e)) {
+      throw new Error(
+        'Backend timed out (>4 min) or could not be reached. For high-frequency '
+        + 'timeframes (1m, 5m) try a shorter period. For long periods (1Y+) try '
+        + '15m or 1h.'
+      );
+    }
+    throw e;
+  }
+}
+
 // Fire-and-forget warm-up: wakes Railway when the user first lands on the
 // app so the *real* first request (Setup → Test Connection, etc.) doesn't
 // pay the cold-start penalty. Cheap unauthenticated GET.
@@ -356,10 +399,14 @@ export const api = {
     account: (mode?: 'paper' | 'live') =>
       request<any>(`/api/futures/account${mode ? `?mode=${mode}` : ''}`),
     backtest: {
+      // run + autoTune go through the long-running path: direct to Railway
+      // (5min proxy timeout) instead of through Vercel's edge proxy (60s).
+      // This is what lets 1m × 30-day or 5m × 6-month combos complete
+      // without ROUTER_EXTERNAL_TARGET_ERROR.
       run: (data: Record<string, unknown>) =>
-        request<any>('/api/futures/backtest/run', { method: 'POST', body: JSON.stringify(data) }),
+        requestLongRunning<any>('/api/futures/backtest/run', { method: 'POST', body: JSON.stringify(data) }),
       autoTune: (data: Record<string, unknown>) =>
-        request<any>('/api/futures/backtest/auto-tune', { method: 'POST', body: JSON.stringify(data) }),
+        requestLongRunning<any>('/api/futures/backtest/auto-tune', { method: 'POST', body: JSON.stringify(data) }),
       history: (limit = 20) =>
         request<any>(`/api/futures/backtest/history?limit=${limit}`),
     },

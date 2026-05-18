@@ -62,6 +62,11 @@ function FuturesBacktestInner() {
   const [pairsLoading,    setPairsLoading]    = useState(false);
   const [showPairDrop,    setShowPairDrop]    = useState(false);
   const [timeframe,       setTimeframe]       = useState('15m');
+  // Pine Script export modal — shows the TradingView equivalent of the
+  // selected built-in strategy so the user can paste into TV's Pine
+  // Editor and verify our backtest matches TV's backtest. TV has no
+  // public backtest API, so manual paste+run is the only comparison path.
+  const [showPineModal,   setShowPineModal]   = useState(false);
   const [startBalance,    setStartBalance]    = useState(1000);
   const [leverage,        setLeverage]        = useState(10);
   const [stoploss,        setStoploss]        = useState(1.5);   // SL ≤ TP for positive R:R
@@ -209,17 +214,20 @@ function FuturesBacktestInner() {
     && levSrc !== 'manual'
     && tfSrc !== 'manual';
 
-  // High-frequency timeframe + long period = guaranteed Vercel timeout.
-  // Why: 1Y of 1m candles = ~525k bars × 200 per request from KuCoin =
-  // ~2600 API calls × ~0.5s each = 22+ min just for the data download,
-  // and Vercel's edge proxy kills any request over 60s
-  // (manifests as ROUTER_EXTERNAL_TARGET_ERROR). We block these combos
-  // up-front so the user sees a clear message instead of a cryptic 500.
-  // Approximate guard table:
-  //   1m   safe up to ~14 days (10k bars, ~50 API calls)
-  //   5m   safe up to ~90 days (26k bars, ~130 API calls)
-  //   15m  safe up to ~2-3 years
+  // High-frequency timeframe + long period guard.
+  //
+  // Backtest requests now go DIRECT to Railway (5min proxy timeout)
+  // instead of through Vercel's 60s edge proxy, which means we can
+  // safely handle much larger downloads than before. The new limits:
+  //
+  //   1m   safe up to ~30 days  (~43k bars, ~215 API calls, ~2min DL)
+  //   5m   safe up to ~180 days (~52k bars, ~260 API calls, ~2.5min DL)
+  //   15m  safe up to ~5 years
   //   1h+  safe at any preset
+  //
+  // Combos beyond these limits will still time out, just at Railway's
+  // 5min mark instead of Vercel's 60s. The guard blocks them up-front
+  // with a clear recommendation so the user doesn't waste 5 min waiting.
   const presetDays = (
     selectedPreset === 'Custom'
       ? (customRange.length === 17
@@ -239,10 +247,137 @@ function FuturesBacktestInner() {
       : (PRESETS.find(p => p.label === selectedPreset)?.days ?? 0)
   );
   const isHighFreqTooLong = (
-    (timeframe === '1m'  && presetDays > 14) ||
-    (timeframe === '5m'  && presetDays > 90) ||
+    (timeframe === '1m'  && presetDays > 30) ||
+    (timeframe === '5m'  && presetDays > 180) ||
     (timeframe === '15m' && presetDays > 1825)   // >5Y on 15m is borderline too
   );
+
+  // Pine Script equivalents of the built-in strategies. These are
+  // hand-translated from our Python signal functions to match the same
+  // signal logic so the user can paste into TradingView's Pine Editor →
+  // Add to Chart → Strategy Tester, and compare TV's backtest output
+  // against ours. Differences will exist (TV charges 0.1% commission by
+  // default; ours runs commission-free unless user enables real costs)
+  // but signal-bar counts and trade WR should match within a few percent.
+  function pineScriptFor(strategyName: string | undefined): string {
+    if (strategyName === 'SMCStrategyTV') {
+      return `//@version=5
+strategy("SMCStrategyTV — port from autotrade-hub",
+     overlay = true,
+     pyramiding = 0,                  // matches our Single position (TV) mode
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 5,           // matches our 5% margin/trade default
+     commission_type = strategy.commission.percent,
+     commission_value = 0.06,         // KuCoin Futures taker
+     process_orders_on_close = false, // entry at NEXT bar open (TV parity)
+     calc_on_every_tick = false)
+
+// ── Inputs (match our slider/leverage defaults) ──────────────────────
+swing_len = input.int(5, "Swing length N", minval = 1)
+
+// ── Pivot detection (N=5 each side) ──────────────────────────────────
+ph = ta.pivothigh(high, swing_len, swing_len)
+pl = ta.pivotlow (low,  swing_len, swing_len)
+var float last_ph = na
+var float last_pl = na
+if not na(ph)
+    last_ph := ph
+if not na(pl)
+    last_pl := pl
+
+// ── BOS: close crosses last confirmed pivot (edge detect) ────────────
+bull_bos = not na(last_ph) and close > last_ph and close[1] <= last_ph
+bear_bos = not na(last_pl) and close < last_pl and close[1] >= last_pl
+
+// ── FVG zone (price currently INSIDE an unfilled 3-candle imbalance) ─
+in_bull_fvg = false
+in_bear_fvg = false
+for k = 0 to 19
+    if bar_index - k >= 2
+        if high[k + 2] < low[k] and high[k + 2] <= close and close <= low[k]
+            in_bull_fvg := true
+            break
+        if low[k + 2] > high[k] and high[k] <= close and close <= low[k + 2]
+            in_bear_fvg := true
+            break
+
+// ── Structural SL/TP per signal ──────────────────────────────────────
+long_entry  = bull_bos and in_bull_fvg
+short_entry = bear_bos and in_bear_fvg
+
+long_sl  = not na(last_pl) ? last_pl * 0.999 : na   // 10bps below last pivot low
+short_sl = not na(last_ph) ? last_ph * 1.001 : na   // 10bps above last pivot high
+long_risk  = close - long_sl
+short_risk = short_sl - close
+
+// Reject if risk > 5% of price (broken structure)
+long_ok  = long_entry  and not na(long_sl)  and long_risk  > 0 and long_risk  <= close * 0.05
+short_ok = short_entry and not na(short_sl) and short_risk > 0 and short_risk <= close * 0.05
+
+long_tp1  = close + 2 * long_risk    // 2R
+short_tp1 = close - 2 * short_risk
+
+if long_ok
+    strategy.entry("L", strategy.long)
+    strategy.exit("L-exit", "L", stop = long_sl, limit = long_tp1)
+if short_ok
+    strategy.entry("S", strategy.short)
+    strategy.exit("S-exit", "S", stop = short_sl, limit = short_tp1)
+
+// Plot pivots for visual verification
+plotshape(ph, "PH", shape.triangledown, location.abovebar, color.red,   size = size.tiny)
+plotshape(pl, "PL", shape.triangleup,   location.belowbar, color.green, size = size.tiny)
+plotshape(long_ok,  "LONG",  shape.labelup,   location.belowbar, color.lime,
+          size = size.small, text = "L")
+plotshape(short_ok, "SHORT", shape.labeldown, location.abovebar, color.fuchsia,
+          size = size.small, text = "S")
+`;
+    }
+    if (strategyName === 'BidirectionalStrategy') {
+      return `//@version=5
+strategy("BidirectionalStrategy — port from autotrade-hub",
+     overlay = true,
+     pyramiding = 0,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 5,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.06,
+     process_orders_on_close = false,
+     calc_on_every_tick = false)
+
+ema9  = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+rsi   = ta.rsi(close, 14)
+
+uptrend   = ema9 > ema21 and ema9[1] > ema21[1]
+downtrend = ema9 < ema21 and ema9[1] < ema21[1]
+
+long_entry  = uptrend   and rsi < 60
+short_entry = downtrend and rsi > 40
+
+if long_entry
+    strategy.entry("L", strategy.long)
+    strategy.exit("L-exit", "L",
+         stop  = close * 0.985,    // -1.5%
+         limit = close * 1.030)    // +3.0%
+if short_entry
+    strategy.entry("S", strategy.short)
+    strategy.exit("S-exit", "S",
+         stop  = close * 1.015,
+         limit = close * 0.970)
+
+plot(ema9,  "EMA9",  color = color.aqua)
+plot(ema21, "EMA21", color = color.orange)
+`;
+    }
+    // Fallback — generic note
+    return `// No Pine Script port available for "${strategyName ?? '(unknown)'}".
+// Strategies with hand-built signal functions in native_backtester.py
+// (MissCandleLong/Short, MACD, RSI Bollinger, EmaScalping, SimpleTarget)
+// don't have a direct Pine equivalent yet. SMCStrategyTV and
+// BidirectionalStrategy DO — pick one of those from the Strategy dropdown
+// to see its Pine Script port.`;
+  }
 
   // Detect whether the selected strategy is one whose signal function
   // returns its own structural SL/TP (engine honors those over slider).
@@ -378,6 +513,77 @@ function FuturesBacktestInner() {
         Includes liquidation simulation, funding fees, and long/short breakdown.
       </p>
 
+      {/* ── Pine Script export modal (TradingView comparison) ─────────────
+          TradingView has no public backtest API, so the only way to verify
+          our results against TV is to manually paste an equivalent Pine
+          Script into TV's Pine Editor and run it there. This modal shows
+          the hand-translated Pine code for the selected strategy and gives
+          step-by-step instructions for the user. */}
+      {showPineModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setShowPineModal(false)}
+        >
+          <div
+            className="bg-[#0d1424] border border-[#2a3a52] rounded-xl max-w-4xl w-full max-h-[85vh] overflow-hidden flex flex-col"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="p-4 border-b border-[#2a3a52] flex items-center justify-between">
+              <div>
+                <h3 className="text-base font-semibold text-sky-300">
+                  📊 Pine Script for TradingView comparison
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Strategy: <b className="text-slate-200">{selectedStrategy?.name ?? '—'}</b>
+                  {' · '}Timeframe: <b className="text-slate-200">{timeframe}</b>
+                  {' · '}Pair: <b className="text-slate-200">{pairs[0] ?? 'BTC/USDT'}</b>
+                </p>
+              </div>
+              <button
+                onClick={() => setShowPineModal(false)}
+                className="text-slate-400 hover:text-white text-lg leading-none px-2"
+                title="Close"
+              >×</button>
+            </div>
+
+            <div className="p-4 overflow-y-auto flex-1">
+              <div className="mb-4 p-3 rounded-lg bg-sky-500/5 border border-sky-500/30 text-[11px] text-slate-300 leading-relaxed">
+                <div className="text-sky-300 font-medium mb-1">How to compare against TradingView</div>
+                <ol className="list-decimal pl-4 space-y-0.5">
+                  <li>Copy the Pine Script below.</li>
+                  <li>Open TradingView → load the same chart (e.g. <b>BINANCE:BTCUSDT.P</b> or <b>KUCOIN:XBTUSDTM</b>), same timeframe ({timeframe}).</li>
+                  <li>Open the <b>Pine Editor</b> (bottom panel) → paste → click <b>Save</b> + <b>Add to Chart</b>.</li>
+                  <li>Open <b>Strategy Tester</b> (bottom panel) → set the date range to match (e.g. {timerange.split('-')[0]} → {timerange.split('-')[1]}).</li>
+                  <li>Compare Total Trades, Win Rate, and Net Profit between TV's report and ours.</li>
+                </ol>
+                <div className="mt-2 text-slate-400 text-[10px]">
+                  Expected differences: TV defaults to 0.1% commission (we use 0.06% KuCoin taker; toggleable).
+                  TV's <code>strategy.entry</code> fills at next bar open like us. Trade counts should match within ~5%;
+                  win rate within ~3pp. Larger gaps mean a real signal-logic discrepancy worth investigating.
+                </div>
+              </div>
+
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const code = pineScriptFor(selectedStrategy?.name);
+                    navigator.clipboard?.writeText(code);
+                  }}
+                  className="absolute top-2 right-2 text-[10px] font-medium px-2 py-1 rounded-md bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/40"
+                  title="Copy Pine Script to clipboard"
+                >
+                  📋 Copy
+                </button>
+                <pre className="text-[10px] font-mono text-emerald-100 bg-black/40 border border-[#2a3a52] rounded-lg p-3 overflow-auto max-h-[55vh] whitespace-pre">
+{pineScriptFor(selectedStrategy?.name)}
+                </pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Config card */}
       <div className="card mb-8">
 
@@ -465,21 +671,31 @@ function FuturesBacktestInner() {
         {/* ── Strategy / Pairs / Timeframe ───────────────────────────── */}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4 mb-6">
           <div className="col-span-2">
-            <label className="label flex items-center justify-between">
+            <label className="label flex items-center justify-between gap-2 flex-wrap">
               <span>Strategy</span>
-              <button
-                type="button"
-                onClick={() => applyStrategyParams(selectedStrategy)}
-                disabled={!selectedStrategy || alreadyMatchesStrategy}
-                title={
-                  alreadyMatchesStrategy
-                    ? 'All risk parameters already match the selected strategy'
-                    : "Reset leverage, stop-loss, take-profit and timeframe to this strategy's declared values"
-                }
-                className="text-[10px] font-medium px-2 py-0.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-30 disabled:cursor-not-allowed"
-              >
-                ⚙ Apply strategy params
-              </button>
+              <span className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowPineModal(true)}
+                  title="Show the TradingView Pine Script equivalent of this strategy so you can paste it into TV's Pine Editor and compare backtests."
+                  className="text-[10px] font-medium px-2 py-0.5 rounded-md border border-sky-500/40 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20"
+                >
+                  📊 Pine Script (for TV)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => applyStrategyParams(selectedStrategy)}
+                  disabled={!selectedStrategy || alreadyMatchesStrategy}
+                  title={
+                    alreadyMatchesStrategy
+                      ? 'All risk parameters already match the selected strategy'
+                      : "Reset leverage, stop-loss, take-profit and timeframe to this strategy's declared values"
+                  }
+                  className="text-[10px] font-medium px-2 py-0.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  ⚙ Apply strategy params
+                </button>
+              </span>
             </label>
             <select className="input" value={strategyId ?? ''}
               onChange={e => setStrategyId(Number(e.target.value))}>
@@ -707,12 +923,11 @@ function FuturesBacktestInner() {
           </span>
         </div>
 
-        {/* High-frequency-timeframe guard.
-            1m × 1Y and 5m × multi-year combos require downloading hundreds
-            of thousands of candles, which busts Vercel's 60s edge-proxy
-            timeout (manifests as the cryptic ROUTER_EXTERNAL_TARGET_ERROR
-            the user already hit). We block them up-front with a clear
-            recommendation so they don't waste time. */}
+        {/* High-frequency-timeframe guard. With the new direct-Railway path
+            we get a 5-minute budget instead of Vercel's 60s, but the
+            absolute monster combos (1m × 1Y = 525k candles ≈ 22 min DL)
+            still time out. Better to block them up-front than have the
+            user wait 5 min for a failure. */}
         {isHighFreqTooLong && (
           <div className="mb-3 p-3 rounded-lg bg-red-500/10 border border-red-500/40 text-xs">
             <div className="text-red-300 font-medium">
@@ -720,10 +935,11 @@ function FuturesBacktestInner() {
             </div>
             <div className="text-red-200/80 mt-1 leading-relaxed">
               This combo needs to download ~{Math.round(presetDays * (timeframe === '1m' ? 1440 : timeframe === '5m' ? 288 : 96) / 1000)}k candles,
-              which takes well over Vercel's 60s edge-proxy timeout. Pick a higher
-              timeframe (try <b className="text-emerald-300">15m</b> or <b className="text-emerald-300">1h</b>)
-              or a shorter period (<b className="text-emerald-300">1W</b> or <b className="text-emerald-300">1M</b>).
-              Practical limits: <b>1m</b> ≤ 14 days · <b>5m</b> ≤ 90 days · <b>15m+</b> all periods.
+              which takes more than the 5-minute Railway proxy timeout we
+              have to work with. Pick a higher timeframe (try <b className="text-emerald-300">15m</b>{' '}
+              or <b className="text-emerald-300">1h</b>) or a shorter period.
+              Practical limits: <b>1m</b> ≤ 30 days · <b>5m</b> ≤ 6 months ·
+              <b>15m+</b> all periods.
             </div>
           </div>
         )}
