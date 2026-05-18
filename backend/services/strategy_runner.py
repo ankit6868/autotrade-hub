@@ -544,37 +544,91 @@ def make_signal_fn_from_df(df: pd.DataFrame, leverage: int,
     columns populated, return a signal_fn(df, i) → (entry_px, sl, tp, dir)
     matching the existing engine's expected shape.
 
-    SL/TP here are the user-defined %s from the backtest UI. The user's
-    strategy class may define its own stoploss/minimal_roi but the futures
-    engine handles those at the engine level (it doesn't use the strategy's
-    custom_stoploss/custom_exit hooks).
+    Per-trade SL/TP source priority (highest wins):
+      1. `sl_price` / `tp_price` columns populated by the user's strategy
+         in populate_indicators — these are the strategy's *structural*
+         per-bar levels (e.g. SMCStrategyTV computes SL from the last
+         confirmed pivot and TP = entry ± 2R). When non-NaN at the signal
+         bar, the engine honours them and the slider %s are ignored.
+      2. Slider stoploss_pct / take_profit_pct from the UI — used as a
+         fallback whenever the strategy didn't populate the columns
+         (typical for fixed-% strategies like EmaScalping). This is also
+         what gets used when the user explicitly picks "From sliders"
+         in the SL/TP source toggle (the engine sets force_slider_sltp
+         which makes the futures backtester rebuild SL/TP from sliders
+         AFTER the signal fn returns — see futures_backtester.py).
     """
     enter_long = df["enter_long"].astype(int).values if "enter_long" in df.columns else None
     enter_short = df["enter_short"].astype(int).values if "enter_short" in df.columns else None
 
+    # Pull strategy-populated structural SL/TP columns into numpy arrays
+    # once, so the bar-by-bar signal_fn doesn't pay dict-lookup cost on
+    # every call. `sl_price` / `tp_price` are TP1; `tp2_price` is the
+    # optional multi-TP second target (e.g. SMC's previous swing extreme).
+    sl_col  = df["sl_price"].to_numpy()  if "sl_price"  in df.columns else None
+    tp_col  = df["tp_price"].to_numpy()  if "tp_price"  in df.columns else None
+    tp2_col = df["tp2_price"].to_numpy() if "tp2_price" in df.columns else None
+
+    def _structural_or_slider(entry: float, direction: str, i: int):
+        """Return (sl, tp1, tp2_or_None) for this bar — structural if the
+        strategy populated valid (non-NaN, positive) values; otherwise
+        slider-based. tp2 is only populated when the strategy returned a
+        valid second target and direction validates."""
+        # Try strategy-populated columns first.
+        if sl_col is not None and tp_col is not None and i < len(sl_col):
+            sl_v = sl_col[i]
+            tp_v = tp_col[i]
+            tp2_v = tp2_col[i] if tp2_col is not None and i < len(tp2_col) else None
+            if (sl_v is not None and tp_v is not None
+                and not (isinstance(sl_v, float) and np.isnan(sl_v))
+                and not (isinstance(tp_v, float) and np.isnan(tp_v))
+                and float(sl_v) > 0 and float(tp_v) > 0):
+                # Sanity-check direction.
+                sl_f, tp_f = float(sl_v), float(tp_v)
+                tp2_f: float | None = None
+                if (tp2_v is not None
+                    and not (isinstance(tp2_v, float) and np.isnan(tp2_v))
+                    and float(tp2_v) > 0):
+                    tp2_candidate = float(tp2_v)
+                    # TP2 must be FURTHER from entry than TP1 in the same
+                    # direction; otherwise treat as missing.
+                    if direction == "long" and tp2_candidate > tp_f:
+                        tp2_f = tp2_candidate
+                    elif direction == "short" and tp2_candidate < tp_f:
+                        tp2_f = tp2_candidate
+                if direction == "long" and sl_f < entry and tp_f > entry:
+                    return sl_f, tp_f, tp2_f
+                if direction == "short" and sl_f > entry and tp_f < entry:
+                    return sl_f, tp_f, tp2_f
+        # Fallback: slider %s, no TP2.
+        if direction == "long":
+            return entry * (1 - stoploss_pct / 100), entry * (1 + take_profit_pct / 100), None
+        return entry * (1 + stoploss_pct / 100), entry * (1 - take_profit_pct / 100), None
+
     def signal_fn(_df, i):
         # Edge-only firing (matches TradingView's strategy.entry behaviour):
         # we treat a signal as fired only on the bar where the condition
-        # *transitions* from False→True. If the strategy's enter_long stays
-        # True for 20 consecutive bars, that's ONE entry signal — not 20.
-        # This is what causes "26 signal bars → only 3 trades" confusion:
-        # without edge detection, the same setup re-fires every bar while
-        # the condition holds, but the engine can only act on the first.
-        # With edge detection, the signal count matches the trade count.
+        # *transitions* from False→True.
+        #
+        # Returns either a 4-tuple (entry, sl, tp, dir) — single-TP — or a
+        # 5-tuple (entry, sl, tp1, tp2, dir) when the strategy populated
+        # a valid tp2_price. The engine handles both shapes.
         if enter_long is not None and i < len(enter_long) and enter_long[i]:
             prev = enter_long[i - 1] if i > 0 else 0
             if not prev:
                 entry = float(_df.iloc[i]["close"])
-                sl = entry * (1 - stoploss_pct / 100)
-                tp = entry * (1 + take_profit_pct / 100)
-                return entry, sl, tp, "long"
+                sl, tp1, tp2 = _structural_or_slider(entry, "long", i)
+                if tp2 is not None:
+                    return entry, sl, tp1, tp2, "long"
+                return entry, sl, tp1, "long"
         if enter_short is not None and i < len(enter_short) and enter_short[i]:
             prev = enter_short[i - 1] if i > 0 else 0
             if not prev:
                 entry = float(_df.iloc[i]["close"])
-                sl = entry * (1 + stoploss_pct / 100)
-                tp = entry * (1 - take_profit_pct / 100)
-                return entry, sl, tp, "short"
+                sl, tp1, tp2 = _structural_or_slider(entry, "short", i)
+                if tp2 is not None:
+                    return entry, sl, tp1, tp2, "short"
+                return entry, sl, tp1, "short"
         return None
 
     return signal_fn

@@ -444,7 +444,7 @@ def run_futures_backtest(
             new_pending: list[tuple] = []
             for pe in pending_entries:
                 (sig_dir, _, sig_sl, sig_tp, _, sig_margin, use_signal_sltp,
-                 signal_bar_idx, signal_bar_ts) = pe
+                 signal_bar_idx, signal_bar_ts, sig_tp2) = pe
 
                 # Free-margin check: don't open if we can't afford the margin.
                 free_margin = balance - committed_margin
@@ -502,6 +502,22 @@ def run_futures_backtest(
                     "signal_bar_ts":    signal_bar_ts,
                     "entry_bar_index":  i,
                     "sltp_source":      "strategy" if use_signal_sltp else "slider",
+                    # Multi-TP state. tp2 is None for single-TP strategies
+                    # (everything currently in use except the new SMCStrategyTV
+                    # institutional model). When set:
+                    #   • tp1 fill closes tp1_close_pct of margin, moves SL
+                    #     to entry (breakeven trail)
+                    #   • tp2 fill closes the remainder
+                    # remaining_pct is what fraction of the original margin
+                    # is still in the trade; starts at 1.0.
+                    "tp2":              sig_tp2,
+                    "tp1_close_pct":    0.5 if sig_tp2 is not None else 1.0,
+                    "remaining_pct":    1.0,
+                    "tp1_hit":          False,
+                    "partial_pnl":      0.0,
+                    "partial_fees":     0.0,
+                    "partial_slippage": 0.0,
+                    "partial_exits":    [],   # for trade record / signal trace
                 })
             pending_entries = new_pending
 
@@ -529,11 +545,28 @@ def run_futures_backtest(
                         funding_cost += pos_value * signed_rate
                     pos["funding_paid"] += funding_cost
 
-                # Exit detection
-                liquidated = False
+                # ── Exit detection with optional multi-TP partial close ──
+                # When pos["tp2"] is None: single-TP path — TP closes 100%.
+                # When pos["tp2"] is set:
+                #   1. TP1 hit (first time) → close tp1_close_pct of margin,
+                #      move SL to entry (breakeven trail), keep position open.
+                #   2. SL hit → close remaining_pct.
+                #   3. TP2 hit → close remaining_pct.
+                # Liquidation always closes everything.
+                #
+                # We process at most ONE partial event per bar — even if both
+                # TP1 and TP2 hit in the same candle, TP1 fires first and
+                # the remainder rolls to the next bar. That's pessimistic but
+                # honest: without tick data we can't know the intra-bar order.
+                liquidated   = False
                 exit_slippage_bps = 0
-                raw_exit_p = None
-                exit_rsn   = ""
+                raw_exit_p   = None
+                exit_rsn     = ""
+                partial_event = False   # True when we close part but not all
+
+                tp = pos["tp"]
+                tp2 = pos.get("tp2")
+                has_tp2 = tp2 is not None and not pos["tp1_hit"]
 
                 if direction == "long" and lo <= liq_price:
                     raw_exit_p = liq_price
@@ -544,23 +577,56 @@ def run_futures_backtest(
                     liquidated = True
                     exit_slippage_bps = SLIPPAGE_BPS_LIQ
                 else:
+                    # TP1 is only checkable BEFORE the first partial fires.
+                    # Once tp1_hit=True, the runner targets TP2 (or SL@BE).
+                    # This prevents TP1 from re-triggering on the remainder
+                    # and producing fake "take_profit" labels when the
+                    # multi-TP intent was never fulfilled.
                     if direction == "long":
-                        sl_hit = lo <= sl
-                        tp_hit = hi >= tp
+                        sl_hit  = lo <= sl
+                        tp1_hit = (not pos["tp1_hit"]) and (hi >= tp)
+                        tp2_hit = (pos["tp1_hit"] and tp2 is not None and hi >= tp2)
                     else:
-                        sl_hit = hi >= sl
-                        tp_hit = lo <= tp
-                    if sl_hit and tp_hit:
+                        sl_hit  = hi >= sl
+                        tp1_hit = (not pos["tp1_hit"]) and (lo <= tp)
+                        tp2_hit = (pos["tp1_hit"] and tp2 is not None and lo <= tp2)
+
+                    if has_tp2 and sl_hit and tp1_hit:
+                        # Both hit same bar — use "closer to open" heuristic.
+                        if abs(bar_o - tp) < abs(bar_o - sl):
+                            raw_exit_p = tp; exit_rsn = "take_profit_1"
+                            exit_slippage_bps = SLIPPAGE_BPS_TP
+                            partial_event = True
+                        else:
+                            raw_exit_p = sl; exit_rsn = "stop_loss"
+                            exit_slippage_bps = SLIPPAGE_BPS_STOP
+                    elif has_tp2 and tp1_hit:
+                        raw_exit_p = tp; exit_rsn = "take_profit_1"
+                        exit_slippage_bps = SLIPPAGE_BPS_TP
+                        partial_event = True
+                    elif sl_hit and tp1_hit:
+                        # Single-TP path: same-bar SL+TP heuristic.
                         if abs(bar_o - tp) < abs(bar_o - sl):
                             raw_exit_p = tp; exit_rsn = "take_profit"
                             exit_slippage_bps = SLIPPAGE_BPS_TP
                         else:
                             raw_exit_p = sl; exit_rsn = "stop_loss"
                             exit_slippage_bps = SLIPPAGE_BPS_STOP
+                    elif tp2_hit and sl_hit:
+                        # Same-bar SL@BE and TP2: heuristic on bar open.
+                        if abs(bar_o - tp2) < abs(bar_o - sl):
+                            raw_exit_p = tp2; exit_rsn = "take_profit_2"
+                            exit_slippage_bps = SLIPPAGE_BPS_TP
+                        else:
+                            raw_exit_p = sl; exit_rsn = "stop_loss"
+                            exit_slippage_bps = SLIPPAGE_BPS_STOP
+                    elif tp2_hit:
+                        raw_exit_p = tp2; exit_rsn = "take_profit_2"
+                        exit_slippage_bps = SLIPPAGE_BPS_TP
                     elif sl_hit:
                         raw_exit_p = sl; exit_rsn = "stop_loss"
                         exit_slippage_bps = SLIPPAGE_BPS_STOP
-                    elif tp_hit:
+                    elif tp1_hit:
                         raw_exit_p = tp; exit_rsn = "take_profit"
                         exit_slippage_bps = SLIPPAGE_BPS_TP
 
@@ -570,49 +636,112 @@ def run_futures_backtest(
                     still_open.append(pos)
                     continue
 
-                # Position closes this bar — compute final P&L.
+                # ── Compute the leg P&L (full or partial) ────────────────
                 exit_p = _apply_slippage(raw_exit_p, direction, "exit",
                                          exit_slippage_bps)
+                # close_pct = fraction of the ORIGINAL margin being closed
+                # on this event. For full exits and TP2/SL after partial,
+                # this is whatever's left (remaining_pct).
+                if partial_event:
+                    close_pct = pos["tp1_close_pct"]
+                else:
+                    close_pct = pos["remaining_pct"]
+                leg_margin = margin * close_pct
+                leg_pos_value = leg_margin * leverage
 
                 if liquidated:
-                    pnl_abs = -margin
+                    leg_pnl = -leg_margin
                 else:
                     if direction == "long":
                         price_move_pct = (exit_p - entry_price) / entry_price
                     else:
                         price_move_pct = (entry_price - exit_p) / entry_price
                     leveraged_pnl_pct = price_move_pct * leverage
-                    pnl_abs = margin * leveraged_pnl_pct - funding_cost
-                    pnl_abs = max(pnl_abs, -margin)
+                    # Funding is charged on the FULL position size per bar
+                    # (KuCoin behaviour). We allocate this bar's funding
+                    # entirely to this leg's P&L since it's the only leg
+                    # that's still settling this bar.
+                    leg_pnl = leg_margin * leveraged_pnl_pct - funding_cost
+                    leg_pnl = max(leg_pnl, -leg_margin)
 
-                # Track slippage (USDT).
-                pos_value_exit = margin * leverage
-                units = pos_value_exit / max(entry_price, 1e-9)
-                pos["slippage_paid"] += abs(raw_exit_p - exit_p) * units
+                units = leg_pos_value / max(entry_price, 1e-9)
+                leg_slippage = abs(raw_exit_p - exit_p) * units
+                pos["slippage_paid"] += leg_slippage
 
-                # ── Deduct real KuCoin exit fee ─────────────────────────
-                # TP fills are limit orders → maker fee.
-                # SL / liquidation fills are market → taker fee.
-                if exit_rsn == "take_profit":
-                    exit_fee = pos_value_exit * KUCOIN_MAKER_FEE
+                # KuCoin fees on this leg's notional.
+                if exit_rsn in ("take_profit", "take_profit_1", "take_profit_2"):
+                    leg_fee = leg_pos_value * KUCOIN_MAKER_FEE
                 else:
-                    exit_fee = pos_value_exit * KUCOIN_TAKER_FEE
-                pos["fees_paid"] += exit_fee
-                balance -= exit_fee
+                    leg_fee = leg_pos_value * KUCOIN_TAKER_FEE
+                pos["fees_paid"] += leg_fee
+                balance -= leg_fee
 
-                # Settle: release margin, apply P&L.
-                committed_margin -= margin
-                balance += pnl_abs
-                balance  = max(balance, 0)
+                # Record this leg.
+                pos["partial_pnl"] += leg_pnl
+                pos["partial_exits"].append({
+                    "bar_index":  i,
+                    "reason":     exit_rsn,
+                    "price":      round(float(exit_p), 4),
+                    "close_pct":  round(float(close_pct), 4),
+                    "pnl":        round(float(leg_pnl), 4),
+                })
 
-                # Recompute realised profit AFTER all costs are out, so the
-                # trade row reflects what the user actually netted on this
-                # trade — not a gross-of-fees figure. pnl_abs already
-                # includes funding; subtract entry_fee (paid at open) and
-                # exit_fee (paid just now) to get the trade's true net P&L.
-                entry_fee_for_trade = pos["fees_paid"] - exit_fee  # i.e. the entry portion
-                net_pnl_abs = pnl_abs - entry_fee_for_trade - exit_fee
-                profit_pct = (net_pnl_abs / margin * 100) if margin > 0 else 0
+                # Release this leg's margin, apply P&L to balance.
+                committed_margin -= leg_margin
+                balance += leg_pnl
+                balance = max(balance, 0)
+
+                if partial_event:
+                    # Position still has remaining_pct left. Move SL to
+                    # entry (breakeven trail — locks in zero downside on
+                    # the rest), and continue.
+                    pos["tp1_hit"] = True
+                    pos["remaining_pct"] -= close_pct
+                    pos["sl"] = entry_price
+                    sl = entry_price
+                    still_open.append(pos)
+                    continue
+
+                # Position fully closed — assemble the aggregate trade record.
+                #
+                # P&L bookkeeping (single source of truth):
+                #   • leg_pnl is gross of leg-level fees, computed per-leg
+                #   • pos["partial_pnl"] = SUM of leg_pnl values
+                #   • pos["fees_paid"]    = entry_fee + SUM of leg exit fees
+                #     (each pushed when the leg fires)
+                #   • Net P&L the user sees = partial_pnl - fees_paid
+                #     (funding is already inside partial_pnl via leg_pnl)
+                net_pnl_abs = pos["partial_pnl"] - pos["fees_paid"]
+                profit_pct  = (net_pnl_abs / margin * 100) if margin > 0 else 0
+
+                # Weighted-average exit price across all legs — single
+                # representative "close_rate" for the trade row, even when
+                # there were 2-3 fills.
+                total_close_pct = sum(leg["close_pct"] for leg in pos["partial_exits"])
+                if total_close_pct > 0:
+                    wavg_exit = sum(
+                        leg["price"] * leg["close_pct"]
+                        for leg in pos["partial_exits"]
+                    ) / total_close_pct
+                else:
+                    wavg_exit = exit_p
+
+                # Headline exit reason for the row.
+                if len(pos["partial_exits"]) > 1:
+                    reasons = [leg["reason"] for leg in pos["partial_exits"]]
+                    if "take_profit_2" in reasons:
+                        final_reason = "multi_tp_completed"
+                    elif "stop_loss" in reasons:
+                        final_reason = "tp1_then_stop"
+                    else:
+                        final_reason = reasons[-1]
+                else:
+                    final_reason = "liquidated" if liquidated else exit_rsn
+                    if final_reason == "take_profit_1":
+                        # Single-leg take-profit on a multi-TP-enabled trade
+                        # would imply TP1 closed everything (close_pct=1.0),
+                        # which only happens for single-TP setups. Normalise.
+                        final_reason = "take_profit"
                 all_trades.append({
                     "pair":        pair,
                     "direction":   direction,
@@ -621,14 +750,15 @@ def run_futures_backtest(
                     "close_date":  str(row["date"]),
                     "entry":       round(float(entry_price), 4),
                     "open_rate":   round(float(entry_price), 4),
-                    "close_rate":  round(float(exit_p), 4),
+                    "close_rate":  round(float(wavg_exit), 4),
                     "sl_price":    round(float(sl), 4),
                     "tp_price":    round(float(tp), 4),
+                    "tp2_price":   round(float(pos["tp2"]), 4) if pos.get("tp2") else None,
                     "liq_price":   round(float(liq_price), 4),
                     "margin":      round(float(margin), 4),
                     "profit_pct":  round(float(profit_pct), 3),
                     "profit_abs":  round(float(net_pnl_abs), 4),     # NET of all costs
-                    "exit_reason": "liquidated" if liquidated else exit_rsn,
+                    "exit_reason": final_reason,
                     "balance":     round(float(balance), 2),
                     "candles_held": pos["candles_held"],
                     "funding_paid":      round(float(pos["funding_paid"]),    4),
@@ -641,6 +771,12 @@ def run_futures_backtest(
                     "entry_bar_index":  pos["entry_bar_index"],
                     "exit_bar_index":   i,
                     "sltp_source":      pos["sltp_source"],
+                    # Multi-TP partial-close trace. Single-TP trades have
+                    # exactly one entry in this list with close_pct=1.0.
+                    # Multi-TP trades typically have 2 entries (TP1 then
+                    # SL-at-BE or TP2). Lets the user see the actual fill
+                    # sequence behind a multi_tp_completed trade.
+                    "partial_exits":    pos["partial_exits"],
                 })
             open_positions = still_open
 
@@ -651,7 +787,15 @@ def run_futures_backtest(
             in_window = i <= last_in_window_idx
             sig = signal_fn(df, i) if (i >= 3 and in_window) else None
             if sig is not None:
-                sig_entry, sl_raw, tp_raw, sig_dir = sig
+                # Accept either 4-tuple (entry, sl, tp, dir) or 5-tuple
+                # (entry, sl, tp1, tp2, dir). Multi-TP unlocks partial-close
+                # behaviour in the engine: TP1 closes 50% and moves SL to
+                # entry (breakeven trail), TP2 closes the remainder.
+                if len(sig) == 5:
+                    sig_entry, sl_raw, tp_raw, tp2_raw, sig_dir = sig
+                else:
+                    sig_entry, sl_raw, tp_raw, sig_dir = sig
+                    tp2_raw = None
                 if balance <= 0:
                     # Wiped out — no more trades possible.
                     continue
@@ -712,6 +856,7 @@ def run_futures_backtest(
                 #     from make_signal_fn_from_df which already builds SL/TP
                 #     from sliders), or
                 #   • force_slider_sltp=True (auto-tune grid sweep).
+                sig_tp2: float | None = None
                 if force_slider_sltp:
                     sl_dist = sig_entry * stoploss_pct / 100
                     tp_dist = sig_entry * take_profit_pct / 100
@@ -722,6 +867,9 @@ def run_futures_backtest(
                         sig_sl = sig_entry + sl_dist
                         sig_tp = sig_entry - tp_dist
                     use_signal_sltp = False
+                    # Force-slider mode IGNORES multi-TP — user explicitly
+                    # asked for fixed % SL/TP, so we use slider values only.
+                    sig_tp2 = None
                 else:
                     # Sanity-cap the strategy's SL distance: anything wider
                     # than 25% of entry price is almost certainly a bug
@@ -732,6 +880,16 @@ def run_futures_backtest(
                     if risk_dist > 0 and risk_dist <= sig_entry * 0.25:
                         sig_sl, sig_tp = sl_raw, tp_raw
                         use_signal_sltp = True
+                        # TP2 only honoured when (a) strategy returned it
+                        # AND (b) it's further from entry than TP1 in the
+                        # trade direction. We validated direction in
+                        # make_signal_fn_from_df; defensive re-check here.
+                        if tp2_raw is not None:
+                            tp2_f = float(tp2_raw)
+                            if sig_dir == "long" and tp2_f > sig_tp:
+                                sig_tp2 = tp2_f
+                            elif sig_dir == "short" and tp2_f < sig_tp:
+                                sig_tp2 = tp2_f
                     else:
                         sl_dist = sig_entry * stoploss_pct / 100
                         tp_dist = sig_entry * take_profit_pct / 100
@@ -742,6 +900,7 @@ def run_futures_backtest(
                             sig_sl = sig_entry + sl_dist
                             sig_tp = sig_entry - tp_dist
                         use_signal_sltp = False
+                        sig_tp2 = None
 
                 if use_signal_sltp:
                     sltp_from_signal += 1
@@ -761,7 +920,8 @@ def run_futures_backtest(
                 signal_bar_ts  = bar_ts_secs
                 pending_entries.append(
                     (sig_dir, sig_entry, sig_sl, sig_tp, sig_liq,
-                     sig_margin, use_signal_sltp, signal_bar_idx, signal_bar_ts)
+                     sig_margin, use_signal_sltp, signal_bar_idx, signal_bar_ts,
+                     sig_tp2)
                 )
 
         # ── End of bar loop: handle leftover open positions ───────────────
@@ -782,14 +942,19 @@ def run_futures_backtest(
                 direction   = pos["direction"]
                 entry_price = pos["entry_price"]
                 margin      = pos["margin"]
-                # Compute (but don't realise) mark-to-market P&L so the user
-                # can see what their open exposure is worth at end of period.
+                # For partially-closed multi-TP trades, the remaining
+                # margin is `margin × remaining_pct`. Mark-to-market
+                # only on that remainder; the closed portion was already
+                # released to balance when each TP fired.
+                remaining_margin = margin * pos.get("remaining_pct", 1.0)
                 if direction == "long":
                     move_pct = (last_close - entry_price) / entry_price
                 else:
                     move_pct = (entry_price - last_close) / entry_price
-                unrealised_pnl_at_end += max(margin * move_pct * leverage, -margin)
-                committed_margin -= margin
+                unrealised_pnl_at_end += max(
+                    remaining_margin * move_pct * leverage, -remaining_margin
+                )
+                committed_margin -= remaining_margin
             open_positions = []
 
         # End of per-pair bar loop — write per-pair signal-disposition counts
