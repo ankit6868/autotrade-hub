@@ -76,6 +76,12 @@ function FuturesBacktestInner() {
   // rate. Above 10% gets aggressive; above 20% can liquidate the account
   // on a single bad streak at any meaningful leverage.
   const [riskPerTrade,    setRiskPerTrade]    = useState(5);
+  // Whether to deduct funding fees + KuCoin taker/maker fees from the
+  // simulated balance. Default OFF (pure strategy P&L) — user explicitly
+  // asked: "no need of real trading cost and dont deduct my p&l from
+  // this fee". When ON, balance reflects what the strategy would deliver
+  // on KuCoin after all execution costs.
+  const [deductCosts,     setDeductCosts]     = useState(false);
   // SL/TP source mode:
   //   'strategy' = use the SL/TP the signal function returns (e.g.
   //                SMCStrategyTV's structural swing-based stops + 2R TP)
@@ -259,6 +265,9 @@ function FuturesBacktestInner() {
         // sltpMode === 'slider' → tell backend to ignore strategy's
         // structural levels and use slider values instead.
         force_slider_sltp: sltpMode === 'slider',
+        // When false, backend zeros out fee/funding deductions so the
+        // returned P&L reflects pure price action × leverage.
+        deduct_real_costs: deductCosts,
       });
       if (data.error) setError(data.error);
       else {
@@ -555,6 +564,34 @@ function FuturesBacktestInner() {
             {sltpMode === 'strategy'
               ? <>Engine uses <b className="text-sky-300">strategy's own SL/TP</b> per signal — sliders are ignored (each trade exits at its own structural level).</>
               : <>Engine uses <b className="text-amber-300">slider SL/TP</b> for every trade — strategy's structural levels are overridden.</>}
+          </span>
+        </div>
+
+        {/* ── Pure strategy P&L vs realistic costs toggle ────────────────
+            Default OFF (pure) — user explicitly asked for trade P&L not
+            to be reduced by funding + KuCoin fees. Slippage stays on
+            always because it's fill-quality modeling not a "cost".
+            When ON, balance and trade rows show what the strategy would
+            actually deliver on KuCoin including all execution costs. */}
+        <div className="mb-5 flex items-center gap-3 flex-wrap">
+          <label className="label !mb-0 flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={deductCosts}
+              onChange={e => setDeductCosts(e.target.checked)}
+              className="accent-sky-500"
+            />
+            <span>Include real trading costs</span>
+            <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-slate-700/60 text-slate-300"
+                  title="When ON: KuCoin taker (0.06%) / maker (0.02%) fees + funding (every 8h at real KuCoin rates) deduct from the simulated balance. Trade P&L reflects what you'd actually net on KuCoin. When OFF (default): pure strategy P&L — only price action × leverage, no fees/funding deducted."
+            >
+              {deductCosts ? 'realistic mode' : 'pure P&L mode'}
+            </span>
+          </label>
+          <span className="text-[11px] text-slate-400 leading-snug max-w-lg">
+            {deductCosts
+              ? <>Trade P&L is <b className="text-amber-300">net of KuCoin fees + funding</b> — production-grade.</>
+              : <>Trade P&L is <b className="text-emerald-300">pure price action × leverage</b> — no fees or funding deducted.</>}
           </span>
         </div>
 
@@ -1102,12 +1139,12 @@ function FuturesBacktestInner() {
             </div>
           )}
 
-          {/* Cost-drag insight — the single most useful piece of information
-              when a strategy has positive gross EV but the balance still
-              ended negative. Without this card, the user sees
-              "Positive expected value" + "-7.92% total profit" and can't
-              reconcile the contradiction. */}
-          {m.cost_drag_per_trade_pct !== undefined
+          {/* Cost-drag insight — only shown when realistic costs are
+              enabled. In pure-strategy mode this card would be misleading
+              because no fees/funding were deducted, so there's nothing
+              "eating" the edge. */}
+          {deductCosts
+            && m.cost_drag_per_trade_pct !== undefined
             && !m.is_negative_ev
             && m.total_profit_pct < 0 && (
             <div className="card mb-4 border-amber-500/40 bg-amber-500/5">
@@ -1137,12 +1174,12 @@ function FuturesBacktestInner() {
             </div>
           )}
 
-          {/* Production-grade cost-transparency card.
-              ALL THREE costs (funding + slippage + KuCoin fees) are
-              DEDUCTED from the simulated balance. The final P&L you see
-              above is the real net-of-costs figure — what your strategy
-              would actually deliver on KuCoin Futures. */}
-          {(m.total_funding_paid !== undefined ||
+          {/* Production-grade cost-transparency card — only shown when
+              the user enabled "Realistic costs (funding + fees)". In pure-
+              strategy mode the cards would all read $0 (or near-zero, just
+              slippage) which is misleading; better to hide them entirely
+              so the user knows the displayed P&L IS the pure number. */}
+          {deductCosts && (m.total_funding_paid !== undefined ||
             m.total_slippage_paid !== undefined ||
             m.total_fees_paid !== undefined) && (
             <div className="card mb-4 border-[#243153] bg-[#0d1424]">
