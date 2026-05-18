@@ -339,6 +339,11 @@ def run_futures_backtest(
     # to the strategy's design intent — e.g. SMCStrategyTV documents
     # "SL: below/above the structural swing point (dynamic)").
     force_slider    = bool(req.get("force_slider_sltp", False))
+    # Whether to deduct funding fees + KuCoin taker/maker fees from the
+    # simulated balance. Default False = pure strategy P&L (price action
+    # × leverage only). When True, the result is what the strategy would
+    # actually deliver on KuCoin including all execution costs.
+    deduct_costs    = bool(req.get("deduct_real_costs", False))
 
     # Resolve strategy — pull generated_code so the backtester can actually
     # run the user's authored logic instead of pattern-matching the name to
@@ -370,6 +375,7 @@ def run_futures_backtest(
         max_concurrent_positions = max_concurrent,
         risk_per_trade   = risk_per_trade,
         force_slider_sltp = force_slider,
+        deduct_real_costs = deduct_costs,
     )
 
     if "error" in result:

@@ -186,6 +186,14 @@ def run_futures_backtest(
                                         # earlier "concurrent" mode (∞) inflated trade counts
                                         # because the same condition firing 4 bars in a row
                                         # would open 4 separate positions instead of 1.
+    deduct_real_costs: bool = False,    # When True, funding fees + KuCoin taker/maker fees
+                                        # are deducted from the simulated balance — gives a
+                                        # production-grade net P&L. When False (default), the
+                                        # P&L reflects ONLY price action × leverage — useful
+                                        # for evaluating the strategy's edge in isolation,
+                                        # without the friction of execution costs. Slippage
+                                        # is always applied because it's a fill-quality
+                                        # assumption (not a cost the exchange collects).
 ) -> dict:
     """
     Run a leveraged futures backtest matching TradingView's methodology:
@@ -473,14 +481,17 @@ def run_futures_backtest(
                 pos_value = sig_margin * leverage
                 liq_price = _calc_liquidation(entry_price, sig_dir, leverage, pos_value)
 
-                # ── Deduct real KuCoin entry fee (taker — market order) ──
-                # This is what a strategy entry actually costs on KuCoin
-                # Futures. Charged on notional position size, NOT margin.
-                # We deduct BEFORE the position opens so the balance reflects
-                # the real "cash you'd have at this moment" if you were
-                # trading live.
-                entry_fee = pos_value * KUCOIN_TAKER_FEE
-                balance  -= entry_fee
+                # ── KuCoin entry fee (taker — market order) ─────────────
+                # Tracked per-trade always; deducted from balance only when
+                # the user enabled "realistic costs". In pure-strategy mode
+                # the fee is shown as 0 in the trade record so the trade
+                # P&L reflects price action only.
+                entry_fee_real = pos_value * KUCOIN_TAKER_FEE
+                if deduct_real_costs:
+                    entry_fee = entry_fee_real
+                    balance  -= entry_fee
+                else:
+                    entry_fee = 0.0
                 committed_margin += sig_margin
 
                 open_positions.append({
@@ -533,6 +544,9 @@ def run_futures_backtest(
                 entry_date   = pos["entry_date"]
 
                 # Funding settlements that fall inside this bar's time window.
+                # Always computed (so the diagnostic field is populated even
+                # in pure-strategy mode), but only subtracted from leg P&L
+                # when the user enabled "realistic costs".
                 funding_cost = 0.0
                 window_lo = (max(bar_start_ts, pos["entry_bar_ts"])
                              if pos["candles_held"] == 1 else bar_start_ts)
@@ -544,6 +558,12 @@ def run_futures_backtest(
                         signed_rate  = applied_rate if direction == "long" else -applied_rate
                         funding_cost += pos_value * signed_rate
                     pos["funding_paid"] += funding_cost
+                # In pure-strategy mode, zero-out funding_cost so it doesn't
+                # affect P&L (it's still tracked for transparency).
+                if not deduct_real_costs:
+                    funding_cost_for_pnl = 0.0
+                else:
+                    funding_cost_for_pnl = funding_cost
 
                 # ── Exit detection with optional multi-TP partial close ──
                 # When pos["tp2"] is None: single-TP path — TP closes 100%.
@@ -630,9 +650,10 @@ def run_futures_backtest(
                         raw_exit_p = tp; exit_rsn = "take_profit"
                         exit_slippage_bps = SLIPPAGE_BPS_TP
 
-                # Still running this bar → carry forward, deduct funding.
+                # Still running this bar → carry forward. Funding only hits
+                # balance in realistic-costs mode.
                 if raw_exit_p is None:
-                    balance -= funding_cost
+                    balance -= funding_cost_for_pnl
                     still_open.append(pos)
                     continue
 
@@ -657,24 +678,27 @@ def run_futures_backtest(
                     else:
                         price_move_pct = (entry_price - exit_p) / entry_price
                     leveraged_pnl_pct = price_move_pct * leverage
-                    # Funding is charged on the FULL position size per bar
-                    # (KuCoin behaviour). We allocate this bar's funding
-                    # entirely to this leg's P&L since it's the only leg
-                    # that's still settling this bar.
-                    leg_pnl = leg_margin * leveraged_pnl_pct - funding_cost
+                    # Funding only subtracts from P&L when realistic-costs
+                    # mode is on (funding_cost_for_pnl is zeroed otherwise).
+                    leg_pnl = leg_margin * leveraged_pnl_pct - funding_cost_for_pnl
                     leg_pnl = max(leg_pnl, -leg_margin)
 
                 units = leg_pos_value / max(entry_price, 1e-9)
                 leg_slippage = abs(raw_exit_p - exit_p) * units
                 pos["slippage_paid"] += leg_slippage
 
-                # KuCoin fees on this leg's notional.
+                # KuCoin fees on this leg's notional — tracked always,
+                # only deducted from balance in realistic-costs mode.
                 if exit_rsn in ("take_profit", "take_profit_1", "take_profit_2"):
-                    leg_fee = leg_pos_value * KUCOIN_MAKER_FEE
+                    leg_fee_real = leg_pos_value * KUCOIN_MAKER_FEE
                 else:
-                    leg_fee = leg_pos_value * KUCOIN_TAKER_FEE
-                pos["fees_paid"] += leg_fee
-                balance -= leg_fee
+                    leg_fee_real = leg_pos_value * KUCOIN_TAKER_FEE
+                if deduct_real_costs:
+                    leg_fee = leg_fee_real
+                    pos["fees_paid"] += leg_fee
+                    balance -= leg_fee
+                else:
+                    leg_fee = 0.0
 
                 # Record this leg.
                 pos["partial_pnl"] += leg_pnl

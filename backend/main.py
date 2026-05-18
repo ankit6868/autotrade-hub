@@ -174,23 +174,59 @@ class SMCStrategyTV(IStrategy):
         )
         df["htf_bias"] = bias
 
-        # ── Premium/Discount via 50% fib of HTF swing range ─────────────
+        # ── Premium/Discount via Fib zone of HTF swing range ────────────
+        # Strict 50% line means in a sustained trend the "discount" side
+        # almost never gets touched and zero longs fire. Real institutional
+        # traders treat the 40-60% zone as "equilibrium" where both bias
+        # entries are valid (just less ideal than deep discount/premium).
+        # We allow LONG when close <= 60% of range, SHORT when close >= 40%.
+        # Still rejects clear "buying at the top" (close > 60%) and
+        # "shorting at the bottom" (close < 40%).
         hi, lo = last_sh_p, last_sl_p
-        mid = (hi + lo) / 2
-        df["in_discount"] = (close.to_numpy() <= mid) & (hi > lo)
-        df["in_premium"]  = (close.to_numpy() >= mid) & (hi > lo)
+        rng = hi - lo
+        c_arr = close.to_numpy()
+        # Position within range: 0.0 = at swing low, 1.0 = at swing high
+        pos_in_range = np.where(rng > 0, (c_arr - lo) / rng, 0.5)
+        df["in_discount"] = (pos_in_range <= 0.60) & (rng > 0)
+        df["in_premium"]  = (pos_in_range >= 0.40) & (rng > 0)
 
-        # ── FVG: 3-candle imbalance ────────────────────────────────────
-        df["bull_fvg"] = high.shift(2) < low
-        df["bear_fvg"] = low.shift(2)  > high
+        # Pull numpy arrays for the inner loops (used by FVG, OB,
+        # liquidity sweep, and LTF BOS sections below).
+        opens  = open_.to_numpy(); closes = c
+        highs  = high.to_numpy();  lows = low.to_numpy()
+
+        # ── FVG: 3-candle imbalance + price-inside-zone (mitigation) ───
+        # An FVG forms when high[k-2] < low[k] (bull) or low[k-2] > high[k]
+        # (bear). The CORRECT SMC entry trigger is "price retraced INTO an
+        # existing unfilled FVG zone" — not "FVG formed on this exact bar".
+        # The original `high.shift(2) < low` check was true only on the bar
+        # that completes the gap, which is rare and meant most setups were
+        # filtered out. We now scan back up to 20 bars for any FVG whose
+        # zone currently contains the close, treating it as "mitigated".
+        bull_fvg_in_zone = np.zeros(n, dtype=bool)
+        bear_fvg_in_zone = np.zeros(n, dtype=bool)
+        for i in range(n):
+            if i < 2: continue
+            for k in range(i, max(2, i - 20), -1):
+                if k < 2: break
+                # Bullish FVG zone = [high[k-2], low[k]] for k between i-20 and i
+                if highs[k - 2] < lows[k]:
+                    if highs[k - 2] <= closes[i] <= lows[k]:
+                        bull_fvg_in_zone[i] = True
+                        break
+                # Bearish FVG zone = [high[k], low[k-2]]
+                if lows[k - 2] > highs[k]:
+                    if highs[k] <= closes[i] <= lows[k - 2]:
+                        bear_fvg_in_zone[i] = True
+                        break
+        df["bull_fvg"] = bull_fvg_in_zone
+        df["bear_fvg"] = bear_fvg_in_zone
 
         # ── Order Block: last opposing candle BEFORE strong move ────────
         # Strong move = close beyond candle extreme by >0.5% within 3 bars.
         # Using a rolling-window lookahead is hard with vectorisation; we
         # approximate by checking the next 3 bars from each candle. Done
         # in a tight numpy loop (cheap: ~5ms for 35k bars).
-        opens  = open_.to_numpy(); closes = c
-        highs = high.to_numpy(); lows = low.to_numpy()
         bull_ob_active = np.zeros(n, dtype=bool)
         bear_ob_active = np.zeros(n, dtype=bool)
         bull_ob_lo = np.full(n, np.nan)
@@ -198,8 +234,10 @@ class SMCStrategyTV(IStrategy):
         bear_ob_lo = np.full(n, np.nan)
         bear_ob_hi = np.full(n, np.nan)
         for i in range(n):
-            # Look back up to 30 bars for the most recent valid OB.
-            lookback = min(30, i)
+            # Look back up to 50 bars for the most recent valid OB
+            # (previous 30-bar window missed too many valid setups in
+            # markets where the OB formed slightly further back).
+            lookback = min(50, i)
             for k in range(i - 1, i - lookback - 1, -1):
                 if k < 0: break
                 # Bullish OB = last bearish candle with strong UP follow-through
@@ -238,7 +276,9 @@ class SMCStrategyTV(IStrategy):
         for i in range(n):
             # Bull sweep: find a recent swing low, then check if any bar
             # since dipped below it AND current close is above it again.
-            for k in range(i - 1, max(0, i - 30), -1):
+            # 50-bar window (was 30) catches setups where the sweep
+            # happened earlier and price is still in the OB/FVG retrace.
+            for k in range(i - 1, max(0, i - 50), -1):
                 if sl_ltf[k]:
                     prev_low = lows[k]
                     for m in range(k + 1, i + 1):
@@ -246,7 +286,7 @@ class SMCStrategyTV(IStrategy):
                             bull_sweep_at[i] = lows[m]
                             break
                     break
-            for k in range(i - 1, max(0, i - 30), -1):
+            for k in range(i - 1, max(0, i - 50), -1):
                 if sh_ltf[k]:
                     prev_high = highs[k]
                     for m in range(k + 1, i + 1):
@@ -271,10 +311,14 @@ class SMCStrategyTV(IStrategy):
         df["ltf_bull_conf"] = ltf_bull_conf
         df["ltf_bear_conf"] = ltf_bear_conf
 
-        # ── Session filter: NY institutional hours (12:00-21:00 UTC) ────
-        # Covers 7am-4pm ET year-round with DST buffer.
+        # ── Session filter: London + NY institutional hours (UTC) ──────
+        # Spec says "Best Times: New York Open (6 pm to 6am)" — institutional
+        # liquidity. Covering both London (08:00-17:00 UTC) and NY
+        # (12:00-21:00 UTC) gives us the 08:00-21:00 UTC window — when most
+        # institutional volume is active. Excludes Asia-only hours when
+        # liquidity is thinner and false breakouts more common.
         hrs = df["date"].dt.hour if "date" in df.columns else pd.Series(0, index=df.index)
-        df["in_ny_session"] = (hrs >= 12) & (hrs <= 21)
+        df["in_ny_session"] = (hrs >= 8) & (hrs <= 21)
 
         # ── STRUCTURAL SL / TP per bar ───────────────────────────────────
         # SL = sweep extreme ± 10bps. TP1 = entry ± 2R. TP2 = previous swing.
