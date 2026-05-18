@@ -66,15 +66,14 @@ function FuturesBacktestInner() {
   const [leverage,        setLeverage]        = useState(10);
   const [stoploss,        setStoploss]        = useState(1.5);   // SL ≤ TP for positive R:R
   const [takeProfit,      setTakeProfit]      = useState(3.0);   // TP should be ≥ SL (2:1 R:R)
-  // Position model. Two states only (matches the UI dropdown):
-  //   999 → Concurrent (unlimited stacking, take every signal). Default
-  //         because the user explicitly asked for "earlier concurrent
-  //         behaviour where it was properly doing all trades".
-  //     1 → Single position (TV-default pyramiding=0). Same-direction
-  //         signals while in trade are skipped.
-  // Sent to the engine as max_concurrent_positions (clamped 1..10 server-
-  // side; 999 falls through that clamp to mean "essentially unlimited").
-  const [pyramiding,      setPyramiding]      = useState(999);
+  // Position model is locked to Single (TradingView default pyramiding=0).
+  // User explicitly asked for TV-only behaviour — "no need of concurrent
+  // trade, just follow like the trading view, that's the correct approach".
+  // Concurrent mode was the previous default but caused clustered same-day
+  // trades that didn't match how a TV strategy would actually execute.
+  // Kept as a constant (not state) so it can't be accidentally changed
+  // via React DevTools or future UI regressions.
+  const pyramiding = 1;
   // Margin per trade as % of current balance. 5% = $50 margin on $1000
   // balance — gives you 20 losing trades before wipeout at 100% SL hit
   // rate. Above 10% gets aggressive; above 20% can liquidate the account
@@ -209,6 +208,41 @@ function FuturesBacktestInner() {
     && tpSrc !== 'manual'
     && levSrc !== 'manual'
     && tfSrc !== 'manual';
+
+  // High-frequency timeframe + long period = guaranteed Vercel timeout.
+  // Why: 1Y of 1m candles = ~525k bars × 200 per request from KuCoin =
+  // ~2600 API calls × ~0.5s each = 22+ min just for the data download,
+  // and Vercel's edge proxy kills any request over 60s
+  // (manifests as ROUTER_EXTERNAL_TARGET_ERROR). We block these combos
+  // up-front so the user sees a clear message instead of a cryptic 500.
+  // Approximate guard table:
+  //   1m   safe up to ~14 days (10k bars, ~50 API calls)
+  //   5m   safe up to ~90 days (26k bars, ~130 API calls)
+  //   15m  safe up to ~2-3 years
+  //   1h+  safe at any preset
+  const presetDays = (
+    selectedPreset === 'Custom'
+      ? (customRange.length === 17
+          ? Math.round(
+              (Date.UTC(
+                Number(customRange.slice(9, 13)),
+                Number(customRange.slice(13, 15)) - 1,
+                Number(customRange.slice(15, 17)),
+              ) -
+                Date.UTC(
+                  Number(customRange.slice(0, 4)),
+                  Number(customRange.slice(4, 6)) - 1,
+                  Number(customRange.slice(6, 8)),
+                )) / 86400000,
+            )
+          : 0)
+      : (PRESETS.find(p => p.label === selectedPreset)?.days ?? 0)
+  );
+  const isHighFreqTooLong = (
+    (timeframe === '1m'  && presetDays > 14) ||
+    (timeframe === '5m'  && presetDays > 90) ||
+    (timeframe === '15m' && presetDays > 1825)   // >5Y on 15m is borderline too
+  );
 
   // Detect whether the selected strategy is one whose signal function
   // returns its own structural SL/TP (engine honors those over slider).
@@ -656,53 +690,55 @@ function FuturesBacktestInner() {
           </div>
         </div>
 
-        {/* ── Position model: Single vs Concurrent ─────────────────────────
-            Two modes, matching how most users think about it:
-              • Single position (TV mode) — one open position per direction
-                at a time; same-direction signals while in trade are skipped.
-              • Concurrent (unlimited) — every signal opens a new position
-                alongside any existing ones. Matches the "take every trade"
-                style users expect from a raw strategy backtest.
-            Default is Concurrent so the backtest reflects every signal the
-            strategy fires — the user can switch to Single for TV parity. */}
-        <div className="mb-5 flex items-center gap-3 flex-wrap">
-          <label className="label !mb-0 flex items-center gap-2">
-            <span>Position model</span>
-            <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30"
-                  title="Single = TradingView-default pyramiding=0 (one position per direction at a time). Concurrent = take every signal as its own position (unlimited stacking, subject to free margin).">
-              your choice
-            </span>
-          </label>
-          <select className="input !py-1.5 !w-auto text-sm"
-                  value={pyramiding}
-                  onChange={e => setPyramiding(Number(e.target.value))}>
-            <option value={999}>Concurrent (take every signal)</option>
-            <option value={1}>Single position (TV mode)</option>
-          </select>
-          {pyramiding === 1 ? (
-            <span className="text-[11px] text-slate-400 leading-snug max-w-md">
-              While in a position, new signals in the same direction are <b>skipped</b>{' '}
-              (counted under "in-trade"). Opposite-direction signals always open a new trade.
-            </span>
-          ) : (
-            <span className="text-[11px] text-emerald-300 leading-snug max-w-md">
-              Every signal opens a new trade alongside existing positions — subject only to
-              free margin. Trade count reflects the raw strategy output.
-            </span>
-          )}
+        {/* ── Position model: locked to Single (TV mode) ───────────────────
+            Per user feedback, this is no longer a choice — every backtest
+            runs in TradingView-parity single-position mode. Shown as a
+            static label so users still see what's happening without being
+            able to break it by picking concurrent. */}
+        <div className="mb-5 flex items-center gap-2 flex-wrap text-[12px]">
+          <span className="text-slate-500 uppercase tracking-wider text-[10px]">Position model:</span>
+          <span className="font-semibold text-sky-300">Single position (TradingView mode)</span>
+          <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30"
+                title="One open position per direction at a time. Same-direction signals while in trade are skipped (counted under 'in-trade'). Opposite-direction signals always open a new trade. Matches TradingView's strategy.entry behaviour with pyramiding=0.">
+            TV parity
+          </span>
+          <span className="text-slate-400 leading-snug">
+            · while in a position, new same-direction signals are skipped (TV-default behaviour)
+          </span>
         </div>
+
+        {/* High-frequency-timeframe guard.
+            1m × 1Y and 5m × multi-year combos require downloading hundreds
+            of thousands of candles, which busts Vercel's 60s edge-proxy
+            timeout (manifests as the cryptic ROUTER_EXTERNAL_TARGET_ERROR
+            the user already hit). We block them up-front with a clear
+            recommendation so they don't waste time. */}
+        {isHighFreqTooLong && (
+          <div className="mb-3 p-3 rounded-lg bg-red-500/10 border border-red-500/40 text-xs">
+            <div className="text-red-300 font-medium">
+              ⚠ {timeframe} timeframe × {selectedPreset} period exceeds the practical backtest budget
+            </div>
+            <div className="text-red-200/80 mt-1 leading-relaxed">
+              This combo needs to download ~{Math.round(presetDays * (timeframe === '1m' ? 1440 : timeframe === '5m' ? 288 : 96) / 1000)}k candles,
+              which takes well over Vercel's 60s edge-proxy timeout. Pick a higher
+              timeframe (try <b className="text-emerald-300">15m</b> or <b className="text-emerald-300">1h</b>)
+              or a shorter period (<b className="text-emerald-300">1W</b> or <b className="text-emerald-300">1M</b>).
+              Practical limits: <b>1m</b> ≤ 14 days · <b>5m</b> ≤ 90 days · <b>15m+</b> all periods.
+            </div>
+          </div>
+        )}
 
         {/* Run + Auto-tune buttons */}
         <div className="flex items-center gap-3 flex-wrap">
           <button onClick={runBacktest}
-            disabled={running || tuning || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
+            disabled={running || tuning || !strategyId || isHighFreqTooLong || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
             className="btn-primary px-8 py-3 text-base">
             {running
               ? `Running ${currentPreset && currentPreset.days > 365 ? '(downloading data…)' : ''}…`
               : `▶ Run ${selectedPreset} Futures Backtest`}
           </button>
           <button onClick={autoTune}
-            disabled={running || tuning || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
+            disabled={running || tuning || !strategyId || isHighFreqTooLong || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
             className="px-5 py-3 rounded-xl text-sm font-semibold border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
             title="Run a small grid of SL/TP combos (20 backtests) and show which combination gives the best result. Takes 1–3 minutes (data is cached so all runs share one download).">
             {tuning ? '🔬 Auto-tuning (20 runs)…' : '🔬 Auto-tune SL/TP'}
