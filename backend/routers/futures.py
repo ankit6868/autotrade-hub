@@ -326,6 +326,12 @@ def run_futures_backtest(
     # value to allow signal-stacking. Clamped 1..10 because anything
     # bigger is almost certainly a misconfiguration.
     max_concurrent   = max(1, min(10, int(req.get("max_concurrent_positions", 1))))
+    # Margin (risk) per trade as fraction of current balance. Default 5%
+    # = $50 margin on $1000 balance. Clamped 1..50% (above 50% is
+    # essentially "all-in" and would liquidate the account on the first
+    # losing trade at any meaningful leverage).
+    risk_pct         = max(1, min(50, float(req.get("risk_per_trade_pct", 5))))
+    risk_per_trade   = risk_pct / 100.0
 
     # Resolve strategy — pull generated_code so the backtester can actually
     # run the user's authored logic instead of pattern-matching the name to
@@ -355,6 +361,7 @@ def run_futures_backtest(
         take_profit_pct  = take_profit_pct,
         generated_code   = generated_code,
         max_concurrent_positions = max_concurrent,
+        risk_per_trade   = risk_per_trade,
     )
 
     if "error" in result:

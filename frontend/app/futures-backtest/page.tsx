@@ -71,6 +71,11 @@ function FuturesBacktestInner() {
   // fires the same condition for 4 bars in a row, the engine opens ONE trade,
   // not four. Set to N>1 to allow N stacked positions per direction.
   const [pyramiding,      setPyramiding]      = useState(1);
+  // Margin per trade as % of current balance. 5% = $50 margin on $1000
+  // balance — gives you 20 losing trades before wipeout at 100% SL hit
+  // rate. Above 10% gets aggressive; above 20% can liquidate the account
+  // on a single bad streak at any meaningful leverage.
+  const [riskPerTrade,    setRiskPerTrade]    = useState(5);
   // Track WHERE each parameter's current value came from so we can label
   // the control with "from strategy" or "default" — transparent to the
   // user about what was inherited vs what's a fallback we picked.
@@ -174,13 +179,19 @@ function FuturesBacktestInner() {
     && levSrc !== 'manual'
     && tfSrc !== 'manual';
 
-  // Detect whether the selected strategy is one of the names whose engine
-  // overrides slider SL/TP with structural levels (currently only
-  // SMCStrategyTV). Used to warn the user that the slider values are
-  // INFORMATIONAL for these strategies — the trade-level SL/TP comes from
-  // pivot structure, not the slider.
+  // Detect whether the selected strategy is one whose signal function
+  // returns its own structural SL/TP (engine honors those over slider).
+  // After the "honour strategy-returned SL/TP" fix, this is true for all
+  // built-in signal functions that compute SL/TP from market structure
+  // rather than fixed percentages: SMC variants, MissCandle, MACDCross,
+  // RsiBollinger. The slider becomes a fallback only.
+  const STRUCTURAL_SL_TP_STRATEGIES = new Set([
+    'SMCStrategyTV', 'SMCStrategy', 'SMCProV3',
+    'MissCandleLongStrategy', 'MissCandleShortStrategy',
+    'MacdCrossoverStrategy', 'RsiBollingerStrategy',
+  ]);
   const strategyOverridesSlTp =
-    selectedStrategy?.name === 'SMCStrategyTV';
+    selectedStrategy && STRUCTURAL_SL_TP_STRATEGIES.has(selectedStrategy.name);
 
   // Small reusable badge that shows where a field's current value came from.
   function SourceBadge({ src }: { src: Src }) {
@@ -223,6 +234,7 @@ function FuturesBacktestInner() {
         stoploss_pct:     stoploss,
         take_profit_pct:  takeProfit,
         max_concurrent_positions: pyramiding,
+        risk_per_trade_pct: riskPerTrade,
       });
       if (data.error) setError(data.error);
       else {
@@ -406,8 +418,9 @@ function FuturesBacktestInner() {
             </select>
             {strategyOverridesSlTp && (
               <p className="mt-1 text-[10px] text-sky-300/80 leading-snug"
-                 title="SMCStrategyTV uses structural pivot levels for SL and 2R targets for TP, computed per trade. The slider SL/TP are ignored unless you run Auto-tune (which forces slider values to test different combos).">
-                ℹ Uses structural SL/TP per trade — sliders below are ignored.
+                 title="This strategy returns structural SL/TP per signal (e.g. SMC = swing-based stops + 2R targets, MissCandle = prev-candle high/low + 3R, MACD = fixed 1:3 RR). The engine honors those values. The slider below is only a fallback for trades where the strategy's SL distance is implausible (>25% of price). Auto-tune is the way to test slider SL/TP combos."
+              >
+                ℹ This strategy returns its own SL/TP per trade — sliders below are <b>ignored</b> in normal runs. Each trade exits at the strategy's computed level, which varies per signal. See "Effective SL/TP" in results.
               </p>
             )}
           </div>
@@ -490,6 +503,20 @@ function FuturesBacktestInner() {
             <input type="range" min={1} max={50} value={leverage}
               onChange={e => { setLeverage(Number(e.target.value)); setLevSrc('manual'); }}
               className="w-full accent-blue-500 mt-2" />
+            <div className="mt-2">
+              <label
+                className="label !mb-1 flex items-center flex-wrap text-[11px]"
+                title="Margin (collateral) committed per trade, as % of current balance. 5% = $50 margin on $1000 = $500 notional at 10x leverage. Lower = safer, smaller compounding. Higher = bigger per-trade swings."
+              >
+                <span>Margin/trade: <b className="text-amber-300">{riskPerTrade}%</b></span>
+                <span className="text-slate-500 ml-2 text-[10px]">
+                  → ${(startBalance * riskPerTrade / 100).toFixed(0)} margin · ${(startBalance * riskPerTrade / 100 * leverage).toFixed(0)} notional
+                </span>
+              </label>
+              <input type="range" min={1} max={50} step={1} value={riskPerTrade}
+                onChange={e => setRiskPerTrade(Number(e.target.value))}
+                className="w-full accent-amber-500" />
+            </div>
           </div>
           <div>
             <label className="label flex items-center">
@@ -575,6 +602,7 @@ function FuturesBacktestInner() {
             <span>⏱ Timeframe: <span className="text-slate-300">{timeframe}</span></span>
             <span>💰 Balance: <span className="text-slate-300">${startBalance}</span></span>
             <span>⚡ Leverage: <span className="text-slate-300">{leverage}x</span></span>
+            <span>💵 Margin/trade: <span className="text-slate-300">{riskPerTrade}% (${(startBalance * riskPerTrade / 100).toFixed(0)})</span></span>
             <span>🛑 Stop-loss: <span className="text-slate-300">{stoploss}%</span></span>
             <span>🎯 Take-profit: <span className="text-slate-300">{takeProfit}%</span></span>
             <span>📐 Position: <span className="text-slate-300">
@@ -821,6 +849,25 @@ function FuturesBacktestInner() {
                                 )}
                               </div>
                             )
+                          )}
+                          {/* Effective SL/TP range — the answer to "why did my
+                              trade exit at -9.89% when SL is set to 1.5%?".
+                              Strategy-returned structural SL varies per signal,
+                              so showing the range upfront avoids confusion. */}
+                          {(d.effective_sl_pct_avg !== undefined || d.effective_tp_pct_avg !== undefined) && (
+                            <div title="Average / min / max SL and TP distances actually used across all trades. When 'min' and 'max' differ a lot, the strategy is computing structural SL/TP per trade (swing-based) — so individual trades will exit at very different P&L%, even with the same SL slider setting.">
+                              Effective SL{' '}
+                              <b className="text-red-300">{(d.effective_sl_pct_avg ?? 0).toFixed(2)}%</b>{' '}
+                              <span className="text-slate-600">
+                                ({(d.effective_sl_pct_min ?? 0).toFixed(2)}–{(d.effective_sl_pct_max ?? 0).toFixed(2)}%)
+                              </span>
+                              {' · TP '}
+                              <b className="text-emerald-300">{(d.effective_tp_pct_avg ?? 0).toFixed(2)}%</b>{' '}
+                              <span className="text-slate-600">
+                                ({(d.effective_tp_pct_min ?? 0).toFixed(2)}–{(d.effective_tp_pct_max ?? 0).toFixed(2)}%)
+                              </span>
+                              <span className="text-slate-600"> · realised across all trades</span>
+                            </div>
                           )}
                           {(d.trades_opened_long !== undefined || d.trades_opened_short !== undefined) && (
                             <div>
@@ -1174,6 +1221,8 @@ function FuturesBacktestInner() {
                     <th className="text-right py-3 px-2" title="Notional position size = margin × leverage (= what KuCoin trades on your behalf)">Position $</th>
                     <th className="text-right py-3 px-2">Entry</th>
                     <th className="text-right py-3 px-2">Exit</th>
+                    <th className="text-right py-3 px-2" title="Effective stop-loss distance from entry, as % of price. When strategy returns structural SL (e.g. SMC swing-based), this varies per trade. The slider value is only a fallback.">SL Dist %</th>
+                    <th className="text-right py-3 px-2" title="Effective take-profit distance from entry, as % of price. Varies per trade for strategies with structural TP (e.g. SMC 2R targets).">TP Dist %</th>
                     <th className="text-right py-3 px-2">Liq.</th>
                     <th className="text-right py-3 px-2">Profit %</th>
                     <th className="text-right py-3 px-2">P&amp;L USDT</th>
@@ -1210,6 +1259,18 @@ function FuturesBacktestInner() {
                       </td>
                       <td className="py-2 px-2 text-right font-mono text-xs">{Number(t.open_rate).toFixed(2)}</td>
                       <td className="py-2 px-2 text-right font-mono text-xs">{Number(t.close_rate).toFixed(2)}</td>
+                      <td className="py-2 px-2 text-right font-mono text-xs text-red-300/80"
+                          title={`SL price: ${Number(t.sl_price ?? 0).toFixed(2)} (${t.sltp_source ?? 'unknown'} source)`}>
+                        {t.sl_price && t.open_rate
+                          ? (Math.abs(Number(t.sl_price) - Number(t.open_rate)) / Number(t.open_rate) * 100).toFixed(2) + '%'
+                          : '—'}
+                      </td>
+                      <td className="py-2 px-2 text-right font-mono text-xs text-emerald-300/80"
+                          title={`TP price: ${Number(t.tp_price ?? 0).toFixed(2)} (${t.sltp_source ?? 'unknown'} source)`}>
+                        {t.tp_price && t.open_rate
+                          ? (Math.abs(Number(t.tp_price) - Number(t.open_rate)) / Number(t.open_rate) * 100).toFixed(2) + '%'
+                          : '—'}
+                      </td>
                       <td className="py-2 px-2 text-right font-mono text-xs text-orange-400">{Number(t.liq_price).toFixed(2)}</td>
                       <td className={`py-2 px-2 text-right font-semibold ${(t.profit_pct ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                         {(t.profit_pct ?? 0) >= 0 ? '+' : ''}{(t.profit_pct ?? 0).toFixed(2)}%

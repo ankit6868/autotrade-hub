@@ -817,6 +817,33 @@ def run_futures_backtest(
         data_diagnostics[pair]["sltp_from_signal"]          = sltp_from_signal
         data_diagnostics[pair]["sltp_from_slider"]          = sltp_from_slider
 
+        # Effective SL / TP range across actual trades for this pair.
+        # When the strategy returns structural levels, the slider value
+        # tells the user nothing — they need to know "actually, your trades
+        # ran SL between X% and Y% with avg Z%". This is what closes the
+        # gap between "I set 1.5% SL" and "trade exited at -9.89%".
+        pair_trades = [t for t in all_trades if t.get("pair") == pair]
+        sl_dists = []
+        tp_dists = []
+        for t in pair_trades:
+            op = float(t.get("open_rate") or 0)
+            if op <= 0:
+                continue
+            sl_p = float(t.get("sl_price") or 0)
+            tp_p = float(t.get("tp_price") or 0)
+            if sl_p > 0:
+                sl_dists.append(abs(sl_p - op) / op * 100)
+            if tp_p > 0:
+                tp_dists.append(abs(tp_p - op) / op * 100)
+        if sl_dists:
+            data_diagnostics[pair]["effective_sl_pct_avg"] = round(sum(sl_dists)/len(sl_dists), 3)
+            data_diagnostics[pair]["effective_sl_pct_min"] = round(min(sl_dists), 3)
+            data_diagnostics[pair]["effective_sl_pct_max"] = round(max(sl_dists), 3)
+        if tp_dists:
+            data_diagnostics[pair]["effective_tp_pct_avg"] = round(sum(tp_dists)/len(tp_dists), 3)
+            data_diagnostics[pair]["effective_tp_pct_min"] = round(min(tp_dists), 3)
+            data_diagnostics[pair]["effective_tp_pct_max"] = round(max(tp_dists), 3)
+
     # ── Compute aggregate metrics ─────────────────────────────────────────
     if not all_trades:
         return {
