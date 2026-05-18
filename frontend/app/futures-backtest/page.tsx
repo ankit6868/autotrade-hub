@@ -76,6 +76,14 @@ function FuturesBacktestInner() {
   // rate. Above 10% gets aggressive; above 20% can liquidate the account
   // on a single bad streak at any meaningful leverage.
   const [riskPerTrade,    setRiskPerTrade]    = useState(5);
+  // SL/TP source mode:
+  //   'strategy' = use the SL/TP the signal function returns (e.g.
+  //                SMCStrategyTV's structural swing-based stops + 2R TP)
+  //   'slider'   = override structural values with the slider %s
+  // Maps directly to the backend's force_slider_sltp flag (slider=true).
+  // Default 'strategy' for structural strategies, 'slider' otherwise —
+  // updated by the strategy-change effect.
+  const [sltpMode,        setSltpMode]        = useState<'strategy' | 'slider'>('strategy');
   // Track WHERE each parameter's current value came from so we can label
   // the control with "from strategy" or "default" — transparent to the
   // user about what was inherited vs what's a fallback we picked.
@@ -165,6 +173,19 @@ function FuturesBacktestInner() {
     if (!strategyId || strategies.length === 0) return;
     const s = strategies.find((x: any) => x.id === strategyId);
     applyStrategyParams(s);
+    // Reset SL/TP mode to whatever makes sense for the strategy: structural
+    // strategies default to "from strategy"; fixed-% strategies don't have
+    // meaningful structural levels so default to "from slider".
+    const STRUCTURAL = new Set([
+      'SMCStrategyTV', 'SMCStrategy', 'SMCProV3',
+      'MissCandleLongStrategy', 'MissCandleShortStrategy',
+      'MacdCrossoverStrategy', 'RsiBollingerStrategy',
+    ]);
+    if (s && STRUCTURAL.has(s.name)) {
+      setSltpMode('strategy');
+    } else {
+      setSltpMode('slider');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [strategyId, strategies]);
 
@@ -235,6 +256,9 @@ function FuturesBacktestInner() {
         take_profit_pct:  takeProfit,
         max_concurrent_positions: pyramiding,
         risk_per_trade_pct: riskPerTrade,
+        // sltpMode === 'slider' → tell backend to ignore strategy's
+        // structural levels and use slider values instead.
+        force_slider_sltp: sltpMode === 'slider',
       });
       if (data.error) setError(data.error);
       else {
@@ -418,9 +442,11 @@ function FuturesBacktestInner() {
             </select>
             {strategyOverridesSlTp && (
               <p className="mt-1 text-[10px] text-sky-300/80 leading-snug"
-                 title="This strategy returns structural SL/TP per signal (e.g. SMC = swing-based stops + 2R targets, MissCandle = prev-candle high/low + 3R, MACD = fixed 1:3 RR). The engine honors those values. The slider below is only a fallback for trades where the strategy's SL distance is implausible (>25% of price). Auto-tune is the way to test slider SL/TP combos."
+                 title="This strategy returns structural SL/TP per signal (e.g. SMC = swing-based stops + 2R targets, MissCandle = prev-candle high/low + 3R, MACD = fixed 1:3 RR). Use the 'SL / TP source' toggle to choose whether the engine honours those values or forces the slider values instead."
               >
-                ℹ This strategy returns its own SL/TP per trade — sliders below are <b>ignored</b> in normal runs. Each trade exits at the strategy's computed level, which varies per signal. See "Effective SL/TP" in results.
+                {sltpMode === 'strategy'
+                  ? <>ℹ This strategy returns its own SL/TP per trade — sliders below are <b>ignored</b>. Use the toggle above to override with slider values.</>
+                  : <>⚙ This strategy's structural SL/TP is <b>overridden by sliders</b>. Switch toggle back to "From strategy" to use its design.</>}
               </p>
             )}
           </div>
@@ -480,6 +506,56 @@ function FuturesBacktestInner() {
               ))}
             </select>
           </div>
+        </div>
+
+        {/* ── SL/TP source toggle ─────────────────────────────────────────
+            The strategy's signal function (e.g. SMCStrategyTV) returns
+            structural SL/TP per trade — those vary per signal because they
+            anchor to swing extremes. The slider below is a FIXED %. The
+            user chooses which one wins. Default depends on the strategy:
+            structural-SL strategies default to "from strategy"; fixed-%
+            strategies default to "from slider" (their internal % matches
+            the slider anyway). */}
+        <div className="mb-5 flex items-center gap-3 flex-wrap">
+          <label className="label !mb-0 flex items-center gap-2">
+            <span>SL / TP source</span>
+            <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30"
+                  title="Decides whether the engine uses the SL/TP the strategy returns (structural — varies per trade) or the fixed slider values (uniform across all trades). Switch to 'sliders' if you want every trade to use your custom 1.5% / 3% etc; leave on 'strategy' to honour the strategy's design (e.g. SMC swing-based stops)."
+            >
+              your choice
+            </span>
+          </label>
+          <div className="inline-flex rounded-lg overflow-hidden border border-[#2a3a52]">
+            <button
+              type="button"
+              onClick={() => setSltpMode('strategy')}
+              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                sltpMode === 'strategy'
+                  ? 'bg-sky-500/30 text-sky-200'
+                  : 'bg-[#1a2236] text-slate-400 hover:text-white'
+              }`}
+              title="Use the SL/TP the strategy returns per signal (e.g. SMC structural swing-based stops + 2R targets). Sliders below are ignored."
+            >
+              From strategy (structural)
+            </button>
+            <button
+              type="button"
+              onClick={() => setSltpMode('slider')}
+              className={`px-3 py-1.5 text-xs font-medium transition-colors border-l border-[#2a3a52] ${
+                sltpMode === 'slider'
+                  ? 'bg-amber-500/30 text-amber-200'
+                  : 'bg-[#1a2236] text-slate-400 hover:text-white'
+              }`}
+              title="Override the strategy's structural SL/TP — every trade exits at the fixed slider values."
+            >
+              From sliders below
+            </button>
+          </div>
+          <span className="text-[11px] text-slate-400 leading-snug max-w-md">
+            {sltpMode === 'strategy'
+              ? <>Engine uses <b className="text-sky-300">strategy's own SL/TP</b> per signal — sliders are ignored (each trade exits at its own structural level).</>
+              : <>Engine uses <b className="text-amber-300">slider SL/TP</b> for every trade — strategy's structural levels are overridden.</>}
+          </span>
         </div>
 
         {/* ── Futures-specific config ─────────────────────────────────── */}
