@@ -321,11 +321,14 @@ def run_futures_backtest(
     starting_balance = float(req.get("starting_balance", 1000))
     stoploss_pct     = float(req.get("stoploss_pct", 3.0))
     take_profit_pct  = float(req.get("take_profit_pct", 1.5))
-    # Pyramiding cap — default 1 = single position at a time (matches
-    # TradingView's `pyramiding = 0` default). User can pass a larger
-    # value to allow signal-stacking. Clamped 1..10 because anything
-    # bigger is almost certainly a misconfiguration.
-    max_concurrent   = max(1, min(10, int(req.get("max_concurrent_positions", 1))))
+    # Position-model cap.
+    #   1   → Single position (TradingView default pyramiding=0)
+    #   999 → Concurrent / unlimited (take every signal alongside existing)
+    # We clamp to [1, 1000] only as a sanity bound to prevent obvious
+    # garbage; anything in between is rare since the UI now offers only
+    # the two extremes, but we still accept arbitrary integers for
+    # power-users hitting the API directly.
+    max_concurrent   = max(1, min(1000, int(req.get("max_concurrent_positions", 999))))
     # Margin (risk) per trade as fraction of current balance. Default 5%
     # = $50 margin on $1000 balance. Clamped 1..50% (above 50% is
     # essentially "all-in" and would liquidate the account on the first
