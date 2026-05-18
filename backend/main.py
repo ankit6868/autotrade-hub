@@ -86,286 +86,125 @@ import numpy as np
 
 class SMCStrategyTV(IStrategy):
     """
-    SMC v2 — full institutional Smart Money Concepts.
+    SMC v2 — TradingView Pine Script port (BOS + FVG mitigation).
 
-    Implements every rule from the spec (HTF bias → premium/discount →
-    liquidity sweep → OB/FVG mitigation → LTF confirmation → session) and
-    populates STRUCTURAL sl_price + tp_price columns per bar so the engine
-    uses real swing-based stops instead of slider %s. Multi-TP (TP1 = 2R,
-    TP2 = previous swing) populated via tp_price (TP1) and tp2_price (TP2).
+    Direct translation of the "SMC Strategy v2 - OB/FVG/BOS" Pine Script.
+    Three core gates only — same as the original Pine. Earlier versions
+    added HTF bias / premium-discount / liquidity sweep / session filter,
+    which dropped signal count from ~hundreds to ~15 per 6M. Those extras
+    are real institutional rules but they over-filter for retail back-
+    testing — most users want to see what raw BOS+FVG produces first.
 
-    Rules implemented:
-      1. PIVOT detection   : N=5 swing-high / swing-low (rolling window)
-      2. HTF bias          : last BOS direction on N=30 swings (≈daily on 15m)
-                              → RANGE = no trade
-      3. Liquidity sweep   : prior swing low/high briefly broken + reclaimed
-      4. OB                : last opposing candle before >0.5% strong move
-      5. FVG               : 3-candle imbalance (high[i-2] < low[i] for bull)
-      6. Premium/Discount  : 50% fib of HTF range — LONG only in discount,
-                              SHORT only in premium
-      7. LTF BOS confirm   : 3-bar swing broken in bias direction by close
-      8. NY session        : 12:00-21:00 UTC only
-      9. Structural SL     : anchored to sweep extreme ± 10bps buffer
-     10. Multi-TP          : TP1 = 2R (partial), TP2 = previous swing extreme
+    Rules implemented (matches the original Pine):
+      1. PIVOT BOS    : close crosses last confirmed pivot (N=5 each side)
+      2. FVG zone     : price currently INSIDE an unfilled 3-candle
+                        imbalance gap from the last 20 bars
+      3. Structural SL: last opposing pivot ± 10bps buffer (caps at 5%)
+      4. Multi-TP     : TP1 = 2R (close 50%, SL → BE), TP2 = prev pivot
 
-    Sliders are IGNORED when "SL/TP source = From strategy" (default for
-    structural strategies) — every trade exits at its own computed level.
+    No HTF bias, no premium/discount filter, no liquidity sweep, no
+    session filter. If you want institutional-strict filtering, see the
+    SMCProV3 template instead.
     """
     timeframe   = "15m"
-    minimal_roi = {"0": 100}        # exits handled by populate_exit_trend
-    stoploss    = -0.99             # disable Freqtrade global SL; SL set per-trade
-    can_short   = True              # required for shorts on KuCoin Futures
-    startup_candle_count = 100      # need HTF swing-confirmation lookback
+    minimal_roi = {"0": 100}        # exits handled by SL/TP at engine
+    stoploss    = -0.99             # disable Freqtrade global SL
+    can_short   = True              # required for KuCoin Futures shorts
+    startup_candle_count = 30       # need 2N+1 = 11 bars for pivots + buffer
     process_only_new_candles = True
 
-    # Swing detection lookbacks (one bar each side).
-    LTF_N = 3       # ~45min on 15m  → entry triggers
-    HTF_N = 30      # ~7.5h on 15m   → daily-ish bias
+    SWING_LEN = 5                   # N each side → 11-bar pivot window
 
     def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
-        ltf_n = self.LTF_N
-        htf_n = self.HTF_N
+        sl = self.SWING_LEN
         n = len(df)
-        high = df["high"]; low = df["low"]; close = df["close"]; open_ = df["open"]
+        high = df["high"]; low = df["low"]; close = df["close"]
+        highs  = high.to_numpy()
+        lows   = low.to_numpy()
+        closes = close.to_numpy()
 
-        # ── Multi-scale swing detection (LTF + HTF) ────────────────────
-        # A swing at index j is confirmed only after N future bars exist
-        # → shift forward by N to prevent look-ahead bias.
-        def confirmed_swings(series, kind, n_lb):
-            roll = series.rolling(2 * n_lb + 1, center=True, min_periods=2 * n_lb + 1)
-            piv = (roll.max() == series) if kind == "high" else (roll.min() == series)
-            arr = piv.fillna(False).to_numpy()
-            shifted = np.zeros(n, dtype=bool)
-            if n_lb < n:
-                shifted[n_lb:] = arr[:-n_lb] if n_lb > 0 else arr
-            return shifted
+        # ── Pivot detection (N=5 each side) ─────────────────────────────
+        # Confirmed only N bars after the pivot — we shift forward by N
+        # so the column at bar i never peeks at future data.
+        roll_h = high.rolling(2 * sl + 1, center=True, min_periods=2 * sl + 1).max()
+        roll_l = low .rolling(2 * sl + 1, center=True, min_periods=2 * sl + 1).min()
+        ph = (roll_h.to_numpy() == highs)
+        pl = (roll_l.to_numpy() == lows)
+        ph_shifted = np.zeros(n, dtype=bool)
+        pl_shifted = np.zeros(n, dtype=bool)
+        if sl < n:
+            ph_shifted[sl:] = ph[:-sl] if sl > 0 else ph
+            pl_shifted[sl:] = pl[:-sl] if sl > 0 else pl
+        df["pivot_high"] = ph_shifted
+        df["pivot_low"]  = pl_shifted
 
-        df["sh_ltf"] = confirmed_swings(high, "high", ltf_n)
-        df["sl_ltf"] = confirmed_swings(low,  "low",  ltf_n)
-        df["sh_htf"] = confirmed_swings(high, "high", htf_n)
-        df["sl_htf"] = confirmed_swings(low,  "low",  htf_n)
+        # Last confirmed pivot up to current bar (for BOS + SL anchor).
+        last_ph = high.where(pd.Series(ph_shifted, index=df.index)).ffill().to_numpy()
+        last_pl = low .where(pd.Series(pl_shifted, index=df.index)).ffill().to_numpy()
+        df["last_ph"] = last_ph
+        df["last_pl"] = last_pl
 
-        # Last confirmed HTF swing high / low up to current bar.
-        df["last_sh_htf"] = high.where(pd.Series(df["sh_htf"], index=df.index)).ffill()
-        df["last_sl_htf"] = low .where(pd.Series(df["sl_htf"], index=df.index)).ffill()
-        df["last_sh_ltf"] = high.where(pd.Series(df["sh_ltf"], index=df.index)).ffill()
-        df["last_sl_ltf"] = low .where(pd.Series(df["sl_ltf"], index=df.index)).ffill()
+        # ── BOS: close crosses last confirmed pivot (edge detection) ────
+        bull_bos = np.zeros(n, dtype=bool)
+        bear_bos = np.zeros(n, dtype=bool)
+        for i in range(1, n):
+            if not np.isnan(last_ph[i]) and not np.isnan(last_ph[i-1]):
+                if closes[i] > last_ph[i] and closes[i-1] <= last_ph[i-1]:
+                    bull_bos[i] = True
+            if not np.isnan(last_pl[i]) and not np.isnan(last_pl[i-1]):
+                if closes[i] < last_pl[i] and closes[i-1] >= last_pl[i-1]:
+                    bear_bos[i] = True
+        df["bull_bos"] = bull_bos
+        df["bear_bos"] = bear_bos
 
-        # ── HTF BIAS via last BOS direction ─────────────────────────────
-        # Bull bias = close > last_sh_htf since the most recent swing low.
-        # Bear bias = close < last_sl_htf since the most recent swing high.
-        # We track when each event LAST happened — most recent wins.
-        last_sh_p = df["last_sh_htf"].to_numpy()
-        last_sl_p = df["last_sl_htf"].to_numpy()
-        c = close.to_numpy()
-        bull_bos_at = np.full(n, -1, dtype=int)
-        bear_bos_at = np.full(n, -1, dtype=int)
-        last_bull = -1; last_bear = -1
-        for i in range(n):
-            if (not np.isnan(last_sh_p[i])) and c[i] > last_sh_p[i]:
-                last_bull = i
-            if (not np.isnan(last_sl_p[i])) and c[i] < last_sl_p[i]:
-                last_bear = i
-            bull_bos_at[i] = last_bull
-            bear_bos_at[i] = last_bear
-        bias = np.where(
-            bull_bos_at > bear_bos_at, 1,                # bull
-            np.where(bear_bos_at > bull_bos_at, -1, 0),   # bear / range
-        )
-        df["htf_bias"] = bias
-
-        # ── Premium/Discount via Fib zone of HTF swing range ────────────
-        # Strict 50% line means in a sustained trend the "discount" side
-        # almost never gets touched and zero longs fire. Real institutional
-        # traders treat the 40-60% zone as "equilibrium" where both bias
-        # entries are valid (just less ideal than deep discount/premium).
-        # We allow LONG when close <= 60% of range, SHORT when close >= 40%.
-        # Still rejects clear "buying at the top" (close > 60%) and
-        # "shorting at the bottom" (close < 40%).
-        hi, lo = last_sh_p, last_sl_p
-        rng = hi - lo
-        c_arr = close.to_numpy()
-        # Position within range: 0.0 = at swing low, 1.0 = at swing high
-        pos_in_range = np.where(rng > 0, (c_arr - lo) / rng, 0.5)
-        df["in_discount"] = (pos_in_range <= 0.60) & (rng > 0)
-        df["in_premium"]  = (pos_in_range >= 0.40) & (rng > 0)
-
-        # Pull numpy arrays for the inner loops (used by FVG, OB,
-        # liquidity sweep, and LTF BOS sections below).
-        opens  = open_.to_numpy(); closes = c
-        highs  = high.to_numpy();  lows = low.to_numpy()
-
-        # ── FVG: 3-candle imbalance + price-inside-zone (mitigation) ───
-        # An FVG forms when high[k-2] < low[k] (bull) or low[k-2] > high[k]
-        # (bear). The CORRECT SMC entry trigger is "price retraced INTO an
-        # existing unfilled FVG zone" — not "FVG formed on this exact bar".
-        # The original `high.shift(2) < low` check was true only on the bar
-        # that completes the gap, which is rare and meant most setups were
-        # filtered out. We now scan back up to 20 bars for any FVG whose
-        # zone currently contains the close, treating it as "mitigated".
+        # ── FVG zone (price currently INSIDE an unfilled imbalance) ─────
+        # Bull FVG zone = [high[k-2], low[k]] when high[k-2] < low[k].
+        # Bear FVG zone = [high[k], low[k-2]] when low[k-2] > high[k].
+        # Scan back up to 20 bars for the most recent zone containing close.
         bull_fvg_in_zone = np.zeros(n, dtype=bool)
         bear_fvg_in_zone = np.zeros(n, dtype=bool)
         for i in range(n):
             if i < 2: continue
             for k in range(i, max(2, i - 20), -1):
                 if k < 2: break
-                # Bullish FVG zone = [high[k-2], low[k]] for k between i-20 and i
-                if highs[k - 2] < lows[k]:
-                    if highs[k - 2] <= closes[i] <= lows[k]:
-                        bull_fvg_in_zone[i] = True
-                        break
-                # Bearish FVG zone = [high[k], low[k-2]]
-                if lows[k - 2] > highs[k]:
-                    if highs[k] <= closes[i] <= lows[k - 2]:
-                        bear_fvg_in_zone[i] = True
-                        break
+                if highs[k - 2] < lows[k] and highs[k - 2] <= closes[i] <= lows[k]:
+                    bull_fvg_in_zone[i] = True
+                    break
+                if lows[k - 2] > highs[k] and highs[k] <= closes[i] <= lows[k - 2]:
+                    bear_fvg_in_zone[i] = True
+                    break
         df["bull_fvg"] = bull_fvg_in_zone
         df["bear_fvg"] = bear_fvg_in_zone
 
-        # ── Order Block: last opposing candle BEFORE strong move ────────
-        # Strong move = close beyond candle extreme by >0.5% within 3 bars.
-        # Using a rolling-window lookahead is hard with vectorisation; we
-        # approximate by checking the next 3 bars from each candle. Done
-        # in a tight numpy loop (cheap: ~5ms for 35k bars).
-        bull_ob_active = np.zeros(n, dtype=bool)
-        bear_ob_active = np.zeros(n, dtype=bool)
-        bull_ob_lo = np.full(n, np.nan)
-        bull_ob_hi = np.full(n, np.nan)
-        bear_ob_lo = np.full(n, np.nan)
-        bear_ob_hi = np.full(n, np.nan)
-        for i in range(n):
-            # Look back up to 50 bars for the most recent valid OB
-            # (previous 30-bar window missed too many valid setups in
-            # markets where the OB formed slightly further back).
-            lookback = min(50, i)
-            for k in range(i - 1, i - lookback - 1, -1):
-                if k < 0: break
-                # Bullish OB = last bearish candle with strong UP follow-through
-                if closes[k] < opens[k]:
-                    for m in range(k + 1, min(k + 4, i + 1)):
-                        if closes[m] > highs[k] * 1.005:
-                            bull_ob_lo[i] = lows[k]
-                            bull_ob_hi[i] = highs[k]
-                            break
-                    if not np.isnan(bull_ob_lo[i]):
-                        break
-            for k in range(i - 1, i - lookback - 1, -1):
-                if k < 0: break
-                if closes[k] > opens[k]:
-                    for m in range(k + 1, min(k + 4, i + 1)):
-                        if closes[m] < lows[k] * 0.995:
-                            bear_ob_lo[i] = lows[k]
-                            bear_ob_hi[i] = highs[k]
-                            break
-                    if not np.isnan(bear_ob_lo[i]):
-                        break
-        # Price currently inside the most recent OB zone?
-        df["in_bull_ob"] = (close.to_numpy() >= bull_ob_lo) & (close.to_numpy() <= bull_ob_hi)
-        df["in_bear_ob"] = (close.to_numpy() >= bear_ob_lo) & (close.to_numpy() <= bear_ob_hi)
+        # ── Final entry signals: BOS + FVG-in-zone ──────────────────────
+        long_signal  = bull_bos & bull_fvg_in_zone
+        short_signal = bear_bos & bear_fvg_in_zone
 
-        # ── Liquidity sweep — prev LTF swing extreme briefly grabbed ────
-        # For bull: a recent LTF swing low was wicked through THEN reclaimed.
-        # For bear: a recent LTF swing high wicked + reclaimed.
-        # We compute via numpy loop with 30-bar lookback (cheap).
-        sl_ltf = df["sl_ltf"].to_numpy()
-        sh_ltf = df["sh_ltf"].to_numpy()
-        ll_ltf = df["last_sl_ltf"].to_numpy()
-        lh_ltf = df["last_sh_ltf"].to_numpy()
-        bull_sweep_at = np.full(n, np.nan)   # the swept low price (= SL anchor)
-        bear_sweep_at = np.full(n, np.nan)   # the swept high price
-        for i in range(n):
-            # Bull sweep: find a recent swing low, then check if any bar
-            # since dipped below it AND current close is above it again.
-            # 50-bar window (was 30) catches setups where the sweep
-            # happened earlier and price is still in the OB/FVG retrace.
-            for k in range(i - 1, max(0, i - 50), -1):
-                if sl_ltf[k]:
-                    prev_low = lows[k]
-                    for m in range(k + 1, i + 1):
-                        if lows[m] < prev_low and closes[i] > prev_low:
-                            bull_sweep_at[i] = lows[m]
-                            break
-                    break
-            for k in range(i - 1, max(0, i - 50), -1):
-                if sh_ltf[k]:
-                    prev_high = highs[k]
-                    for m in range(k + 1, i + 1):
-                        if highs[m] > prev_high and closes[i] < prev_high:
-                            bear_sweep_at[i] = highs[m]
-                            break
-                    break
-        df["bull_sweep_price"] = bull_sweep_at
-        df["bear_sweep_price"] = bear_sweep_at
-
-        # ── LTF BOS confirmation (3-bar swing broken by current close) ──
-        # Walk back up to 15 bars looking for a swing extreme that close
-        # just broke in the bias direction.
-        ltf_bull_conf = np.zeros(n, dtype=bool)
-        ltf_bear_conf = np.zeros(n, dtype=bool)
-        for i in range(n):
-            for k in range(i - 1, max(0, i - 15), -1):
-                if sh_ltf[k] and closes[i] > highs[k]:
-                    ltf_bull_conf[i] = True; break
-                if sl_ltf[k] and closes[i] < lows[k]:
-                    ltf_bear_conf[i] = True; break
-        df["ltf_bull_conf"] = ltf_bull_conf
-        df["ltf_bear_conf"] = ltf_bear_conf
-
-        # ── Session filter: London + NY institutional hours (UTC) ──────
-        # Spec says "Best Times: New York Open (6 pm to 6am)" — institutional
-        # liquidity. Covering both London (08:00-17:00 UTC) and NY
-        # (12:00-21:00 UTC) gives us the 08:00-21:00 UTC window — when most
-        # institutional volume is active. Excludes Asia-only hours when
-        # liquidity is thinner and false breakouts more common.
-        hrs = df["date"].dt.hour if "date" in df.columns else pd.Series(0, index=df.index)
-        df["in_ny_session"] = (hrs >= 8) & (hrs <= 21)
-
-        # ── STRUCTURAL SL / TP per bar ───────────────────────────────────
-        # SL = sweep extreme ± 10bps. TP1 = entry ± 2R. TP2 = previous swing.
-        # Computed only on bars where ALL gates would pass (saves work and
-        # avoids polluting non-signal bars with stale levels).
-        entry = closes
-        long_gate = (
-            (bias == 1)
-            & df["in_discount"].to_numpy()
-            & (df["in_bull_ob"].to_numpy() | df["bull_fvg"].fillna(False).to_numpy())
-            & (~np.isnan(bull_sweep_at))
-            & ltf_bull_conf
-            & df["in_ny_session"].to_numpy()
-        )
-        short_gate = (
-            (bias == -1)
-            & df["in_premium"].to_numpy()
-            & (df["in_bear_ob"].to_numpy() | df["bear_fvg"].fillna(False).to_numpy())
-            & (~np.isnan(bear_sweep_at))
-            & ltf_bear_conf
-            & df["in_ny_session"].to_numpy()
-        )
-
-        # SL anchored at the sweep extreme with 10bps buffer.
-        sl_long  = bull_sweep_at * 0.999
-        sl_short = bear_sweep_at * 1.001
+        # ── Structural SL/TP per bar ────────────────────────────────────
+        # SL anchored to opposing pivot with 10bps buffer.
+        sl_long  = last_pl * 0.999     # below last swing low
+        sl_short = last_ph * 1.001     # above last swing high
+        entry    = closes
         risk_long  = entry - sl_long
         risk_short = sl_short - entry
-        # Reject if risk > 3% of entry (likely broken signal).
-        bad_long  = (risk_long  <= 0) | (risk_long  > entry * 0.03)
-        bad_short = (risk_short <= 0) | (risk_short > entry * 0.03)
-        long_gate  = long_gate  & ~bad_long
-        short_gate = short_gate & ~bad_short
+        # Reject if risk > 5% of entry (broken structure / pivot too far).
+        bad_long  = (risk_long  <= 0) | (risk_long  > entry * 0.05) | np.isnan(sl_long)
+        bad_short = (risk_short <= 0) | (risk_short > entry * 0.05) | np.isnan(sl_short)
+        long_signal  = long_signal  & ~bad_long
+        short_signal = short_signal & ~bad_short
 
-        tp1_long  = entry + 2 * risk_long
+        tp1_long  = entry + 2 * risk_long      # 2R target
         tp1_short = entry - 2 * risk_short
-        # TP2 = previous opposing swing extreme (the next liquidity pool).
-        tp2_long  = lh_ltf    # previous LTF swing high
-        tp2_short = ll_ltf    # previous LTF swing low
+        # TP2 = previous OPPOSING pivot (next liquidity pool to grab).
+        tp2_long  = last_ph                     # for LONG, target prev pivot HIGH
+        tp2_short = last_pl                     # for SHORT, target prev pivot LOW
 
-        df["sl_price"]  = np.where(long_gate, sl_long,  np.where(short_gate, sl_short,  np.nan))
-        df["tp_price"]  = np.where(long_gate, tp1_long, np.where(short_gate, tp1_short, np.nan))
-        df["tp2_price"] = np.where(long_gate, tp2_long, np.where(short_gate, tp2_short, np.nan))
+        df["sl_price"]  = np.where(long_signal, sl_long,  np.where(short_signal, sl_short,  np.nan))
+        df["tp_price"]  = np.where(long_signal, tp1_long, np.where(short_signal, tp1_short, np.nan))
+        df["tp2_price"] = np.where(long_signal, tp2_long, np.where(short_signal, tp2_short, np.nan))
 
-        # ── Final entry signals (used by populate_entry_trend) ──────────
-        df["_long_signal"]  = long_gate
-        df["_short_signal"] = short_gate
+        df["_long_signal"]  = long_signal
+        df["_short_signal"] = short_signal
         return df
 
     def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
@@ -478,13 +317,12 @@ def _seed_builtin_strategies(db):
     templates = [
         {
             "name": "SMCStrategyTV",
-            "description": "SMC v2 — FULL institutional Smart Money Concepts. 10-layer entry: "
-                           "HTF bias (N=30 BOS direction) + Premium/Discount fib filter + "
-                           "Liquidity sweep + OB (strong-move confirmed) + FVG mitigation + "
-                           "LTF BOS confirmation + NY session (12:00-21:00 UTC) + structural SL "
-                           "anchored to sweep + Multi-TP (TP1=2R, TP2=previous swing). Populates "
-                           "sl_price / tp_price / tp2_price per bar — engine honours those over "
-                           "slider %s when 'SL/TP source = From strategy' is selected.",
+            "description": "SMC v2 — TradingView Pine Script port (BOS + FVG mitigation). "
+                           "Core 3-gate logic: PIVOT BOS (close crosses last N=5 confirmed pivot) "
+                           "+ FVG-in-zone (price retraced INTO an unfilled 3-candle imbalance) "
+                           "+ structural SL anchored to opposing pivot. Multi-TP (TP1=2R close 50%, "
+                           "TP2=previous pivot). No HTF bias / sweep / session filter — see "
+                           "SMCProV3 for the full institutional 10-gate model.",
             "code": _SMC_TV_STRATEGY_CODE,
             "stoploss": -0.03,
             "take_profit": 0.06,

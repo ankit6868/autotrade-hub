@@ -66,11 +66,15 @@ function FuturesBacktestInner() {
   const [leverage,        setLeverage]        = useState(10);
   const [stoploss,        setStoploss]        = useState(1.5);   // SL ≤ TP for positive R:R
   const [takeProfit,      setTakeProfit]      = useState(3.0);   // TP should be ≥ SL (2:1 R:R)
-  // Pyramiding cap — matches TradingView's `pyramiding` setting. Default 1
-  // means "only one position open per direction at a time"; when a strategy
-  // fires the same condition for 4 bars in a row, the engine opens ONE trade,
-  // not four. Set to N>1 to allow N stacked positions per direction.
-  const [pyramiding,      setPyramiding]      = useState(1);
+  // Position model. Two states only (matches the UI dropdown):
+  //   999 → Concurrent (unlimited stacking, take every signal). Default
+  //         because the user explicitly asked for "earlier concurrent
+  //         behaviour where it was properly doing all trades".
+  //     1 → Single position (TV-default pyramiding=0). Same-direction
+  //         signals while in trade are skipped.
+  // Sent to the engine as max_concurrent_positions (clamped 1..10 server-
+  // side; 999 falls through that clamp to mean "essentially unlimited").
+  const [pyramiding,      setPyramiding]      = useState(999);
   // Margin per trade as % of current balance. 5% = $50 margin on $1000
   // balance — gives you 20 losing trades before wipeout at 100% SL hit
   // rate. Above 10% gets aggressive; above 20% can liquidate the account
@@ -652,40 +656,38 @@ function FuturesBacktestInner() {
           </div>
         </div>
 
-        {/* ── Position model (pyramiding) ──────────────────────────────────
-            Most users assume "1 trade per signal cluster" — that's TradingView
-            default behaviour. The previous unlimited-concurrent mode opened a
-            new position every bar a condition was true, inflating trade
-            counts (a single SMC setup could become 4-6 trades). The dropdown
-            here exposes the cap explicitly so the user knows what they're
-            getting. */}
+        {/* ── Position model: Single vs Concurrent ─────────────────────────
+            Two modes, matching how most users think about it:
+              • Single position (TV mode) — one open position per direction
+                at a time; same-direction signals while in trade are skipped.
+              • Concurrent (unlimited) — every signal opens a new position
+                alongside any existing ones. Matches the "take every trade"
+                style users expect from a raw strategy backtest.
+            Default is Concurrent so the backtest reflects every signal the
+            strategy fires — the user can switch to Single for TV parity. */}
         <div className="mb-5 flex items-center gap-3 flex-wrap">
           <label className="label !mb-0 flex items-center gap-2">
             <span>Position model</span>
             <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30"
-                  title="Matches TradingView's `pyramiding` setting. 'Single' = only one open position per direction (TV default). 'Pyramiding N' lets the engine stack up to N positions per direction when the strategy keeps firing the same condition.">
-              TradingView parity
+                  title="Single = TradingView-default pyramiding=0 (one position per direction at a time). Concurrent = take every signal as its own position (unlimited stacking, subject to free margin).">
+              your choice
             </span>
           </label>
           <select className="input !py-1.5 !w-auto text-sm"
                   value={pyramiding}
                   onChange={e => setPyramiding(Number(e.target.value))}>
-            <option value={1}>Single position (TV default)</option>
-            <option value={2}>Pyramiding × 2</option>
-            <option value={3}>Pyramiding × 3</option>
-            <option value={5}>Pyramiding × 5</option>
-            <option value={10}>Pyramiding × 10 (max)</option>
+            <option value={999}>Concurrent (take every signal)</option>
+            <option value={1}>Single position (TV mode)</option>
           </select>
-          {pyramiding === 1 && (
+          {pyramiding === 1 ? (
             <span className="text-[11px] text-slate-400 leading-snug max-w-md">
               While in a position, new signals in the same direction are <b>skipped</b>{' '}
-              (counted under "in-trade" below). Opposite-direction signals always open a new trade.
+              (counted under "in-trade"). Opposite-direction signals always open a new trade.
             </span>
-          )}
-          {pyramiding > 1 && (
-            <span className="text-[11px] text-amber-300 leading-snug max-w-md">
-              Up to {pyramiding} positions per direction can stack. Trade count will be higher
-              and consecutive winners/losers will be correlated (same setup, multiple entries).
+          ) : (
+            <span className="text-[11px] text-emerald-300 leading-snug max-w-md">
+              Every signal opens a new trade alongside existing positions — subject only to
+              free margin. Trade count reflects the raw strategy output.
             </span>
           )}
         </div>
@@ -719,7 +721,7 @@ function FuturesBacktestInner() {
             <span>🛑 Stop-loss: <span className="text-slate-300">{stoploss}%</span></span>
             <span>🎯 Take-profit: <span className="text-slate-300">{takeProfit}%</span></span>
             <span>📐 Position: <span className="text-slate-300">
-              {pyramiding === 1 ? 'Single (TV default)' : `Pyramiding ×${pyramiding}`}
+              {pyramiding === 1 ? 'Single (TV mode)' : 'Concurrent'}
             </span></span>
           </div>
         )}
