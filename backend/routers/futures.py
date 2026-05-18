@@ -332,6 +332,13 @@ def run_futures_backtest(
     # losing trade at any meaningful leverage).
     risk_pct         = max(1, min(50, float(req.get("risk_per_trade_pct", 5))))
     risk_per_trade   = risk_pct / 100.0
+    # SL/TP source: when force_slider_sltp=True, the engine uses the
+    # slider's stoploss_pct / take_profit_pct values for every trade,
+    # ignoring whatever structural SL/TP the strategy's signal function
+    # returns. Default False = strategy's structural values win (faithful
+    # to the strategy's design intent — e.g. SMCStrategyTV documents
+    # "SL: below/above the structural swing point (dynamic)").
+    force_slider    = bool(req.get("force_slider_sltp", False))
 
     # Resolve strategy — pull generated_code so the backtester can actually
     # run the user's authored logic instead of pattern-matching the name to
@@ -362,6 +369,7 @@ def run_futures_backtest(
         generated_code   = generated_code,
         max_concurrent_positions = max_concurrent,
         risk_per_trade   = risk_per_trade,
+        force_slider_sltp = force_slider,
     )
 
     if "error" in result:
