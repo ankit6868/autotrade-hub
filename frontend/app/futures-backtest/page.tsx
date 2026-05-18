@@ -1015,16 +1015,20 @@ function FuturesBacktestInner() {
           )}
 
           {/* Production-grade cost-transparency card.
-              Funding + slippage are deducted from balance (real-cost
-              modelling); the KuCoin fee line is informational — it shows
-              what the exchange would have charged if these trades were
-              live. The app itself doesn't charge anything. */}
+              ALL THREE costs (funding + slippage + KuCoin fees) are
+              DEDUCTED from the simulated balance. The final P&L you see
+              above is the real net-of-costs figure — what your strategy
+              would actually deliver on KuCoin Futures. */}
           {(m.total_funding_paid !== undefined ||
             m.total_slippage_paid !== undefined ||
-            m.total_hyp_kucoin_fees !== undefined) && (
+            m.total_fees_paid !== undefined) && (
             <div className="card mb-4 border-[#243153] bg-[#0d1424]">
-              <p className="text-xs uppercase tracking-wider text-slate-500 mb-2">
-                Real-trading costs (transparency)
+              <p className="text-xs uppercase tracking-wider text-slate-500 mb-2 flex items-center gap-2">
+                <span>Real-trading costs (all deducted from balance)</span>
+                <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                      title="Funding, slippage, and KuCoin taker/maker fees are all subtracted from the simulated P&L. Your final balance reflects the same costs you'd pay in live trading.">
+                  production-grade
+                </span>
               </p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
                 <div className="bg-[#0a0f1d] border border-[#1a2236] rounded px-3 py-2">
@@ -1034,7 +1038,7 @@ function FuturesBacktestInner() {
                   </div>
                   <div className="text-[10px] text-slate-500 mt-0.5">
                     Charged at real KuCoin settlement times (00/08/16 UTC) using historical rates.
-                    Deducted from simulated P&amp;L.
+                    Deducted from balance.
                   </div>
                 </div>
                 <div className="bg-[#0a0f1d] border border-[#1a2236] rounded px-3 py-2">
@@ -1043,20 +1047,19 @@ function FuturesBacktestInner() {
                     ${(m.total_slippage_paid ?? 0).toFixed(2)}
                   </div>
                   <div className="text-[10px] text-slate-500 mt-0.5">
-                    Adverse fill on stops (5bps), TPs (2bps), liquidations (15bps), market exits (5bps).
-                    Deducted from simulated P&amp;L.
+                    Adverse fill on stops (5bps), TPs (2bps), liquidations (15bps), entries (2bps).
+                    Deducted from balance.
                   </div>
                 </div>
-                <div className="bg-[#0a0f1d] border border-sky-500/20 rounded px-3 py-2">
-                  <div className="text-sky-400/80 text-[10px] uppercase tracking-wider">KuCoin would charge (info)</div>
-                  <div className="text-sky-300 font-semibold mt-0.5">
-                    ${(m.total_hyp_kucoin_fees ?? 0).toFixed(2)}
+                <div className="bg-[#0a0f1d] border border-[#1a2236] rounded px-3 py-2">
+                  <div className="text-slate-500 text-[10px] uppercase tracking-wider">KuCoin fees</div>
+                  <div className="text-amber-300 font-semibold mt-0.5">
+                    ${(m.total_fees_paid ?? 0).toFixed(2)}
                   </div>
                   <div className="text-[10px] text-slate-500 mt-0.5">
-                    Hypothetical fees at KuCoin's rates ({(m.kucoin_taker_fee_pct ?? 0.06).toFixed(2)}% taker /
-                    {' '}{(m.kucoin_maker_fee_pct ?? 0.02).toFixed(2)}% maker).
-                    <b className="text-sky-300/90"> Not deducted</b> from your simulated balance — this app
-                    is not a broker.
+                    Real KuCoin Futures rates: <b className="text-slate-400">{(m.kucoin_taker_fee_pct ?? 0.06).toFixed(2)}% taker</b>{' '}
+                    (entries, SL, liq) / <b className="text-slate-400">{(m.kucoin_maker_fee_pct ?? 0.02).toFixed(2)}% maker</b>{' '}
+                    (TP). Deducted from balance.
                   </div>
                 </div>
               </div>
