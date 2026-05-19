@@ -162,12 +162,13 @@ class SMCStrategyTV(IStrategy):
     are real institutional rules but they over-filter for retail back-
     testing — most users want to see what raw BOS+FVG produces first.
 
-    Rules implemented (matches the original Pine):
+    Rules implemented (matches the original Pine, line-for-line):
       1. PIVOT BOS    : close crosses last confirmed pivot (N=5 each side)
       2. FVG zone     : price currently INSIDE an unfilled 3-candle
                         imbalance gap from the last 20 bars
-      3. Structural SL: last opposing pivot ± 10bps buffer (caps at 5%)
-      4. Multi-TP     : TP1 = 2R (close 50%, SL → BE), TP2 = prev pivot
+      3. Structural SL: last opposing pivot ± 10bps buffer (rejected if
+                        risk > 5% of entry — Pine's only filter)
+      4. Single TP    : 2R (closes 100%) — Pine has no TP2 / partial close
 
     No HTF bias, no premium/discount filter, no liquidity sweep, no
     session filter. If you want institutional-strict filtering, see the
@@ -212,14 +213,19 @@ class SMCStrategyTV(IStrategy):
         df["last_pl"] = last_pl
 
         # ── BOS: close crosses last confirmed pivot (edge detection) ────
+        # Pine: `bull_bos = close > last_ph and close[1] <= last_ph` — BOTH
+        # sides compared to the CURRENT bar's last_ph (Pine `var` keeps a
+        # single live value at each bar). Previous code compared close[i-1]
+        # to last_ph[i-1] which diverges from Pine on the bar a new pivot
+        # is registered. Matching Pine exactly here.
         bull_bos = np.zeros(n, dtype=bool)
         bear_bos = np.zeros(n, dtype=bool)
         for i in range(1, n):
-            if not np.isnan(last_ph[i]) and not np.isnan(last_ph[i-1]):
-                if closes[i] > last_ph[i] and closes[i-1] <= last_ph[i-1]:
+            if not np.isnan(last_ph[i]):
+                if closes[i] > last_ph[i] and closes[i-1] <= last_ph[i]:
                     bull_bos[i] = True
-            if not np.isnan(last_pl[i]) and not np.isnan(last_pl[i-1]):
-                if closes[i] < last_pl[i] and closes[i-1] >= last_pl[i-1]:
+            if not np.isnan(last_pl[i]):
+                if closes[i] < last_pl[i] and closes[i-1] >= last_pl[i]:
                     bear_bos[i] = True
         df["bull_bos"] = bull_bos
         df["bear_bos"] = bear_bos
@@ -254,36 +260,34 @@ class SMCStrategyTV(IStrategy):
         entry    = closes
         risk_long  = entry - sl_long
         risk_short = sl_short - entry
-        # Reject if risk > 5% of entry (broken structure / pivot too far).
-        # Risk floor: structural SL must be ≥ 0.5% AND ≤ 5% of entry price.
-        # Without the lower bound, the LAST pivot can sit right at the current
-        # close — risk ≈ 0 → TP ≈ entry → trade opens with SL and TP almost on
-        # top of each other → next candle hits both → 0.00% P&L "ghost" trade
-        # that pollutes WR stats with no-op fills. Reject those instead.
-        MIN_RISK_PCT = 0.005   # 0.5% — smaller than this is structurally
-                                # meaningless on BTC even at 1m
+        # Match Pine exactly: only reject if risk <= 0 or risk > 5% of price.
+        # The previous 0.5% MIN_RISK_PCT floor was killing ~85% of valid
+        # signals on 1m BTC (most pivots sit very close to current price on
+        # a small TF) — that's why the app showed 9 trades where Pine showed
+        # 74 for the same period. Pine has no such floor, so we drop it here.
         bad_long  = (
-            (risk_long  < entry * MIN_RISK_PCT) |
+            (risk_long  <= 0) |
             (risk_long  > entry * 0.05) |
             np.isnan(sl_long)
         )
         bad_short = (
-            (risk_short < entry * MIN_RISK_PCT) |
+            (risk_short <= 0) |
             (risk_short > entry * 0.05) |
             np.isnan(sl_short)
         )
         long_signal  = long_signal  & ~bad_long
         short_signal = short_signal & ~bad_short
 
-        tp1_long  = entry + 2 * risk_long      # 2R target
+        tp1_long  = entry + 2 * risk_long      # 2R target — matches Pine
         tp1_short = entry - 2 * risk_short
-        # TP2 = previous OPPOSING pivot (next liquidity pool to grab).
-        tp2_long  = last_ph                     # for LONG, target prev pivot HIGH
-        tp2_short = last_pl                     # for SHORT, target prev pivot LOW
 
         df["sl_price"]  = np.where(long_signal, sl_long,  np.where(short_signal, sl_short,  np.nan))
         df["tp_price"]  = np.where(long_signal, tp1_long, np.where(short_signal, tp1_short, np.nan))
-        df["tp2_price"] = np.where(long_signal, tp2_long, np.where(short_signal, tp2_short, np.nan))
+        # No TP2 — Pine closes 100% at 2R. The earlier `tp2_price = last_ph`
+        # logic triggered partial-close (50% off at TP1, breakeven trail to
+        # TP2) which Pine doesn't do and which caused exit timing to diverge
+        # even when entries matched.
+        df["tp2_price"] = np.nan
 
         df["_long_signal"]  = long_signal
         df["_short_signal"] = short_signal

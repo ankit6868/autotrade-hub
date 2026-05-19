@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, Suspense } from 'react';
+import React, { useEffect, useState, Suspense } from 'react';
 import { api } from '@/lib/api';
 import MetricCard from '@/components/ui/MetricCard';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
@@ -114,6 +114,11 @@ function FuturesBacktestInner() {
   const [tuneResult, setTuneResult] = useState<any>(null);
   const [history,  setHistory]  = useState<any[]>([]);
   const [error,    setError]    = useState('');
+  // Trade-table view mode: 'compact' = our dense one-row-per-trade view
+  // (Margin/Position/Liq/SL%/TP%/Exit-reason etc.); 'tv' = TradingView's
+  // "List of trades" shape — two rows per trade (Exit on top, Entry below)
+  // with shared P&L. Easier to compare side-by-side with TV's CSV export.
+  const [tradeView, setTradeView] = useState<'compact' | 'tv'>('compact');
 
   useEffect(() => {
     api.strategy.list().then(d => {
@@ -1855,11 +1860,28 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
             </div>
           )}
 
-          {/* Trade Table — same structure as spot + futures columns */}
+          {/* Trade Table — Compact (dense) OR TradingView-style (2 rows per trade) */}
           <div className="card mb-8">
             <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
               <h2 className="text-lg font-semibold">Trade Details</h2>
               <div className="flex items-center gap-3">
+                <div className="inline-flex rounded-md border border-[#2a3a52] overflow-hidden text-[11px] font-medium"
+                     title="Compact: one row per trade with all our extra columns (margin, liq, SL/TP %). TV Style: two rows per trade (Exit on top, Entry below) — same shape as TradingView's 'List of trades' for direct side-by-side comparison.">
+                  <button
+                    type="button"
+                    onClick={() => setTradeView('compact')}
+                    className={`px-3 py-1 ${tradeView === 'compact'
+                      ? 'bg-blue-500/20 text-blue-300'
+                      : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                  >Compact</button>
+                  <button
+                    type="button"
+                    onClick={() => setTradeView('tv')}
+                    className={`px-3 py-1 ${tradeView === 'tv'
+                      ? 'bg-blue-500/20 text-blue-300'
+                      : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                  >TV Style</button>
+                </div>
                 <button
                   type="button"
                   onClick={downloadTradesCsv}
@@ -1872,6 +1894,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
                 <span className="text-xs text-slate-500">{trades.length} trades</span>
               </div>
             </div>
+            {tradeView === 'compact' && (
             <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-[#1a2236]">
@@ -1951,6 +1974,93 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
                 </tbody>
               </table>
             </div>
+            )}
+
+            {tradeView === 'tv' && (
+            <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-[#1a2236]">
+                  <tr className="text-slate-400 border-b border-[#2a3a52]">
+                    <th className="text-left py-3 px-2">Trade #</th>
+                    <th className="text-left py-3 px-2">Type</th>
+                    <th className="text-left py-3 px-2">Date and time</th>
+                    <th className="text-left py-3 px-2">Signal</th>
+                    <th className="text-right py-3 px-2">Price USDT</th>
+                    <th className="text-right py-3 px-2">Size (qty)</th>
+                    <th className="text-right py-3 px-2">Size (value)</th>
+                    <th className="text-right py-3 px-2">Net P&amp;L USDT</th>
+                    <th className="text-right py-3 px-2">Net P&amp;L %</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {trades.map((t: any, i: number) => {
+                    // TradingView shows Exit row above Entry row for each trade.
+                    // Both rows share the trade's Net P&L (TV convention).
+                    const dir       = String(t.direction || '').toLowerCase();
+                    const posValue  = Number(t.margin ?? 0) * Number(t.leverage ?? 1);
+                    const entryPx   = Number(t.open_rate ?? t.entry ?? 0);
+                    const exitPx    = Number(t.close_rate ?? 0);
+                    const qty       = entryPx > 0 ? posValue / entryPx : 0;
+                    const pnlAbs    = Number(t.profit_abs ?? 0);
+                    const pnlPct    = Number(t.profit_pct ?? 0);
+                    // Map our exit_reason → TV-style signal label so users
+                    // recognise "L-exit" / "S-exit" from their Pine code.
+                    const exitSignal = (
+                      t.exit_reason === 'liquidated' ? 'LIQ'
+                      : t.exit_reason === 'stop_loss' ? (dir === 'long' ? 'L-exit' : 'S-exit')
+                      : t.exit_reason === 'take_profit' ? (dir === 'long' ? 'L-exit' : 'S-exit')
+                      : t.exit_reason === 'take_profit_1' ? (dir === 'long' ? 'L-tp1' : 'S-tp1')
+                      : t.exit_reason === 'take_profit_2' ? (dir === 'long' ? 'L-tp2' : 'S-tp2')
+                      : 'Open'  // forced close at end of window
+                    );
+                    const entrySignal = dir === 'long' ? 'L' : 'S';
+                    const pnlClass    = pnlAbs >= 0 ? 'text-emerald-400' : 'text-red-400';
+                    const isLiq       = t.exit_reason === 'liquidated';
+                    const rowBg       = isLiq ? 'bg-orange-500/5' : '';
+                    return (
+                      <React.Fragment key={i}>
+                        {/* Exit row first — matches TradingView's ordering */}
+                        <tr className={`border-b border-[#2a3a52]/30 hover:bg-[#2a3a52]/20 ${rowBg}`}>
+                          <td className="py-2 px-2 text-slate-500"
+                              rowSpan={2}>
+                            {i + 1}{' '}
+                            <span className={`text-[10px] ${dir === 'long' ? 'text-emerald-400' : 'text-red-400'}`}>
+                              {dir === 'long' ? 'Long' : 'Short'}
+                            </span>
+                          </td>
+                          <td className="py-2 px-2 text-slate-300 text-xs">Exit {dir}</td>
+                          <td className="py-2 px-2 text-slate-400 text-xs">
+                            {String(t.close_date ?? '').replace('T', ' ').slice(0, 16)}
+                          </td>
+                          <td className={`py-2 px-2 text-xs ${isLiq ? 'text-orange-400 font-bold' : 'text-slate-400'}`}>
+                            {exitSignal}
+                          </td>
+                          <td className="py-2 px-2 text-right font-mono text-xs">{exitPx.toFixed(2)}</td>
+                          <td className="py-2 px-2 text-right font-mono text-xs text-slate-400" rowSpan={2}>{qty.toFixed(6)}</td>
+                          <td className="py-2 px-2 text-right font-mono text-xs text-slate-400" rowSpan={2}>{posValue.toFixed(4)}</td>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${pnlClass}`} rowSpan={2}>
+                            {pnlAbs >= 0 ? '+' : ''}{pnlAbs.toFixed(2)}
+                          </td>
+                          <td className={`py-2 px-2 text-right font-mono text-xs ${pnlClass}`} rowSpan={2}>
+                            {pnlPct >= 0 ? '+' : ''}{pnlPct.toFixed(2)}%
+                          </td>
+                        </tr>
+                        {/* Entry row */}
+                        <tr className={`border-b border-[#2a3a52] hover:bg-[#2a3a52]/20 ${rowBg}`}>
+                          <td className="py-2 px-2 text-slate-300 text-xs">Entry {dir}</td>
+                          <td className="py-2 px-2 text-slate-400 text-xs">
+                            {String(t.open_date ?? '').replace('T', ' ').slice(0, 16)}
+                          </td>
+                          <td className="py-2 px-2 text-slate-400 text-xs">{entrySignal}</td>
+                          <td className="py-2 px-2 text-right font-mono text-xs">{entryPx.toFixed(2)}</td>
+                        </tr>
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            )}
           </div>
         </>
       )}
