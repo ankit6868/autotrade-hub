@@ -334,6 +334,8 @@ plotshape(short_ok, "SHORT", shape.labeldown, location.abovebar, color.fuchsia,
 `;
     }
     if (strategyName === 'BidirectionalStrategy') {
+      // Updated to match the new pullback-in-trend logic (was: enter on
+      // trend confirmation → 25% WR. Now: enter on pullbacks within HTF trend).
       return `//@version=5
 strategy("BidirectionalStrategy — port from autotrade-hub",
      overlay = true,
@@ -345,15 +347,21 @@ strategy("BidirectionalStrategy — port from autotrade-hub",
      process_orders_on_close = false,
      calc_on_every_tick = false)
 
-ema9  = ta.ema(close, 9)
-ema21 = ta.ema(close, 21)
-rsi   = ta.rsi(close, 14)
+ema21  = ta.ema(close, 21)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+rsi    = ta.rsi(close, 14)
 
-uptrend   = ema9 > ema21 and ema9[1] > ema21[1]
-downtrend = ema9 < ema21 and ema9[1] < ema21[1]
+// HTF bias from EMA50 vs EMA200
+bull_trend = ema50 > ema200
+bear_trend = ema50 < ema200
 
-long_entry  = uptrend   and rsi < 60
-short_entry = downtrend and rsi > 40
+// Pullback to EMA21 (within 0.5% of price)
+near_ema21 = math.abs(close - ema21) < close * 0.005
+
+// Oversold/overbought inside trend = good entry timing
+long_entry  = bull_trend and near_ema21 and rsi < 40
+short_entry = bear_trend and near_ema21 and rsi > 60
 
 if long_entry
     strategy.entry("L", strategy.long)
@@ -366,17 +374,168 @@ if short_entry
          stop  = close * 1.015,
          limit = close * 0.970)
 
+plot(ema21,  "EMA21",  color = color.aqua)
+plot(ema50,  "EMA50",  color = color.orange)
+plot(ema200, "EMA200", color = color.purple)
+`;
+    }
+    if (strategyName === 'SMCStrategy') {
+      return `//@version=5
+strategy("SMCStrategy — port from autotrade-hub",
+     overlay = true,
+     pyramiding = 0,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 5,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.06,
+     process_orders_on_close = false,
+     calc_on_every_tick = false)
+
+ema9  = ta.ema(close, 9)
+ema21 = ta.ema(close, 21)
+
+// EMA cross = BOS direction
+bull_bos = ta.crossover(ema9, ema21)
+bear_bos = ta.crossunder(ema9, ema21)
+
+// 30-bar range midpoint for premium/discount split
+range_hi  = ta.highest(high, 30)
+range_lo  = ta.lowest(low, 30)
+range_mid = (range_hi + range_lo) / 2
+
+in_discount = close <= range_mid
+in_premium  = close >= range_mid
+
+long_entry  = bull_bos and in_discount
+short_entry = bear_bos and in_premium
+
+if long_entry
+    strategy.entry("L", strategy.long)
+    strategy.exit("L-exit", "L",
+         stop  = close * 0.985,
+         limit = close * 1.030)
+if short_entry
+    strategy.entry("S", strategy.short)
+    strategy.exit("S-exit", "S",
+         stop  = close * 1.015,
+         limit = close * 0.970)
+
 plot(ema9,  "EMA9",  color = color.aqua)
 plot(ema21, "EMA21", color = color.orange)
+plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
+`;
+    }
+    if (strategyName === 'SimpleTargetStrategy') {
+      return `//@version=5
+strategy("SimpleTargetStrategy — port from autotrade-hub",
+     overlay = true,
+     pyramiding = 0,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 5,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.06,
+     process_orders_on_close = false,
+     calc_on_every_tick = false)
+
+rsi   = ta.rsi(close, 14)
+ema20 = ta.ema(close, 20)
+
+// LONG: deep oversold OR (mild oversold AND below EMA20)
+long_entry  = rsi < 30 or (rsi < 45 and close < ema20)
+// SHORT: deep overbought OR (mild overbought AND above EMA20)
+short_entry = rsi > 70 or (rsi > 55 and close > ema20)
+
+if long_entry
+    strategy.entry("L", strategy.long)
+    strategy.exit("L-exit", "L",
+         stop  = close * 0.985,    // -1.5%
+         limit = close * 1.030)    // +3.0%
+if short_entry
+    strategy.entry("S", strategy.short)
+    strategy.exit("S-exit", "S",
+         stop  = close * 1.015,
+         limit = close * 0.970)
+
+plot(ema20, "EMA20", color = color.orange)
+hline(30, "RSI 30", color = color.green)
+hline(70, "RSI 70", color = color.red)
+`;
+    }
+    if (strategyName === 'SMCProV3') {
+      return `//@version=5
+strategy("SMCProV3 — port from autotrade-hub",
+     overlay = true,
+     pyramiding = 0,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 5,
+     commission_type = strategy.commission.percent,
+     commission_value = 0.06,
+     process_orders_on_close = false,
+     calc_on_every_tick = false)
+
+// Indicators
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+atr20  = ta.atr(20)
+
+// 50-bar dealing range
+range_hi  = ta.highest(high, 50)
+range_lo  = ta.lowest(low, 50)
+range_mid = (range_hi + range_lo) / 2
+
+// HTF bias
+bull_bias = close > ema200 and ema50 > ema200
+bear_bias = close < ema200 and ema50 < ema200
+
+// Premium / Discount
+in_discount = close <= range_mid
+in_premium  = close >= range_mid
+
+// 20-bar sweep — current bar takes prev 20-bar low/high and closes back
+prev_low_20  = ta.lowest(low,  20)[1]
+prev_high_20 = ta.highest(high, 20)[1]
+bull_sweep   = low  < prev_low_20  and close > prev_low_20
+bear_sweep   = high > prev_high_20 and close < prev_high_20
+
+// FVG-in-zone (3-candle imbalance containing current close)
+in_bull_fvg = high[2] < low and high[2] <= close and close <= low
+in_bear_fvg = low[2] > high and high <= close and close <= low[2]
+
+// Strong move: current body ≥ 1.5× ATR20
+body         = math.abs(close - open)
+strong_move  = body >= 1.5 * atr20
+
+// NY session: 12-21 UTC
+in_session = hour(time, "UTC") >= 12 and hour(time, "UTC") <= 21
+
+long_entry  = bull_bias and in_discount and bull_sweep and in_bull_fvg and strong_move and in_session
+short_entry = bear_bias and in_premium  and bear_sweep and in_bear_fvg and strong_move and in_session
+
+if long_entry
+    strategy.entry("L", strategy.long)
+    strategy.exit("L-exit", "L",
+         stop  = close * 0.98,    // -2%
+         limit = close * 1.04)    // +4%
+if short_entry
+    strategy.entry("S", strategy.short)
+    strategy.exit("S-exit", "S",
+         stop  = close * 1.02,
+         limit = close * 0.96)
+
+plot(ema50,  "EMA50",  color = color.orange)
+plot(ema200, "EMA200", color = color.purple)
+plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
 `;
     }
     // Fallback — generic note
     return `// No Pine Script port available for "${strategyName ?? '(unknown)'}".
-// Strategies with hand-built signal functions in native_backtester.py
-// (MissCandleLong/Short, MACD, RSI Bollinger, EmaScalping, SimpleTarget)
-// don't have a direct Pine equivalent yet. SMCStrategyTV and
-// BidirectionalStrategy DO — pick one of those from the Strategy dropdown
-// to see its Pine Script port.`;
+// Pine ports exist for: SMCStrategyTV, SMCStrategy, SMCProV3,
+// BidirectionalStrategy, SimpleTargetStrategy.
+// Pick one of those from the Strategy dropdown to see its Pine port.
+//
+// Strategies with custom signal functions (MissCandleLong/Short,
+// MacdCrossover, RsiBollinger, EmaScalping) don't have a direct Pine
+// equivalent yet — open an issue if you'd like one written.`;
   }
 
   // Detect whether the selected strategy is one whose signal function
