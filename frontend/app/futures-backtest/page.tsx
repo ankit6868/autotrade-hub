@@ -890,7 +890,7 @@ plot(ema21, "EMA21", color = color.orange)
               <span>Stop-Loss: {stoploss}%</span>
               <SourceBadge src={slSrc} />
             </label>
-            <input type="range" min={0.5} max={10} step={0.5} value={stoploss}
+            <input type="range" min={0.1} max={10} step={0.1} value={stoploss}
               onChange={e => { setStoploss(Number(e.target.value)); setSlSrc('manual'); }}
               className="w-full accent-red-500 mt-2" />
           </div>
