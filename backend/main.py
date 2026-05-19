@@ -41,41 +41,108 @@ import jwt  # noqa: E402
 
 
 _SIMPLE_STRATEGY_CODE = '''
-class SimpleTargetStrategy:
+from freqtrade.strategy import IStrategy
+from pandas import DataFrame
+import talib.abstract as ta
+
+
+class SimpleTargetStrategy(IStrategy):
     """
-    Buys when RSI < 55 and price is near EMA-20 (pullback zone),
-    or when RSI < 38 (oversold). Exits at +3% take-profit or -1.5% stop-loss (2:1 R:R).
-    Also shorts when RSI > 65 and price above EMA-20, or RSI > 72 (overbought).
-    Works in any market condition — bidirectional LONG + SHORT.
+    RSI + EMA-20 mean-reversion strategy. Bidirectional LONG + SHORT.
+
+    LONG  when (RSI < 45 AND close < EMA20) OR RSI < 30 (deep oversold)
+    SHORT when (RSI > 55 AND close > EMA20) OR RSI > 70 (deep overbought)
+    SL: 1.5% | TP: 3.0% (2:1 R:R) | TF: 15m
     """
+
+    timeframe   = "15m"
+    stoploss    = -0.015
     minimal_roi = {"0": 0.030}
-    stoploss = -0.015
-    timeframe = "15m"
+    can_short   = True
+    startup_candle_count = 30
+    process_only_new_candles = True
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["rsi"]   = ta.RSI(dataframe, timeperiod=14)
+        dataframe["ema20"] = ta.EMA(dataframe, timeperiod=20)
+        return dataframe
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["enter_long"]  = 0
+        dataframe["enter_short"] = 0
+
+        dataframe.loc[
+            (dataframe["rsi"] < 30) |
+            ((dataframe["rsi"] < 45) & (dataframe["close"] < dataframe["ema20"])),
+            "enter_long",
+        ] = 1
+
+        dataframe.loc[
+            (dataframe["rsi"] > 70) |
+            ((dataframe["rsi"] > 55) & (dataframe["close"] > dataframe["ema20"])),
+            "enter_short",
+        ] = 1
+        return dataframe
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["exit_long"]  = 0
+        dataframe["exit_short"] = 0
+        return dataframe
 '''
 
 _SMC_STRATEGY_CODE = '''
-class SMCStrategy:
-    """
-    Smart Money Concepts (SMC) — Full multi-timeframe implementation.
+from freqtrade.strategy import IStrategy
+from pandas import DataFrame
+import talib.abstract as ta
 
-    Layers (ALL must align for entry):
-      1. HTF Bias  : EMA200 direction (simulates 4H trend)
-      2. Swing     : N=5 bar swing highs/lows detection
-      3. BOS       : Break of Structure (price breaks last swing)
-      4. FVG       : Fair Value Gap (3-candle imbalance)
-      5. OB        : Order Block (last opposing candle before BOS)
-      6. Discount  : Price below 50% Fibonacci = buy zone
-      7. Liq Sweep : Wick takes out stops then reverses
-      8. NY Session: 13:00–21:00 UTC only
 
-    LONG:  HTF bullish + discount zone + FVG/OB + sell-side sweep + BOS up
-    SHORT: HTF bearish + premium zone + FVG/OB + buy-side sweep + BOS down
-    SL: Below swept liquidity. TP: 2R from entry.
+class SMCStrategy(IStrategy):
     """
-    minimal_roi = {"0": 0.03}   # 2R target
-    stoploss = -0.015
-    timeframe = "15m"
-    startup_candle_count = 210
+    Smart Money Concepts — EMA-based BOS + FVG approximation.
+
+    LONG  : EMA9 crosses above EMA21 (BOS up) AND price near recent low
+            (discount zone, i.e. close < 30-bar midpoint).
+    SHORT : EMA9 crosses below EMA21 (BOS down) AND price near recent high
+            (premium zone, i.e. close > 30-bar midpoint).
+    SL    : Fixed 1.5% | TP: 3% (2:1 R:R) | TF: 15m
+    """
+
+    timeframe   = "15m"
+    stoploss    = -0.015
+    minimal_roi = {"0": 0.03}
+    can_short   = True
+    startup_candle_count = 50
+    process_only_new_candles = True
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["ema9"]  = ta.EMA(dataframe, timeperiod=9)
+        dataframe["ema21"] = ta.EMA(dataframe, timeperiod=21)
+        # 30-bar range midpoint as the premium/discount split.
+        dataframe["range_hi"] = dataframe["high"].rolling(30).max()
+        dataframe["range_lo"] = dataframe["low"].rolling(30).min()
+        dataframe["range_mid"] = (dataframe["range_hi"] + dataframe["range_lo"]) / 2
+        return dataframe
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["enter_long"]  = 0
+        dataframe["enter_short"] = 0
+
+        bull_bos = (dataframe["ema9"] > dataframe["ema21"]) & \
+                   (dataframe["ema9"].shift(1) <= dataframe["ema21"].shift(1))
+        bear_bos = (dataframe["ema9"] < dataframe["ema21"]) & \
+                   (dataframe["ema9"].shift(1) >= dataframe["ema21"].shift(1))
+
+        in_discount = dataframe["close"] <= dataframe["range_mid"]
+        in_premium  = dataframe["close"] >= dataframe["range_mid"]
+
+        dataframe.loc[bull_bos & in_discount, "enter_long"]  = 1
+        dataframe.loc[bear_bos & in_premium, "enter_short"] = 1
+        return dataframe
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["exit_long"]  = 0
+        dataframe["exit_short"] = 0
+        return dataframe
 '''
 
 _SMC_TV_STRATEGY_CODE = '''
@@ -220,74 +287,155 @@ class SMCStrategyTV(IStrategy):
 '''
 
 _BIDIR_STRATEGY_CODE = '''
-class BidirectionalStrategy:
-    """
-    Trend-following strategy that trades BOTH directions.
+from freqtrade.strategy import IStrategy
+from pandas import DataFrame
+import talib.abstract as ta
 
-    LONG:  EMA9 > EMA21 (uptrend confirmed) AND RSI < 60 (not overbought)
-    SHORT: EMA9 < EMA21 (downtrend confirmed) AND RSI > 40 (not oversold)
-    SL: 1.5% | TP: 3.0% | Leverage: 10x recommended
 
-    Designed specifically to test and validate SHORT position flow
-    in futures paper trading, live trading, and backtesting.
+class BidirectionalStrategy(IStrategy):
     """
+    Trend-following EMA + RSI strategy. Validates LONG + SHORT flow.
+
+    LONG  : EMA9 > EMA21 (uptrend confirmed) AND RSI < 60 (not overbought)
+    SHORT : EMA9 < EMA21 (downtrend confirmed) AND RSI > 40 (not oversold)
+    SL: 1.5% | TP: 3.0% (2:1 R:R) | TF: 15m
+    """
+
+    timeframe   = "15m"
+    stoploss    = -0.015
     minimal_roi = {"0": 0.030}
-    stoploss = -0.015
-    timeframe = "15m"
+    can_short   = True
+    startup_candle_count = 30
+    process_only_new_candles = True
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["ema9"]  = ta.EMA(dataframe, timeperiod=9)
+        dataframe["ema21"] = ta.EMA(dataframe, timeperiod=21)
+        dataframe["rsi"]   = ta.RSI(dataframe, timeperiod=14)
+        return dataframe
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["enter_long"]  = 0
+        dataframe["enter_short"] = 0
+
+        # Confirmed trend = current AND previous bar both agree.
+        uptrend   = (dataframe["ema9"] > dataframe["ema21"]) & \
+                    (dataframe["ema9"].shift(1) > dataframe["ema21"].shift(1))
+        downtrend = (dataframe["ema9"] < dataframe["ema21"]) & \
+                    (dataframe["ema9"].shift(1) < dataframe["ema21"].shift(1))
+
+        dataframe.loc[uptrend   & (dataframe["rsi"] < 60), "enter_long"]  = 1
+        dataframe.loc[downtrend & (dataframe["rsi"] > 40), "enter_short"] = 1
+        return dataframe
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["exit_long"]  = 0
+        dataframe["exit_short"] = 0
+        return dataframe
 '''
 
 _SMC_PRO_V3_CODE = '''
-class SMCProV3:
+from freqtrade.strategy import IStrategy
+from pandas import DataFrame
+import pandas as pd
+import numpy as np
+import talib.abstract as ta
+
+
+class SMCProV3(IStrategy):
     """
-    SMC Pro v3 — full institutional Smart Money Concepts model.
+    SMC Pro v3 — strict 6-gate institutional model.
 
-    Implements the complete 3-layer entry framework:
+    Gates (ALL must align):
+      1. HTF bias       — EMA200 direction over EMA50 (proxy for 4H trend)
+      2. Premium/Discount — close vs 50-bar range midpoint
+      3. Recent sweep   — current bar's low broke a recent 20-bar low (long)
+                          or high broke a recent 20-bar high (short)
+      4. Inside FVG     — close inside an unfilled 3-candle imbalance gap
+      5. Strong move    — current bar body ≥ 1.5× 20-bar ATR
+      6. NY session     — hour 12-21 UTC only (institutional liquidity)
 
-      LAYER 1 — HTF BIAS (≈daily structure on 15m via N=30 swings)
-        • Detect last Break-of-Structure (BOS) direction
-        • BULL  if last BOS = close > prior swing high
-        • BEAR  if last BOS = close < prior swing low
-        • RANGE if no clear BOS → NO TRADE
-
-      LAYER 2 — PREMIUM / DISCOUNT FILTER (50% fib of HTF range)
-        • LONG  only allowed in DISCOUNT (close ≤ midline)
-        • SHORT only allowed in PREMIUM  (close ≥ midline)
-
-      LAYER 3 — LIQUIDITY SWEEP REQUIREMENT
-        • An LTF swing extreme within last 30 bars MUST have been
-          briefly wicked through and reclaimed before entry
-        • SL is anchored to that sweep extreme
-
-      LAYER 4 — OB / FVG MITIGATION
-        • Price MUST currently be inside either
-          - a Fair Value Gap (3-candle imbalance) in last 20 bars, OR
-          - an Order Block (last opposing candle before a strong
-            move of >0.5% within 3 bars) in last 30 bars
-
-      LAYER 5 — LTF CONFIRMATION (BOS in bias direction)
-        • A recent 3-bar LTF swing extreme must be broken by the
-          current close — this is the "wait for confirmation" gate
-
-      LAYER 6 — SESSION FILTER (NY institutional hours)
-        • Only trade 12:00–21:00 UTC (NY pre-market through close)
-        • Asia / EU chop is filtered out
-
-      LAYER 7 — RISK MATH
-        • SL  = sweep extreme ± 10bps buffer
-        • TP1 = entry ± 2R (default; only target the engine supports)
-        • Reject signal if risk > 3% of entry (likely broken)
-
-    Why ALL the gates: institutional algos reject ~95% of looks-like-a-
-    setup bars. Without every gate, the algo fires on noise. With every
-    gate, expect ~50–200 trades per 6 months on 15m BTC — that's the
-    institutional-quality signal frequency.
-
-    Timeframe: 15m on KuCoin Futures.
+    Aggressive filter — expect ~50-200 trades per 6 months on 15m BTC.
+    SL: 2% | TP: 4% (2R) | TF: 15m | Leverage: 10x
     """
-    minimal_roi = {"0": 0.04}    # 2R nominal — actual TP varies per trade
-    stoploss    = -0.02          # nominal — actual SL is structural per trade
+
     timeframe   = "15m"
-    startup_candle_count = 100   # need swing-confirmation lookback
+    stoploss    = -0.02
+    minimal_roi = {"0": 0.04}
+    can_short   = True
+    startup_candle_count = 220
+    process_only_new_candles = True
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        df = dataframe
+        df["ema50"]  = ta.EMA(df, timeperiod=50)
+        df["ema200"] = ta.EMA(df, timeperiod=200)
+        df["atr20"]  = ta.ATR(df, timeperiod=20)
+
+        # Range midpoint over last 50 bars for premium/discount.
+        df["range_hi"]  = df["high"].rolling(50).max()
+        df["range_lo"]  = df["low"].rolling(50).min()
+        df["range_mid"] = (df["range_hi"] + df["range_lo"]) / 2
+
+        # Recent 20-bar swings for sweep detection (shifted so current bar
+        # is compared to the PAST 20 bars, not including itself).
+        df["prev_low_20"]  = df["low"].rolling(20).min().shift(1)
+        df["prev_high_20"] = df["high"].rolling(20).max().shift(1)
+
+        # FVG: bull = high[i-2] < low[i]; bear = low[i-2] > high[i].
+        # Flag bars where the FVG zone CONTAINS the current close.
+        bull_zone_lo = df["high"].shift(2)
+        bull_zone_hi = df["low"]
+        bear_zone_lo = df["high"]
+        bear_zone_hi = df["low"].shift(2)
+        df["in_bull_fvg"] = (bull_zone_lo < bull_zone_hi) & \
+                            (df["close"] >= bull_zone_lo) & \
+                            (df["close"] <= bull_zone_hi)
+        df["in_bear_fvg"] = (bear_zone_lo < bear_zone_hi) & \
+                            (df["close"] >= bear_zone_lo) & \
+                            (df["close"] <= bear_zone_hi)
+
+        # Strong move = current bar body ≥ 1.5× ATR20.
+        df["body"]        = (df["close"] - df["open"]).abs()
+        df["strong_move"] = df["body"] >= 1.5 * df["atr20"]
+
+        return df
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        df = dataframe
+        df["enter_long"]  = 0
+        df["enter_short"] = 0
+
+        # NY session filter — hour 12-21 UTC (London + NY institutional).
+        hours = df["date"].dt.hour if "date" in df.columns else pd.Series(0, index=df.index)
+        in_session = (hours >= 12) & (hours <= 21)
+
+        bull_bias = (df["close"] > df["ema200"]) & (df["ema50"] > df["ema200"])
+        bear_bias = (df["close"] < df["ema200"]) & (df["ema50"] < df["ema200"])
+
+        in_discount = df["close"] <= df["range_mid"]
+        in_premium  = df["close"] >= df["range_mid"]
+
+        # Sweep: this bar's low broke the recent 20-bar low and closed back above.
+        bull_sweep = (df["low"]  < df["prev_low_20"])  & (df["close"] > df["prev_low_20"])
+        bear_sweep = (df["high"] > df["prev_high_20"]) & (df["close"] < df["prev_high_20"])
+
+        df.loc[
+            bull_bias & in_discount & bull_sweep & df["in_bull_fvg"] &
+            df["strong_move"] & in_session,
+            "enter_long",
+        ] = 1
+        df.loc[
+            bear_bias & in_premium & bear_sweep & df["in_bear_fvg"] &
+            df["strong_move"] & in_session,
+            "enter_short",
+        ] = 1
+        return df
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["exit_long"]  = 0
+        dataframe["exit_short"] = 0
+        return dataframe
 '''
 
 def _cleanup_stale_test_trades(db):

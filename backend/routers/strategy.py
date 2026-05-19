@@ -81,6 +81,9 @@ async def upload_strategy(
     skip_ai: str = Form("false"),
     auto_trade: str = Form("false"),
     auto_trade_mode: str = Form("paper"),
+    # When "true", save even if validation fails (user explicitly overrode
+    # via UI "Save anyway" button). Default false = refuse to save stubs.
+    force: str = Form("false"),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
@@ -93,6 +96,7 @@ async def upload_strategy(
             skip_ai=skip_ai,
             auto_trade=auto_trade,
             auto_trade_mode=auto_trade_mode,
+            force=force,
             db=db,
             user_id=user_id,
         )
@@ -105,6 +109,7 @@ async def _upload_strategy_impl(
     file: UploadFile | None,
     text: str | None,
     name: str,
+    force: str = "false",
     model: str | None,
     skip_ai: str,
     auto_trade: str,
@@ -160,15 +165,49 @@ async def _upload_strategy_impl(
         ai_validation = {
             "passed":  result.get("validation_passed", True),
             "missing": result.get("validation_missing", []),
+            "issues":  result.get("validation_issues", result.get("validation_missing", [])),
         }
     else:
+        # When the user explicitly clicked "Use as-is" we run the SAME
+        # parser-level validation on their pasted code so we can REFUSE
+        # to save broken Python (syntax errors, stubs, pure pseudo-code).
+        # Without this check, the user's strategies list fills up with
+        # rows that silently fall back to a name-matched built-in.
+        from backend.services.strategy_parser import _validate_generated_code
+        ok_uploaded, issues_uploaded = _validate_generated_code(strategy_text)
         code = strategy_text
         model_used = None
         tokens_used = {}
         description = "Imported directly (no AI parsing)"
-        ai_validation = {"passed": True, "missing": []}
+        ai_validation = {
+            "passed":  ok_uploaded,
+            "missing": issues_uploaded,
+            "issues":  issues_uploaded,
+        }
 
     validation = validate_strategy_code(code)
+
+    # ── BLOCK SAVE on validation failure (unless force=true) ──────────────
+    # Previously stub code silently saved → the user saw the strategy in
+    # their list → ran a backtest → the engine fell back to a hardcoded
+    # built-in with the same name. The user got results matching a totally
+    # different algorithm and never knew.
+    # Now: refuse to save unless force=true (UI's "Save anyway" override).
+    force_save = str(force).lower() in ("1", "true", "yes", "on")
+    if not ai_validation["passed"] and not force_save:
+        return {
+            "error": "validation_failed",
+            "message": (
+                "Generated code is incomplete or broken — refusing to save. "
+                "Either rephrase your strategy description with more detail "
+                "(specific indicators, exact entry/exit conditions) and try "
+                "again, or click 'Save anyway' to persist the stub (it will "
+                "fall back to a name-matched built-in algorithm at backtest "
+                "time — NOT your written logic)."
+            ),
+            "ai_validation": ai_validation,
+            "code_preview":  code[:800] if code else "",
+        }
 
     auto_flag = str(auto_trade).lower() in ("true", "1", "yes", "on")
     mode_flag = "live" if str(auto_trade_mode).lower() == "live" else "paper"
@@ -225,8 +264,71 @@ async def _upload_strategy_impl(
 
 @router.post("/validate")
 def validate_strategy(req: ValidateRequest):
-    """Validate strategy code locally (AST + safety checks). No AI, no API keys."""
-    return validate_strategy_code(req.code)
+    """Validate strategy code locally (AST + safety + completeness checks).
+
+    Combines two passes:
+      1. validate_strategy_code (safety / dangerous-import / AST sanity)
+      2. _validate_generated_code (parser-level: syntax compile,
+         required markers, can_short=True, ≥25 real code lines)
+
+    Returns ok=True only when BOTH pass. Issues is a flat list of
+    everything that's wrong, so the UI can show one banner."""
+    from backend.services.strategy_parser import _validate_generated_code
+    safety = validate_strategy_code(req.code)
+    completeness_ok, completeness_issues = _validate_generated_code(req.code)
+    all_issues = list(safety.get("errors") or []) + list(completeness_issues)
+    return {
+        "ok":            bool(safety.get("ok", True)) and completeness_ok,
+        "issues":        all_issues,
+        "safety_ok":     bool(safety.get("ok", True)),
+        "completeness_ok": completeness_ok,
+        "completeness_issues": completeness_issues,
+        # Keep legacy keys for older clients.
+        "errors":  safety.get("errors") or [],
+        "warnings": safety.get("warnings") or [],
+    }
+
+
+class _ValidateByIdResp(dict):
+    """Loose JSON shape; not used as a Pydantic schema."""
+
+
+@router.get("/{strategy_id}/validate")
+def validate_strategy_by_id(
+    strategy_id: int,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Validate an already-saved strategy by ID. Used by the editor's
+    "Validate" button so the user can check whether an old strategy in
+    their DB is a stub before they spend 30s on a backtest only to find
+    out the engine fell back to a name-matched built-in."""
+    from sqlalchemy import or_
+    from backend.services.strategy_parser import _validate_generated_code
+    strategy = db.execute(
+        select(Strategy).where(
+            Strategy.id == strategy_id,
+            or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if not strategy:
+        return {"error": "Strategy not found"}
+    code = strategy.generated_code or ""
+    safety = validate_strategy_code(code)
+    completeness_ok, completeness_issues = _validate_generated_code(code)
+    all_issues = list(safety.get("errors") or []) + list(completeness_issues)
+    return {
+        "ok":           bool(safety.get("ok", True)) and completeness_ok,
+        "issues":       all_issues,
+        "code_length":  len(code),
+        "name":         strategy.name,
+        # Friendly summary the UI can show as a 1-line banner.
+        "summary": (
+            "✓ Strategy code is complete and runnable."
+            if (bool(safety.get("ok", True)) and completeness_ok)
+            else f"⚠ Strategy code is a stub or broken — engine will fall back to a name-matched built-in. {len(all_issues)} issue(s) found."
+        ),
+    }
 
 
 @router.post("/parse")
