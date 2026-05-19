@@ -192,11 +192,14 @@ class SMCStrategyTV(IStrategy):
         closes = close.to_numpy()
 
         # ── Pivot detection (N=5 each side) ─────────────────────────────
-        # Confirmed only N bars after the pivot — we shift forward by N
-        # so the column at bar i never peeks at future data.
+        # Pine's `ta.pivothigh(high, 5, 5)` returns the PIVOT VALUE (high[j])
+        # at bar j+5 — i.e. the value of the actual swing-high bar, surfaced
+        # at the confirmation bar 5 bars later. Pine uses strict-greater on
+        # both sides; we approximate with rolling-max equality (ties are rare
+        # on real BTC prices with multiple decimals).
         roll_h = high.rolling(2 * sl + 1, center=True, min_periods=2 * sl + 1).max()
         roll_l = low .rolling(2 * sl + 1, center=True, min_periods=2 * sl + 1).min()
-        ph = (roll_h.to_numpy() == highs)
+        ph = (roll_h.to_numpy() == highs)   # True at the PIVOT bar j
         pl = (roll_l.to_numpy() == lows)
         ph_shifted = np.zeros(n, dtype=bool)
         pl_shifted = np.zeros(n, dtype=bool)
@@ -206,9 +209,24 @@ class SMCStrategyTV(IStrategy):
         df["pivot_high"] = ph_shifted
         df["pivot_low"]  = pl_shifted
 
-        # Last confirmed pivot up to current bar (for BOS + SL anchor).
-        last_ph = high.where(pd.Series(ph_shifted, index=df.index)).ffill().to_numpy()
-        last_pl = low .where(pd.Series(pl_shifted, index=df.index)).ffill().to_numpy()
+        # Last confirmed pivot VALUE up to current bar — used as BOS level
+        # and SL anchor. Critical: we must forward-fill the PIVOT BAR's high
+        # (highs[j]), NOT the confirmation bar's high (highs[j+5]).
+        # The earlier `high.where(ph_shifted)` pulled highs[j+5] which sits
+        # close to current price — that's why effective SL came out at
+        # 0.01–0.1% instead of Pine's 0.3–0.7%, and why the strategy fired
+        # ~5x as many signals as the equivalent Pine.
+        pivot_h_values = np.where(ph, highs, np.nan)   # highs[j] at j, NaN elsewhere
+        pivot_l_values = np.where(pl, lows,  np.nan)
+        # Shift the VALUES forward by sl bars so they appear at the
+        # confirmation bar j+sl (matches Pine's `ta.pivothigh` output bar).
+        ph_values_shifted = np.full(n, np.nan)
+        pl_values_shifted = np.full(n, np.nan)
+        if sl < n:
+            ph_values_shifted[sl:] = pivot_h_values[:-sl] if sl > 0 else pivot_h_values
+            pl_values_shifted[sl:] = pivot_l_values[:-sl] if sl > 0 else pivot_l_values
+        last_ph = pd.Series(ph_values_shifted, index=df.index).ffill().to_numpy()
+        last_pl = pd.Series(pl_values_shifted, index=df.index).ffill().to_numpy()
         df["last_ph"] = last_ph
         df["last_pl"] = last_pl
 
