@@ -470,6 +470,93 @@ def run_futures_backtest(
 
             # ── A. Open any pending entries at THIS bar's OPEN ────────────
             # (Signal at bar[i-1] close → fill at bar[i] open; matches TV.)
+            #
+            # TradingView parity: in Single-position mode (pyramiding = 0),
+            # Pine's `strategy.entry()` does STOP-AND-REVERSE when an
+            # opposite-direction signal fires while a position is open —
+            # it closes the existing position AND opens the new one in the
+            # opposite direction, both filling at the same bar's open price.
+            # Without this, the app instead opens a 2nd concurrent position
+            # in the opposite direction and lets the original run to SL/TP.
+            # In the user's 1m SMC backtest, that was ~8 trades that should
+            # have closed at small profits/losses on reversal but instead
+            # ran all the way to SL — exactly the WR gap vs Pine's 31%.
+            #
+            # We force-close opposite-direction positions BEFORE processing
+            # the pending entries — that way the SHORT exits at bar_o and
+            # the new LONG opens at bar_o (same price for both fills), and
+            # the SHORT doesn't get a chance to hit its own SL on this bar.
+            if max_concurrent_positions == 1 and open_positions and pending_entries:
+                pending_dirs = {pe[0] for pe in pending_entries}
+                still_open_after_reversal: list[dict] = []
+                for opp in open_positions:
+                    opp_dir = opp["direction"]
+                    reversal_dir = "long" if opp_dir == "short" else "short"
+                    if reversal_dir in pending_dirs:
+                        # Close at bar_o with entry-side slippage (forced
+                        # market exit on the opposite signal — same fee/
+                        # slippage profile as the opposing entry that triggers it).
+                        rev_exit_p = _apply_slippage(bar_o, opp_dir, "exit",
+                                                     SLIPPAGE_BPS_FLIP)
+                        rev_margin = opp["margin"] * opp.get("remaining_pct", 1.0)
+                        rev_pos_value = rev_margin * leverage
+                        if opp_dir == "long":
+                            move_pct = (rev_exit_p - opp["entry_price"]) / opp["entry_price"]
+                        else:
+                            move_pct = (opp["entry_price"] - rev_exit_p) / opp["entry_price"]
+                        rev_leg_pnl = max(rev_margin * move_pct * leverage, -rev_margin)
+                        rev_fee = rev_pos_value * KUCOIN_TAKER_FEE
+                        if deduct_real_costs:
+                            opp["fees_paid"] += rev_fee
+                            balance -= rev_fee
+                        rev_slippage = abs(bar_o - rev_exit_p) * (rev_pos_value / max(bar_o, 1e-9))
+                        opp["slippage_paid"] += rev_slippage
+                        opp["partial_pnl"] += rev_leg_pnl
+                        opp["partial_exits"].append({
+                            "bar_index": i,
+                            "reason":    "reversal",
+                            "price":     round(float(rev_exit_p), 4),
+                            "close_pct": round(float(opp.get("remaining_pct", 1.0)), 4),
+                            "pnl":       round(float(rev_leg_pnl), 4),
+                        })
+                        committed_margin -= rev_margin
+                        balance += rev_leg_pnl
+                        balance = max(balance, 0)
+                        net_pnl_abs = opp["partial_pnl"] - opp["fees_paid"]
+                        profit_pct  = (net_pnl_abs / opp["margin"] * 100) if opp["margin"] > 0 else 0
+                        all_trades.append({
+                            "pair":          pair,
+                            "direction":     opp_dir,
+                            "leverage":      leverage,
+                            "open_date":     str(opp["entry_date"]),
+                            "close_date":    str(row["date"]),
+                            "entry":         round(float(opp["entry_price"]), 4),
+                            "open_rate":     round(float(opp["entry_price"]), 4),
+                            "close_rate":    round(float(rev_exit_p), 4),
+                            "sl_price":      round(float(opp["sl"]), 4),
+                            "tp_price":      round(float(opp["tp"]), 4),
+                            "tp2_price":     round(float(opp["tp2"]), 4) if opp.get("tp2") else None,
+                            "liq_price":     round(float(opp["liq_price"]), 4),
+                            "margin":        round(float(opp["margin"]), 4),
+                            "profit_pct":    round(float(profit_pct), 3),
+                            "profit_abs":    round(float(net_pnl_abs), 4),
+                            "exit_reason":   "reversal",
+                            "balance":       round(float(balance), 2),
+                            "candles_held":  opp["candles_held"],
+                            "funding_paid":  round(float(opp["funding_paid"]), 4),
+                            "slippage_paid": round(float(opp["slippage_paid"]), 4),
+                            "fees_paid":     round(float(opp["fees_paid"]), 4),
+                            "exit_slippage_bps": int(SLIPPAGE_BPS_FLIP),
+                            "signal_bar_index": opp["signal_bar_index"],
+                            "entry_bar_index":  opp["entry_bar_index"],
+                            "exit_bar_index":   i,
+                            "sltp_source":      opp["sltp_source"],
+                            "partial_exits":    opp["partial_exits"],
+                        })
+                    else:
+                        still_open_after_reversal.append(opp)
+                open_positions = still_open_after_reversal
+
             new_pending: list[tuple] = []
             for pe in pending_entries:
                 (sig_dir, _, sig_sl, sig_tp, _, sig_margin, use_signal_sltp,
