@@ -610,6 +610,132 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
     setRunning(false);
   }
 
+  // Export the trade table as a CSV file. Columns are deliberately ordered
+  // and named to align with TradingView's "List of trades" CSV export
+  // (Strategy Tester → Export...) so the user can drop both files side-by-
+  // side in Excel/Google Sheets and compare row-by-row.
+  // TV's columns: Trade #, Type, Date/Time, Signal, Price USD, Position size USD,
+  //               Net Profit USD, Net Profit %, Cumulative Profit USD,
+  //               Cumulative Profit %, Run-up USD, Run-up %, Drawdown USD, Drawdown %
+  // We map ours to the same shape where applicable + keep our extra fields
+  // (SL price, TP price, Liq price, signal-trace bar indices) appended at end.
+  function downloadTradesCsv() {
+    if (!result || !trades || trades.length === 0) return;
+    const strategy = strategies.find((s: any) => s.id === strategyId);
+    const stratName = (strategy?.name ?? 'strategy').replace(/[^a-zA-Z0-9_-]/g, '_');
+    const pair = pairs[0]?.replace('/', '') ?? 'BTCUSDT';
+    const ts = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const filename = `autotrade_hub_${stratName}_${pair}_${timeframe}_${selectedPreset}_${ts}.csv`;
+
+    // CSV header. Quoted to be Excel-safe.
+    const headers = [
+      'Trade #',
+      'Pair',
+      'Direction',
+      'Leverage',
+      'Margin USDT',
+      'Position USDT',
+      'Entry Price',
+      'Exit Price',
+      'SL Price',
+      'TP Price',
+      'SL Distance %',
+      'TP Distance %',
+      'Liquidation Price',
+      'Profit %',
+      'P&L USDT',
+      'Balance USDT',
+      'Open Date',
+      'Close Date',
+      'Exit Reason',
+      'Candles Held',
+      'Signal Bar Index',
+      'Entry Bar Index',
+      'Exit Bar Index',
+      'SL/TP Source',
+      'Funding Paid USDT',
+      'Slippage Paid USDT',
+      'KuCoin Fees USDT',
+    ];
+
+    // Escape values per RFC 4180: wrap in quotes, double-up internal quotes.
+    function esc(v: any): string {
+      if (v === null || v === undefined) return '';
+      const s = String(v);
+      if (s.includes(',') || s.includes('"') || s.includes('\n')) {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return s;
+    }
+
+    const rows = trades.map((t: any, i: number) => {
+      const slDist = (t.sl_price && t.open_rate)
+        ? (Math.abs(Number(t.sl_price) - Number(t.open_rate)) / Number(t.open_rate) * 100).toFixed(3)
+        : '';
+      const tpDist = (t.tp_price && t.open_rate)
+        ? (Math.abs(Number(t.tp_price) - Number(t.open_rate)) / Number(t.open_rate) * 100).toFixed(3)
+        : '';
+      return [
+        i + 1,
+        t.pair ?? '',
+        (t.direction ?? '').toUpperCase(),
+        t.leverage ?? '',
+        Number(t.margin ?? 0).toFixed(4),
+        (Number(t.margin ?? 0) * Number(t.leverage ?? 1)).toFixed(4),
+        Number(t.open_rate ?? 0).toFixed(4),
+        Number(t.close_rate ?? 0).toFixed(4),
+        Number(t.sl_price ?? 0).toFixed(4),
+        Number(t.tp_price ?? 0).toFixed(4),
+        slDist,
+        tpDist,
+        Number(t.liq_price ?? 0).toFixed(4),
+        Number(t.profit_pct ?? 0).toFixed(3),
+        Number(t.profit_abs ?? 0).toFixed(4),
+        Number(t.balance ?? 0).toFixed(2),
+        String(t.open_date ?? ''),
+        String(t.close_date ?? ''),
+        t.exit_reason ?? '',
+        t.candles_held ?? '',
+        t.signal_bar_index ?? '',
+        t.entry_bar_index ?? '',
+        t.exit_bar_index ?? '',
+        t.sltp_source ?? '',
+        Number(t.funding_paid ?? 0).toFixed(4),
+        Number(t.slippage_paid ?? 0).toFixed(4),
+        Number(t.hyp_kucoin_fee ?? 0).toFixed(4),
+      ].map(esc).join(',');
+    });
+
+    // Prepend a small metadata block as comment-style first lines (TV
+    // ignores these on import, Excel shows them as one row). Useful for
+    // the user to know what was tested without opening the app again.
+    const meta = [
+      `# AutoTrade Hub futures backtest export`,
+      `# Strategy: ${strategy?.name ?? '?'}`,
+      `# Pair: ${pairs.join(',')}  Timeframe: ${timeframe}  Period: ${selectedPreset} (${timerange})`,
+      `# Leverage: ${leverage}x  Margin/trade: ${riskPerTrade}%  Starting balance: $${startBalance}`,
+      `# SL/TP source: ${sltpMode === 'strategy' ? 'strategy structural' : `slider (SL ${stoploss}%, TP ${takeProfit}%)`}`,
+      `# Real-trading costs deducted: ${deductCosts ? 'yes' : 'no (pure P&L mode)'}`,
+      `# Position model: ${pyramiding === 1 ? 'Single (TradingView mode)' : 'Concurrent'}`,
+      `# Results: ${m?.total_trades ?? 0} trades  WR ${((m?.win_rate ?? 0) * 100).toFixed(1)}%  Profit ${(m?.total_profit_pct ?? 0).toFixed(2)}%  MaxDD ${(m?.max_drawdown ?? 0).toFixed(2)}%`,
+      `# Exported: ${new Date().toISOString()}`,
+      '',
+    ].join('\n');
+
+    const csv = meta + headers.join(',') + '\n' + rows.join('\n') + '\n';
+
+    // Trigger download via Blob (works in all modern browsers).
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   // Convert raw errors (often JSON blobs from Railway like
   // `{"status":"error","code":502,"message":"Application failed to respond"}`)
   // into a single human-readable line. Falls back to String(e) for anything
@@ -1731,9 +1857,20 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
 
           {/* Trade Table — same structure as spot + futures columns */}
           <div className="card mb-8">
-            <div className="flex items-center justify-between mb-4">
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
               <h2 className="text-lg font-semibold">Trade Details</h2>
-              <span className="text-xs text-slate-500">{trades.length} trades</span>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={downloadTradesCsv}
+                  disabled={!trades || trades.length === 0}
+                  title="Download all trades as CSV (column-aligned with TradingView's Strategy Tester export for easy side-by-side comparison in Excel / Google Sheets)"
+                  className="text-[11px] font-medium px-3 py-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  ⬇ Download CSV
+                </button>
+                <span className="text-xs text-slate-500">{trades.length} trades</span>
+              </div>
             </div>
             <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
               <table className="w-full text-sm">
