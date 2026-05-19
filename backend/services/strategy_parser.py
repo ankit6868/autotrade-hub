@@ -21,68 +21,112 @@ FREE_MODELS = [
 
 DEFAULT_MODEL = FREE_MODELS[0]
 
-SYSTEM_PROMPT = """You are a Freqtrade IStrategy code generator for crypto futures.
+SYSTEM_PROMPT = """You are a Freqtrade IStrategy code generator for crypto futures backtesting.
 
-CRITICAL RULES — your output MUST satisfy ALL of these or it is unusable:
+YOUR OUTPUT IS EXEC'D DIRECTLY — if it's a stub, the backtest is meaningless.
 
-1. The class MUST inherit from IStrategy:
+═══════════════════════════════════════════════════════════════════════
+ABSOLUTE RULES (any violation = unusable output):
+═══════════════════════════════════════════════════════════════════════
+
+1. Output ONLY valid Python that compiles. No markdown fences, no English
+   pseudo-code, no "ON EVERY BAR: ..." instructions. Start with the imports.
+
+2. Required class skeleton:
        class MyStrategy(IStrategy):
+           timeframe   = "15m"
+           stoploss    = -0.03
+           minimal_roi = {"0": 0.06}
+           can_short   = True            # MANDATORY — futures need shorts
+           startup_candle_count = 50
+           process_only_new_candles = True
 
-2. The class MUST set can_short = True (futures supports BOTH long AND short).
+3. ALL THREE METHODS MUST HAVE REAL BODIES (no `pass`, no docstring-only):
+   - populate_indicators  → compute indicators referenced by the rules
+   - populate_entry_trend → set enter_long AND enter_short per bar
+   - populate_exit_trend  → set exit_long  AND exit_short  per bar
 
-3. The class MUST define ALL THREE method bodies — NOT stubs, NOT pass:
+4. The class body MUST be at least 25 real lines of code. If your output is
+   just attributes + a docstring, you have FAILED. A correct strategy has
+   indicator calculations, entry condition logic, and exit condition logic.
 
-       def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-           # Compute every indicator the entry/exit rules below reference.
-           # Use pandas (.rolling, .ewm, .diff) or talib.RSI / talib.EMA etc.
-           # ALWAYS return dataframe.
-           return dataframe
-
-       def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-           # Set BOTH enter_long AND enter_short to 0 or 1 per bar.
-           # Use vectorized pandas: dataframe.loc[CONDITION, "enter_long"] = 1
-           # If the strategy is long-only, still set enter_short = 0 explicitly.
-           dataframe["enter_long"]  = 0
-           dataframe["enter_short"] = 0
-           # ... actual conditions here ...
-           return dataframe
-
-       def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-           dataframe["exit_long"]  = 0
-           dataframe["exit_short"] = 0
-           # ... actual conditions here ...
-           return dataframe
-
-4. NEVER emit a class with only attributes (timeframe, stoploss, minimal_roi)
-   and no methods. That is a stub and will produce zero trades.
-
-5. Implement the user's described logic IN PYTHON — translate any natural
-   language ("buy when RSI < 30") into actual pandas conditions:
-       dataframe["rsi"] = talib.RSI(dataframe["close"], 14)
-       dataframe.loc[dataframe["rsi"] < 30, "enter_long"] = 1
-
-6. Mandatory class attributes (set sensible defaults if user didn't specify):
-       timeframe   = "15m"
-       stoploss    = -0.03
-       minimal_roi = {"0": 0.06}
-       can_short   = True
-       startup_candle_count = 50      # large enough for longest indicator
-       process_only_new_candles = True
-
-7. Allowed imports ONLY (these are stubbed in the runner sandbox):
+5. Allowed imports ONLY:
        from freqtrade.strategy import IStrategy
        from pandas import DataFrame
        import pandas as pd
        import numpy as np
-       import talib            # SMA, EMA, RSI, MACD, BBANDS, ATR, ADX, STOCH stubbed
-       import pandas_ta        # also routed to the talib stub
-       from qtpylib import indicators as qtpylib    # crossed_above / crossed_below
+       import talib.abstract as ta
+       from qtpylib import indicators as qtpylib
 
-   Do NOT import: os, sys, subprocess, requests, urllib, asyncio, freqtrade.persistence.
+═══════════════════════════════════════════════════════════════════════
+WORKED EXAMPLE — this is the QUALITY BAR you must hit:
+═══════════════════════════════════════════════════════════════════════
 
-8. Output ONLY valid executable Python. No markdown fences, no commentary,
-   no docstring describing "what it should do" without implementing it.
-   Start directly with `from freqtrade.strategy import IStrategy`."""
+User request: "RSI + EMA crossover. Long when RSI < 35 and 9 EMA crosses
+above 21 EMA. Short when RSI > 65 and 9 EMA crosses below 21 EMA."
+
+Correct output:
+
+```python
+from freqtrade.strategy import IStrategy
+from pandas import DataFrame
+import talib.abstract as ta
+from qtpylib import indicators as qtpylib
+
+
+class RsiEmaCrossover(IStrategy):
+    timeframe   = "15m"
+    stoploss    = -0.03
+    minimal_roi = {"0": 0.06}
+    can_short   = True
+    startup_candle_count = 50
+    process_only_new_candles = True
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["rsi"]   = ta.RSI(dataframe, timeperiod=14)
+        dataframe["ema9"]  = ta.EMA(dataframe, timeperiod=9)
+        dataframe["ema21"] = ta.EMA(dataframe, timeperiod=21)
+        return dataframe
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["enter_long"]  = 0
+        dataframe["enter_short"] = 0
+
+        dataframe.loc[
+            (dataframe["rsi"] < 35) &
+            qtpylib.crossed_above(dataframe["ema9"], dataframe["ema21"]),
+            "enter_long",
+        ] = 1
+
+        dataframe.loc[
+            (dataframe["rsi"] > 65) &
+            qtpylib.crossed_below(dataframe["ema9"], dataframe["ema21"]),
+            "enter_short",
+        ] = 1
+        return dataframe
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["exit_long"]  = 0
+        dataframe["exit_short"] = 0
+        return dataframe
+```
+
+═══════════════════════════════════════════════════════════════════════
+COMMON FAILURES TO AVOID:
+═══════════════════════════════════════════════════════════════════════
+
+❌ Writing English pseudo-code like "IF rsi < 30 THEN enter_long = TRUE"
+❌ Writing class methods like `macd_condition(self, ...)` that aren't
+   populate_* hooks — these never run in Freqtrade's pipeline
+❌ Class with only docstring + attributes, no methods → STUB
+❌ `pd.Data dataframe:` (typo for `pd.DataFrame`) → SyntaxError
+❌ `dataframe.loc[(), 'exit_long'] = 0` (empty tuple in .loc) → broken
+❌ Forgetting `can_short = True` → engine ignores shorts silently
+❌ Forgetting to set enter_short = 0 baseline → KeyError downstream
+
+Translate ANY natural-language description into actual pandas conditions.
+If the user describes a 7-step institutional strategy with HTF bias, OB,
+FVG, etc., translate EACH step into pandas/numpy code, not English prose."""
 
 
 # Minimum signals the generated code must contain to be considered complete.
@@ -100,20 +144,84 @@ REQUIRED_MARKERS = [
 
 
 def _validate_generated_code(code: str) -> tuple[bool, list[str]]:
-    """Return (ok, missing_markers). A code passes only when it has ALL the
-    elements an IStrategy needs to actually drive entries/exits in our
-    backtester. Catches the common LLM failure mode of emitting a stub
-    with just class attributes and a docstring."""
-    missing = [m for m in REQUIRED_MARKERS if m not in code]
-    return (not missing, missing)
+    """Return (ok, missing_markers). A code passes only when ALL of these
+    are true:
+
+      1. Python syntax compiles cleanly (catches typos like
+         `pd.Data dataframe:` which crashed real user strategies)
+      2. All REQUIRED_MARKERS present (class, IStrategy, populate_*,
+         enter_long, enter_short)
+      3. `can_short = True` is set (futures need both directions; without
+         this Freqtrade silently ignores enter_short → user thinks they
+         have a bidirectional strategy but only longs ever fire)
+      4. Code body has enough substance to be more than a docstring stub
+         (≥ 30 non-comment, non-blank lines — stubs are typically <15)
+
+    Returns (ok, list_of_issues). issues is empty when ok=True."""
+    issues: list[str] = []
+    if not code or not code.strip():
+        return (False, ["empty code"])
+
+    # 1. Syntax check — catches `pd.Data dataframe:`, indentation bugs,
+    # unterminated strings, etc. without exec'ing dangerous code.
+    try:
+        compile(code, "<generated_strategy>", "exec")
+    except SyntaxError as e:
+        issues.append(f"syntax error: {e.msg} on line {e.lineno}")
+        # Syntax-error code can't be safely scanned for markers below
+        # (e.g. a missing colon could hide enter_long), so bail early.
+        return (False, issues)
+
+    # 2. Required-marker check (string-level, no exec).
+    for m in REQUIRED_MARKERS:
+        if m not in code:
+            issues.append(f"missing: {m}")
+
+    # 3. can_short must be True for futures. We accept any of:
+    #    can_short = True / can_short=True / `can_short  =  True`
+    if "can_short" not in code or "can_short = False" in code.replace(" ", ""):
+        # Allow whitespace variations
+        import re as _re
+        if not _re.search(r"can_short\s*=\s*True", code):
+            issues.append("missing: can_short = True (required for futures)")
+
+    # 4. Substance check — count real code lines (not blank, not comment,
+    # not pure-string lines like docstring content). A real strategy is
+    # typically 40-100 lines; pure-stub strategies are 8-15.
+    real_lines = 0
+    in_docstring = False
+    for raw in code.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # Track triple-quoted strings; lines inside docstrings don't count.
+        triple_count = line.count('"""') + line.count("'''")
+        if triple_count == 1:
+            in_docstring = not in_docstring
+            continue
+        if in_docstring:
+            continue
+        if line.startswith("#"):
+            continue
+        real_lines += 1
+    if real_lines < 25:
+        issues.append(
+            f"code body too short ({real_lines} real lines) — looks like a "
+            "stub. Real strategies need at least populate_indicators + "
+            "populate_entry_trend bodies with actual indicator math."
+        )
+
+    return (len(issues) == 0, issues)
 
 
 REPAIR_PROMPT = (
-    "Your previous output was INCOMPLETE. The strategy class you wrote is "
-    "missing the following required elements: {missing}. "
+    "Your previous output was INCOMPLETE or BROKEN. Issues found: {missing}. "
     "Generate the FULL strategy code again — every required method body "
     "must be implemented in pandas/talib, not left as a stub. "
-    "Both enter_long and enter_short must be set on every bar."
+    "Both enter_long AND enter_short must be set on every bar. "
+    "Set `can_short = True` as a class attribute (we trade futures). "
+    "Output ONLY valid Python that compiles — no pseudo-code, no English, "
+    "no `pd.Data dataframe` typos, no broken empty tuples."
 )
 
 
@@ -181,14 +289,14 @@ async def parse_strategy_with_openrouter(
     code = _clean_code(content)
 
     # ── Validate. If the model emitted a stub (no populate_* hooks, no
-    # enter_long/enter_short, etc.) try ONE repair round-trip with the
-    # broken output attached + a stern follow-up message.
-    ok, missing = _validate_generated_code(code)
+    # enter_long/enter_short, syntax errors, etc.) try ONE repair
+    # round-trip with the broken output attached + a stern follow-up.
+    ok, issues = _validate_generated_code(code)
     if not ok:
         repair_messages = initial_messages + [
             {"role": "assistant", "content": code},
             {"role": "user",
-             "content": REPAIR_PROMPT.format(missing=", ".join(missing))},
+             "content": REPAIR_PROMPT.format(missing="; ".join(issues))},
         ]
         try:
             repair_data = await _call_openrouter(repair_messages, api_key, model)
@@ -205,12 +313,14 @@ async def parse_strategy_with_openrouter(
             # warning marker in the model_used field so the caller knows.
             print(f"Repair attempt with {model} failed: {e}")
 
+    final_ok, final_issues = _validate_generated_code(code)
     return {
         "code": code,
         "model_used": data.get("model", model),
         "tokens_used": data.get("usage", {}),
-        "validation_passed": _validate_generated_code(code)[0],
-        "validation_missing": _validate_generated_code(code)[1],
+        "validation_passed": final_ok,
+        "validation_missing": final_issues,   # legacy field name; carries full issues
+        "validation_issues":  final_issues,
     }
 
 
