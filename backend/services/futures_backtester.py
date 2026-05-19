@@ -287,24 +287,37 @@ def run_futures_backtest(
                 )
                 df = evaluate_strategy(generated_code, df)
                 # If the user's strategy class declares its OWN stoploss /
-                # minimal_roi, prefer those over slider values. The slider
-                # values usually come from stale DB column defaults; the
-                # class is the source of truth for its own risk math. Without
-                # this, a strategy authored for 1:3 RR gets backtested at
-                # 1:0.5 RR (DB default 3% SL / 1.5% TP), which is
-                # mathematically guaranteed to lose at any normal win rate.
-                class_sl = df.attrs.get("class_stoploss_pct")
-                class_tp = df.attrs.get("class_take_profit_pct")
-                if class_sl is not None:
-                    data_diagnostics[pair]["override_sl_from_class"] = (
-                        f"{class_sl}% (slider was {stoploss_pct}%)"
+                # minimal_roi, prefer those over slider values BY DEFAULT —
+                # the class is the source of truth for the strategy's risk
+                # math. EXCEPT when force_slider_sltp=True (UI's "SL/TP
+                # source = From sliders below"), in which case the user has
+                # explicitly asked to override the strategy with their own
+                # slider values. Previously this branch fired unconditionally
+                # → flipping the UI toggle had no effect, the slider was
+                # always silently swapped for the class's hardcoded -0.015
+                # / 0.03. THAT was the "215 in-trade skips on 1m" bug.
+                if not force_slider_sltp:
+                    class_sl = df.attrs.get("class_stoploss_pct")
+                    class_tp = df.attrs.get("class_take_profit_pct")
+                    if class_sl is not None:
+                        data_diagnostics[pair]["override_sl_from_class"] = (
+                            f"{class_sl}% (slider was {stoploss_pct}%)"
+                        )
+                        stoploss_pct = class_sl
+                    if class_tp is not None:
+                        data_diagnostics[pair]["override_tp_from_class"] = (
+                            f"{class_tp}% (slider was {take_profit_pct}%)"
+                        )
+                        take_profit_pct = class_tp
+                else:
+                    # The toggle was set to "From sliders" — record that
+                    # we're respecting it so the UI diagnostic is honest.
+                    data_diagnostics[pair]["slider_overrides_class"] = (
+                        f"SL {stoploss_pct}% / TP {take_profit_pct}% "
+                        f"(class declared "
+                        f"{df.attrs.get('class_stoploss_pct')}% / "
+                        f"{df.attrs.get('class_take_profit_pct')}% — ignored)"
                     )
-                    stoploss_pct = class_sl
-                if class_tp is not None:
-                    data_diagnostics[pair]["override_tp_from_class"] = (
-                        f"{class_tp}% (slider was {take_profit_pct}%)"
-                    )
-                    take_profit_pct = class_tp
                 signal_fn = make_signal_fn_from_df(
                     df, leverage, stoploss_pct, take_profit_pct,
                 )
@@ -374,26 +387,34 @@ def run_futures_backtest(
                 # invert the RR ratio. Same sanity-bounds as the AST path:
                 # values like -0.99 (no-stop) or 100 (placeholder ROI) are
                 # IGNORED so we don't apply nonsense overrides.
+                # SKIPPED when force_slider_sltp=True — same fix as the
+                # eval-success path above; without this the UI toggle to
+                # "From sliders" was inert for any strategy that emitted
+                # a stoploss=-0.015 line in its source.
                 import re
-                m_sl = re.search(
-                    r"^\s*stoploss\s*=\s*(-?\d+(?:\.\d+)?)",
-                    generated_code or "", re.MULTILINE,
-                )
-                if m_sl:
-                    parsed_sl = abs(float(m_sl.group(1)))
-                    if 0.001 <= parsed_sl <= 0.25:
-                        data_diagnostics[pair]["override_sl_from_class"] = (
-                            f"{parsed_sl*100}% (slider was {stoploss_pct}%, parsed from source)"
-                        )
-                        stoploss_pct = parsed_sl * 100
-                    else:
-                        data_diagnostics[pair]["class_stoploss_ignored"] = (
-                            f"{parsed_sl*100:.1f}% — outside sane range, keeping slider {stoploss_pct}%"
-                        )
-                m_tp = re.search(
-                    r"minimal_roi\s*=\s*\{\s*[\"']0[\"']\s*:\s*(\d+(?:\.\d+)?)",
-                    generated_code or "",
-                )
+                if not force_slider_sltp:
+                    m_sl = re.search(
+                        r"^\s*stoploss\s*=\s*(-?\d+(?:\.\d+)?)",
+                        generated_code or "", re.MULTILINE,
+                    )
+                    if m_sl:
+                        parsed_sl = abs(float(m_sl.group(1)))
+                        if 0.001 <= parsed_sl <= 0.25:
+                            data_diagnostics[pair]["override_sl_from_class"] = (
+                                f"{parsed_sl*100}% (slider was {stoploss_pct}%, parsed from source)"
+                            )
+                            stoploss_pct = parsed_sl * 100
+                        else:
+                            data_diagnostics[pair]["class_stoploss_ignored"] = (
+                                f"{parsed_sl*100:.1f}% — outside sane range, keeping slider {stoploss_pct}%"
+                            )
+                    m_tp = re.search(
+                        r"minimal_roi\s*=\s*\{\s*[\"']0[\"']\s*:\s*(\d+(?:\.\d+)?)",
+                        generated_code or "",
+                    )
+                else:
+                    m_sl = None
+                    m_tp = None
                 if m_tp:
                     parsed_tp = float(m_tp.group(1))
                     if 0.001 <= parsed_tp <= 0.50:
