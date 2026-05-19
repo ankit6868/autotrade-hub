@@ -193,14 +193,27 @@ class SMCStrategyTV(IStrategy):
 
         # ── Pivot detection (N=5 each side) ─────────────────────────────
         # Pine's `ta.pivothigh(high, 5, 5)` returns the PIVOT VALUE (high[j])
-        # at bar j+5 — i.e. the value of the actual swing-high bar, surfaced
-        # at the confirmation bar 5 bars later. Pine uses strict-greater on
-        # both sides; we approximate with rolling-max equality (ties are rare
-        # on real BTC prices with multiple decimals).
-        roll_h = high.rolling(2 * sl + 1, center=True, min_periods=2 * sl + 1).max()
-        roll_l = low .rolling(2 * sl + 1, center=True, min_periods=2 * sl + 1).min()
-        ph = (roll_h.to_numpy() == highs)   # True at the PIVOT bar j
-        pl = (roll_l.to_numpy() == lows)
+        # at bar j+5 — the value of the swing-high bar, surfaced 5 bars later.
+        # Pine uses STRICT greater on both sides: "leftbars LOWER bars to the
+        # left and rightbars LOWER bars to the right". Earlier we used
+        # rolling-max equality, which marks BOTH bars as pivots when two
+        # adjacent highs tie (rare but real on 1m BTC) — Pine marks NEITHER.
+        # Over 43k bars that produced ~hundreds of false pivots → tighter
+        # SL anchors → lower win rate than Pine. Use strict comparison.
+        ph = np.zeros(n, dtype=bool)
+        pl = np.zeros(n, dtype=bool)
+        for j in range(sl, n - sl):
+            h = highs[j]; l = lows[j]
+            is_ph = True; is_pl = True
+            for d in range(1, sl + 1):
+                if is_ph and (highs[j - d] >= h or highs[j + d] >= h):
+                    is_ph = False
+                if is_pl and (lows [j - d] <= l or lows [j + d] <= l):
+                    is_pl = False
+                if not is_ph and not is_pl:
+                    break
+            ph[j] = is_ph
+            pl[j] = is_pl
         ph_shifted = np.zeros(n, dtype=bool)
         pl_shifted = np.zeros(n, dtype=bool)
         if sl < n:
