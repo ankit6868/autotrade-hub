@@ -255,8 +255,23 @@ class SMCStrategyTV(IStrategy):
         risk_long  = entry - sl_long
         risk_short = sl_short - entry
         # Reject if risk > 5% of entry (broken structure / pivot too far).
-        bad_long  = (risk_long  <= 0) | (risk_long  > entry * 0.05) | np.isnan(sl_long)
-        bad_short = (risk_short <= 0) | (risk_short > entry * 0.05) | np.isnan(sl_short)
+        # Risk floor: structural SL must be ≥ 0.5% AND ≤ 5% of entry price.
+        # Without the lower bound, the LAST pivot can sit right at the current
+        # close — risk ≈ 0 → TP ≈ entry → trade opens with SL and TP almost on
+        # top of each other → next candle hits both → 0.00% P&L "ghost" trade
+        # that pollutes WR stats with no-op fills. Reject those instead.
+        MIN_RISK_PCT = 0.005   # 0.5% — smaller than this is structurally
+                                # meaningless on BTC even at 1m
+        bad_long  = (
+            (risk_long  < entry * MIN_RISK_PCT) |
+            (risk_long  > entry * 0.05) |
+            np.isnan(sl_long)
+        )
+        bad_short = (
+            (risk_short < entry * MIN_RISK_PCT) |
+            (risk_short > entry * 0.05) |
+            np.isnan(sl_short)
+        )
         long_signal  = long_signal  & ~bad_long
         short_signal = short_signal & ~bad_short
 
@@ -294,10 +309,14 @@ import talib.abstract as ta
 
 class BidirectionalStrategy(IStrategy):
     """
-    Trend-following EMA + RSI strategy. Validates LONG + SHORT flow.
+    Trend + pullback strategy (was: enter on trend confirmation, which fired
+    at the START of every move including fakeouts → 25% WR. Fixed to enter
+    on pullbacks INSIDE confirmed trends — much higher quality entries).
 
-    LONG  : EMA9 > EMA21 (uptrend confirmed) AND RSI < 60 (not overbought)
-    SHORT : EMA9 < EMA21 (downtrend confirmed) AND RSI > 40 (not oversold)
+    LONG  : EMA50 > EMA200 (uptrend) AND close pulled back to or below EMA21
+            AND RSI < 40 (oversold within uptrend = buy the dip)
+    SHORT : EMA50 < EMA200 (downtrend) AND close rallied to or above EMA21
+            AND RSI > 60 (overbought within downtrend = short the rip)
     SL: 1.5% | TP: 3.0% (2:1 R:R) | TF: 15m
     """
 
@@ -305,27 +324,36 @@ class BidirectionalStrategy(IStrategy):
     stoploss    = -0.015
     minimal_roi = {"0": 0.030}
     can_short   = True
-    startup_candle_count = 30
+    startup_candle_count = 220   # need EMA200
     process_only_new_candles = True
 
     def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
-        dataframe["ema9"]  = ta.EMA(dataframe, timeperiod=9)
-        dataframe["ema21"] = ta.EMA(dataframe, timeperiod=21)
-        dataframe["rsi"]   = ta.RSI(dataframe, timeperiod=14)
+        dataframe["ema21"]  = ta.EMA(dataframe, timeperiod=21)
+        dataframe["ema50"]  = ta.EMA(dataframe, timeperiod=50)
+        dataframe["ema200"] = ta.EMA(dataframe, timeperiod=200)
+        dataframe["rsi"]    = ta.RSI(dataframe, timeperiod=14)
         return dataframe
 
     def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
         dataframe["enter_long"]  = 0
         dataframe["enter_short"] = 0
 
-        # Confirmed trend = current AND previous bar both agree.
-        uptrend   = (dataframe["ema9"] > dataframe["ema21"]) & \
-                    (dataframe["ema9"].shift(1) > dataframe["ema21"].shift(1))
-        downtrend = (dataframe["ema9"] < dataframe["ema21"]) & \
-                    (dataframe["ema9"].shift(1) < dataframe["ema21"].shift(1))
+        # Higher-timeframe bias: EMA50 vs EMA200 over current bar.
+        bull_trend = dataframe["ema50"] > dataframe["ema200"]
+        bear_trend = dataframe["ema50"] < dataframe["ema200"]
 
-        dataframe.loc[uptrend   & (dataframe["rsi"] < 60), "enter_long"]  = 1
-        dataframe.loc[downtrend & (dataframe["rsi"] > 40), "enter_short"] = 1
+        # Pullback / rally condition: price visited EMA21 zone (within 0.5%).
+        near_ema21 = (
+            (dataframe["close"] - dataframe["ema21"]).abs()
+            < dataframe["close"] * 0.005
+        )
+
+        # Oversold / overbought RSI within trend = good pullback.
+        oversold   = dataframe["rsi"] < 40
+        overbought = dataframe["rsi"] > 60
+
+        dataframe.loc[bull_trend & near_ema21 & oversold,   "enter_long"]  = 1
+        dataframe.loc[bear_trend & near_ema21 & overbought, "enter_short"] = 1
         return dataframe
 
     def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
