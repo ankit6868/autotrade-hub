@@ -582,7 +582,12 @@ class BestPracticesV1(IStrategy):
     # Set to 12 / 21 to re-enable NY-session-only trading.
     SESSION_START_HR_UTC = 0
     SESSION_END_HR_UTC   = 23
-    MAX_SL_PCT         = 3.0        # reject if structural SL is > 3% from entry
+    # MAX_SL_PCT: reject if structural SL distance > X% of entry. Pine's
+    # only filter is 5%, which is what SMCStrategyTV uses and what's
+    # validated against TradingView. The previous 3% was over-tight for
+    # 1h where pivots are often further from price than they are on 15m
+    # or 1m — rejecting valid setups that were inside Pine's spec.
+    MAX_SL_PCT         = 5.0
 
     def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         sl = self.SWING_LEN
@@ -607,11 +612,26 @@ class BestPracticesV1(IStrategy):
             (low  - prev_close).abs(),
         ], axis=1).max(axis=1)
         atr = tr.ewm(alpha=1.0 / self.ATR_LEN, adjust=False).mean()
-        atr_low_band  = atr.rolling(self.ATR_PCT_LOOKBACK).quantile(self.ATR_PCT_LOW  / 100).to_numpy()
-        atr_high_band = atr.rolling(self.ATR_PCT_LOOKBACK).quantile(self.ATR_PCT_HIGH / 100).to_numpy()
         atr_arr = atr.to_numpy()
-        atr_ok  = (atr_arr >= atr_low_band) & (atr_arr <= atr_high_band)
         df["atr"] = atr_arr
+        # Filter-OFF fast path: when band is 0..100, skip the rolling quantile
+        # entirely and accept every bar. The previous code computed
+        # `atr.rolling(200).quantile(...)` even when the filter was off, which
+        # produced NaN for the first 200 bars and silently excluded ~8 days
+        # of trades from every 1h backtest (NaN comparisons are False).
+        if self.ATR_PCT_LOW <= 0 and self.ATR_PCT_HIGH >= 100:
+            atr_ok = np.ones(n, dtype=bool)
+        else:
+            atr_low_band  = atr.rolling(self.ATR_PCT_LOOKBACK).quantile(self.ATR_PCT_LOW  / 100).to_numpy()
+            atr_high_band = atr.rolling(self.ATR_PCT_LOOKBACK).quantile(self.ATR_PCT_HIGH / 100).to_numpy()
+            # NaN-safe: treat NaN bands as "no filter yet" instead of excluding.
+            # This affects only the warmup period; once 200 bars have passed
+            # the bands are valid and the filter behaves as intended.
+            with np.errstate(invalid="ignore"):
+                atr_ok = (
+                    (np.isnan(atr_low_band) | (atr_arr >= atr_low_band)) &
+                    (np.isnan(atr_high_band) | (atr_arr <= atr_high_band))
+                )
 
         # ── Layer 3: NY session filter ──────────────────────────────────
         hours = df["date"].dt.hour
