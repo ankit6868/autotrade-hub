@@ -1,0 +1,114 @@
+//@version=5
+// =============================================================================
+// BestPracticesV1 — BTC/USDT 1h SMC strategy (paired with the Python class
+// of the same name in backend/main.py). Five-gate entry model designed to be
+// directly testable in both TradingView and the AutoTrade Hub futures
+// backtester for side-by-side validation before live deployment.
+//
+// Gates:
+//   1. HTF trend filter   (EMA200 — trade only WITH dominant trend)
+//   2. ATR regime filter  (only trade middle 50% of last 200 bars' ATR)
+//   3. NY session filter  (12:00–21:00 UTC)
+//   4. SMC entry trigger  (BOS via N=5 pivot + price inside unfilled FVG)
+//   5. Structural risk    (SL @ opposing pivot ± 10bps, cap 3%; TP @ 2R)
+//
+// DESIGN TARGETS (1h BTC, 6M backtest):
+//   30–100 trades, WR 40–50%, profit factor ≥ 1.3, max DD ≤ 15%
+// =============================================================================
+strategy("BestPracticesV1 — BTC 1h SMC",
+     overlay              = true,
+     initial_capital      = 1000,
+     default_qty_type     = strategy.percent_of_equity,
+     default_qty_value    = 5,            // 5% margin/trade
+     pyramiding           = 0,            // Single-position TV mode
+     commission_type      = strategy.commission.percent,
+     commission_value     = 0,            // match app's pure P&L mode
+     slippage             = 0,
+     margin_long          = 10,           // 10x leverage
+     margin_short         = 10,
+     calc_on_every_tick   = false,
+     process_orders_on_close = false)
+
+// ─── Inputs ──────────────────────────────────────────────────────────────────
+swing_len         = input.int(5,    "Swing N (pivot left/right)", minval=1)
+htf_ema_len       = input.int(200,  "HTF EMA length",             minval=20)
+atr_len           = input.int(14,   "ATR length",                 minval=2)
+atr_pct_low       = input.float(25, "ATR regime lower pct",       minval=0,  maxval=100)
+atr_pct_high      = input.float(75, "ATR regime upper pct",       minval=0,  maxval=100)
+atr_pct_lookback  = input.int(200,  "ATR percentile lookback")
+session_start_hr  = input.int(12,   "NY session start (UTC hr)",  minval=0,  maxval=23)
+session_end_hr    = input.int(21,   "NY session end (UTC hr)",    minval=0,  maxval=23)
+max_sl_pct        = input.float(3.0,"Max structural SL distance %",minval=0.1)
+
+// ─── Layer 1: HTF trend filter (EMA200) ─────────────────────────────────────
+htf_ema    = ta.ema(close, htf_ema_len)
+bull_trend = close > htf_ema
+bear_trend = close < htf_ema
+
+// ─── Layer 2: ATR regime (middle 50%) ───────────────────────────────────────
+atr_val       = ta.atr(atr_len)
+atr_low_band  = ta.percentile_nearest_rank(atr_val, atr_pct_lookback, atr_pct_low)
+atr_high_band = ta.percentile_nearest_rank(atr_val, atr_pct_lookback, atr_pct_high)
+atr_ok        = atr_val >= atr_low_band and atr_val <= atr_high_band
+
+// ─── Layer 3: NY session filter ─────────────────────────────────────────────
+in_session = hour >= session_start_hr and hour <= session_end_hr
+
+// ─── Layer 4a: Pivot detection (Pine native, strict-greater on both sides) ─
+ph = ta.pivothigh(high, swing_len, swing_len)
+pl = ta.pivotlow (low,  swing_len, swing_len)
+var float last_ph = na
+var float last_pl = na
+if not na(ph)
+    last_ph := ph
+if not na(pl)
+    last_pl := pl
+
+// ─── Layer 4b: BOS edge detect ──────────────────────────────────────────────
+bull_bos = not na(last_ph) and close > last_ph and close[1] <= last_ph
+bear_bos = not na(last_pl) and close < last_pl and close[1] >= last_pl
+
+// ─── Layer 4c: FVG zone (price inside unfilled 3-candle imbalance, last 20) ──
+in_bull_fvg = false
+in_bear_fvg = false
+for k = 0 to 19
+    if bar_index - k >= 2
+        if high[k + 2] < low[k] and high[k + 2] <= close and close <= low[k]
+            in_bull_fvg := true
+            break
+        if low[k + 2] > high[k] and high[k] <= close and close <= low[k + 2]
+            in_bear_fvg := true
+            break
+
+// ─── Combine all 4 gates ────────────────────────────────────────────────────
+long_setup  = bull_trend  and atr_ok and in_session and bull_bos and in_bull_fvg
+short_setup = bear_trend  and atr_ok and in_session and bear_bos and in_bear_fvg
+
+// ─── Layer 5: Structural SL + 2R TP ─────────────────────────────────────────
+long_sl    = not na(last_pl) ? last_pl * 0.999 : na   // 10bps below last pivot low
+short_sl   = not na(last_ph) ? last_ph * 1.001 : na   // 10bps above last pivot high
+long_risk  = close - long_sl
+short_risk = short_sl - close
+max_dist   = close * (max_sl_pct / 100.0)
+
+long_ok  = long_setup  and not na(long_sl)  and long_risk  > 0 and long_risk  <= max_dist
+short_ok = short_setup and not na(short_sl) and short_risk > 0 and short_risk <= max_dist
+
+long_tp  = close + 2 * long_risk
+short_tp = close - 2 * short_risk
+
+// ─── Orders ─────────────────────────────────────────────────────────────────
+if long_ok
+    strategy.entry("L", strategy.long)
+    strategy.exit ("L-exit", "L", stop = long_sl,  limit = long_tp)
+if short_ok
+    strategy.entry("S", strategy.short)
+    strategy.exit ("S-exit", "S", stop = short_sl, limit = short_tp)
+
+// ─── Visualisation ──────────────────────────────────────────────────────────
+plot(htf_ema, "HTF EMA200", color=color.yellow, linewidth=2)
+plotshape(ph, "Pivot High", shape.triangledown, location.abovebar, color.red,   size=size.tiny)
+plotshape(pl, "Pivot Low",  shape.triangleup,   location.belowbar, color.green, size=size.tiny)
+plotshape(long_ok,  "LONG",  shape.labelup,   location.belowbar, color.lime,    size=size.small, text="L")
+plotshape(short_ok, "SHORT", shape.labeldown, location.abovebar, color.fuchsia, size=size.small, text="S")
+bgcolor(in_session ? color.new(color.gray, 92) : na, title="NY session shading")

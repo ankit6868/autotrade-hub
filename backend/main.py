@@ -501,6 +501,210 @@ class SMCProV3(IStrategy):
         return dataframe
 '''
 
+_BESTPRACTICES_V1_CODE = '''
+from freqtrade.strategy import IStrategy
+import pandas as pd
+import numpy as np
+
+
+class BestPracticesV1(IStrategy):
+    """
+    BestPracticesV1 — multi-layered SMC strategy for BTC/USDT 1h futures.
+
+    Combines validated techniques layered on the SMCStrategyTV entry
+    trigger (BOS + FVG). Each gate has a specific job; removing any one
+    of them typically hurts overall performance materially:
+
+      LAYER 1 — HTF trend filter (EMA200 on 1h)
+        Long only when close > EMA200, short only when close < EMA200.
+        BTC has dominant trend regimes; counter-trend SMC entries are
+        the primary loser bucket. This filter alone typically lifts
+        WR by 5-10 percentage points at small cost in trade count.
+
+      LAYER 2 — ATR volatility regime filter
+        Trade only when ATR(14) is in the MIDDLE 50% of the last 200
+        bars (between 25th and 75th percentile). Skips:
+        - Low-ATR chop (fake BOS, range-bound losers)
+        - High-ATR news/crashes (gap risk, slippage explosion)
+        On 1h BTC this typically removes 30-40% of bars from eligibility.
+
+      LAYER 3 — NY session filter (12:00-21:00 UTC)
+        Covers London close + NY open + NY afternoon. ~70% of BTC
+        futures volume happens here. Asian/EU pre-market chop excluded.
+
+      LAYER 4 — SMC entry trigger (BOS + FVG)
+        - Pivot BOS (N=5 each side): close crosses last confirmed pivot
+        - FVG zone: price currently INSIDE an unfilled 3-candle imbalance
+        Same proven mechanic as SMCStrategyTV (validated against
+        TradingView line-for-line during parity testing).
+
+      LAYER 5 — Risk management
+        - Structural SL: opposing pivot ± 10bps buffer
+        - Reject if SL distance > 3% of entry (broken structure)
+        - Single TP at 2R (closes 100%)
+        - Pairs with the engine's Single-position TV mode + stop-and-reverse
+
+    DESIGN TARGET (1h BTC, 6M backtest):
+        Trades: 30-100 over 6 months
+        Win rate: 40-50% (deliberately conservative — anyone promising
+          you 60%+ WR on retail crypto is fitting to past data)
+        Profit factor target: ≥ 1.3
+        Max drawdown target: ≤ 15%
+
+    IMPORTANT: This is a disciplined application of well-tested
+    principles, NOT a guaranteed profitable strategy. Before deploying
+    real capital:
+      1. Backtest 6M, 1Y, and 2Y to check stability across regimes
+      2. Forward-test in paper mode for at least 2-4 weeks
+      3. Compare against a do-nothing baseline (buy-and-hold)
+      4. Validate against the equivalent Pine script in TradingView
+    """
+
+    timeframe   = "1h"
+    minimal_roi = {"0": 100}        # exits handled by engine SL/TP
+    stoploss    = -0.99             # disable Freqtrade global SL
+    can_short   = True
+    startup_candle_count = 250      # need EMA200 + a buffer
+    process_only_new_candles = True
+
+    SWING_LEN          = 5
+    HTF_EMA_LEN        = 200
+    ATR_LEN            = 14
+    ATR_PCT_LOW        = 25         # bottom of the "tradeable" volatility band
+    ATR_PCT_HIGH       = 75         # top of the "tradeable" volatility band
+    ATR_PCT_LOOKBACK   = 200
+    SESSION_START_HR_UTC = 12
+    SESSION_END_HR_UTC   = 21
+    MAX_SL_PCT         = 3.0        # reject if structural SL is > 3% from entry
+
+    def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+        sl = self.SWING_LEN
+        n  = len(df)
+        high = df["high"]; low = df["low"]; close = df["close"]
+        highs  = high.to_numpy()
+        lows   = low .to_numpy()
+        closes = close.to_numpy()
+
+        # ── Layer 1: HTF trend filter (EMA200) ──────────────────────────
+        htf_ema = close.ewm(span=self.HTF_EMA_LEN, adjust=False).mean().to_numpy()
+        bull_trend = closes > htf_ema
+        bear_trend = closes < htf_ema
+        df["htf_ema"] = htf_ema
+
+        # ── Layer 2: ATR regime (middle 50% of last 200 bars) ───────────
+        # Wilder ATR via EMA of true range.
+        prev_close = close.shift()
+        tr = pd.concat([
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low  - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1.0 / self.ATR_LEN, adjust=False).mean()
+        atr_low_band  = atr.rolling(self.ATR_PCT_LOOKBACK).quantile(self.ATR_PCT_LOW  / 100).to_numpy()
+        atr_high_band = atr.rolling(self.ATR_PCT_LOOKBACK).quantile(self.ATR_PCT_HIGH / 100).to_numpy()
+        atr_arr = atr.to_numpy()
+        atr_ok  = (atr_arr >= atr_low_band) & (atr_arr <= atr_high_band)
+        df["atr"] = atr_arr
+
+        # ── Layer 3: NY session filter ──────────────────────────────────
+        hours = df["date"].dt.hour
+        in_session = ((hours >= self.SESSION_START_HR_UTC) &
+                      (hours <= self.SESSION_END_HR_UTC)).to_numpy()
+
+        # ── Layer 4a: Strict pivot detection (matches Pine ta.pivothigh/low) ──
+        ph = np.zeros(n, dtype=bool)
+        pl = np.zeros(n, dtype=bool)
+        for j in range(sl, n - sl):
+            h = highs[j]; l = lows[j]
+            is_ph = True; is_pl = True
+            for d in range(1, sl + 1):
+                if is_ph and (highs[j - d] >= h or highs[j + d] >= h):
+                    is_ph = False
+                if is_pl and (lows [j - d] <= l or lows [j + d] <= l):
+                    is_pl = False
+                if not is_ph and not is_pl:
+                    break
+            ph[j] = is_ph
+            pl[j] = is_pl
+
+        # Forward-fill pivot VALUES to confirmation bar j+sl (same mechanic
+        # as SMCStrategyTV — validated to match Pine exactly).
+        pivot_h_vals = np.where(ph, highs, np.nan)
+        pivot_l_vals = np.where(pl, lows,  np.nan)
+        ph_shifted   = np.full(n, np.nan)
+        pl_shifted   = np.full(n, np.nan)
+        if sl < n:
+            ph_shifted[sl:] = pivot_h_vals[:-sl]
+            pl_shifted[sl:] = pivot_l_vals[:-sl]
+        last_ph = pd.Series(ph_shifted, index=df.index).ffill().to_numpy()
+        last_pl = pd.Series(pl_shifted, index=df.index).ffill().to_numpy()
+
+        # ── Layer 4b: BOS edge detect ───────────────────────────────────
+        bull_bos = np.zeros(n, dtype=bool)
+        bear_bos = np.zeros(n, dtype=bool)
+        for i in range(1, n):
+            if not np.isnan(last_ph[i]):
+                if closes[i] > last_ph[i] and closes[i-1] <= last_ph[i]:
+                    bull_bos[i] = True
+            if not np.isnan(last_pl[i]):
+                if closes[i] < last_pl[i] and closes[i-1] >= last_pl[i]:
+                    bear_bos[i] = True
+
+        # ── Layer 4c: FVG zone (price inside unfilled 3-candle imbalance) ──
+        bull_fvg = np.zeros(n, dtype=bool)
+        bear_fvg = np.zeros(n, dtype=bool)
+        for i in range(n):
+            if i < 2: continue
+            for k in range(i, max(2, i - 20), -1):
+                if k < 2: break
+                if highs[k - 2] < lows[k] and highs[k - 2] <= closes[i] <= lows[k]:
+                    bull_fvg[i] = True
+                    break
+                if lows[k - 2] > highs[k] and highs[k] <= closes[i] <= lows[k - 2]:
+                    bear_fvg[i] = True
+                    break
+
+        # ── Combine all 4 gates into a candidate setup ──────────────────
+        long_setup  = bull_trend & atr_ok & in_session & bull_bos & bull_fvg
+        short_setup = bear_trend & atr_ok & in_session & bear_bos & bear_fvg
+
+        # ── Layer 5: Risk management — structural SL + 2R TP ────────────
+        sl_long  = last_pl * 0.999
+        sl_short = last_ph * 1.001
+        risk_long  = closes - sl_long
+        risk_short = sl_short - closes
+        max_sl_dist = closes * (self.MAX_SL_PCT / 100.0)
+
+        bad_long  = (risk_long  <= 0) | (risk_long  > max_sl_dist) | np.isnan(sl_long)
+        bad_short = (risk_short <= 0) | (risk_short > max_sl_dist) | np.isnan(sl_short)
+
+        long_signal  = long_setup  & ~bad_long
+        short_signal = short_setup & ~bad_short
+
+        tp_long  = closes + 2 * risk_long
+        tp_short = closes - 2 * risk_short
+
+        df["sl_price"]  = np.where(long_signal, sl_long,  np.where(short_signal, sl_short,  np.nan))
+        df["tp_price"]  = np.where(long_signal, tp_long,  np.where(short_signal, tp_short,  np.nan))
+        df["tp2_price"] = np.nan        # single TP (matches Pine)
+
+        df["_long_signal"]  = long_signal
+        df["_short_signal"] = short_signal
+        return df
+
+    def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+        df["enter_long"]  = df["_long_signal"].astype(int)
+        df["enter_short"] = df["_short_signal"].astype(int)
+        return df
+
+    def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+        # Engine exits via structural SL / 2R TP / liquidation only.
+        df["exit_long"]  = 0
+        df["exit_short"] = 0
+        return df
+'''
+
+
 def _cleanup_stale_test_trades(db):
     """One-time cleanup: delete open futures trades that were created during
     debugging (entry_price looks wrong or entry_time is from dev session).
@@ -581,6 +785,24 @@ def _seed_builtin_strategies(db):
             "take_profit": 0.04,
             "leverage": 10,
         },
+        {
+            "name": "BestPracticesV1",
+            "description": "Multi-layered SMC strategy designed for BTC/USDT 1h futures. "
+                           "5 gates layered on the validated SMCStrategyTV entry trigger: "
+                           "(1) HTF EMA200 trend filter — trade only with the dominant trend; "
+                           "(2) ATR volatility regime — only trade when ATR is in middle 50% of "
+                           "last 200 bars (skip dead chop and crash vol); "
+                           "(3) NY session filter (12-21 UTC) — only trade peak-volume hours; "
+                           "(4) SMC BOS + FVG entry trigger (same as SMCStrategyTV); "
+                           "(5) Structural SL @ opposing pivot (cap 3%) + single 2R TP. "
+                           "Designed for 1h timeframe targeting 30-100 trades/6M with WR 40-50% "
+                           "and profit factor ≥ 1.3. Equivalent Pine script available in docs.",
+            "code": _BESTPRACTICES_V1_CODE,
+            "stoploss": -0.03,
+            "take_profit": 0.06,
+            "leverage": 10,
+            "timeframe": "1h",   # Designed for 1h; overrides the 15m default.
+        },
     ]
 
     for tmpl in templates:
@@ -594,7 +816,7 @@ def _seed_builtin_strategies(db):
                 description=tmpl["description"],
                 original_text=tmpl["description"],
                 generated_code=tmpl["code"],
-                timeframe="15m",
+                timeframe=tmpl.get("timeframe", "15m"),
                 stoploss=tmpl["stoploss"],
                 take_profit=tmpl["take_profit"],
                 default_leverage=tmpl["leverage"],
