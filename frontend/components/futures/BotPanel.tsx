@@ -140,6 +140,7 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
         bot={selectedBot}
         pair={pair}
         mode={mode}
+        paperBalance={paperBalance}
         strategies={strategies}
         onBack={() => { setSelectedBot(null); refreshBots(); }}
         onCreated={() => { onBotCreated(); refreshBots(); }}
@@ -498,8 +499,9 @@ function BotCard({ bot, onClick }: { bot: StrategyCard; onClick: () => void }) {
   );
 }
 
-function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
-  bot: StrategyCard; pair: string; mode: 'paper' | 'live'; strategies: any[];
+function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCreated }: {
+  bot: StrategyCard; pair: string; mode: 'paper' | 'live'; paperBalance?: number;
+  strategies: any[];
   onBack: () => void; onCreated: () => void;
 }) {
   const [viewTab, setViewTab] = useState<'leaderboard' | 'create'>('create');
@@ -522,11 +524,28 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
   const [leadConnected, setLeadConnected] = useState<boolean | null>(null);
 
   useEffect(() => {
+    // Only fetch real KuCoin balance in LIVE mode. In paper mode we use
+    // the virtual paperBalance prop (defaults to 1000 USDT) — fetching
+    // the live balance here was leaking real-account values into the
+    // paper-mode form, which is exactly the bug we just fixed.
+    if (mode !== 'live') {
+      setLeadConnected(null);   // 'live' state is irrelevant in paper mode
+      setLiveBalance(null);
+      return;
+    }
     api.futures.leadTradingStatus().then(d => {
       setLeadConnected(d.connected);
       if (d.connected && d.balance) setLiveBalance(d.balance);
     }).catch(() => setLeadConnected(false));
-  }, []);
+  }, [mode]);
+
+  // The "available balance" shown in the Investment form and used as
+  // the base for the percentage buttons. In paper mode this is the
+  // virtual paper engine balance (NEVER touches real KuCoin data).
+  // In live mode it's the real Lead Trading available balance.
+  const availableBalance: number = mode === 'paper'
+    ? (paperBalance ?? 1000)
+    : (liveBalance ?? 0);
 
   useEffect(() => {
     api.market.price(pair).then(d => {
@@ -618,18 +637,28 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
         <button className="ml-auto text-slate-500 hover:text-white text-xs">?</button>
       </div>
 
-      {/* Lead Trading indicator — always visible */}
+      {/* Mode indicator — Lead Trading status in live mode, Paper Mode in paper. */}
       <div className={`flex items-center gap-2 px-3 py-1.5 text-[10px] border-b border-white/[0.06] ${
-        leadConnected ? 'bg-emerald-500/10' : 'bg-amber-500/10'
+        mode === 'paper'
+          ? 'bg-indigo-500/10'
+          : leadConnected ? 'bg-emerald-500/10' : 'bg-amber-500/10'
       }`}>
-        <span className={`w-1.5 h-1.5 rounded-full ${leadConnected ? 'bg-emerald-400' : 'bg-amber-400'}`} />
-        <span className={leadConnected ? 'text-emerald-400 font-medium' : 'text-amber-400 font-medium'}>
-          {leadConnected ? 'Lead Trading Connected' : 'Lead Trading: Not Connected'}
+        <span className={`w-1.5 h-1.5 rounded-full ${
+          mode === 'paper' ? 'bg-indigo-400'
+            : leadConnected ? 'bg-emerald-400' : 'bg-amber-400'
+        }`} />
+        <span className={
+          mode === 'paper' ? 'text-indigo-300 font-medium'
+            : leadConnected ? 'text-emerald-400 font-medium' : 'text-amber-400 font-medium'
+        }>
+          {mode === 'paper'
+            ? `Paper Mode — Simulated (${(paperBalance ?? 1000).toFixed(2)} USDT virtual)`
+            : (leadConnected ? 'Lead Trading Connected' : 'Lead Trading: Not Connected')}
         </span>
         <span className="text-slate-500 ml-auto">
           {mode === 'live'
             ? (leadConnected ? 'Followers will copy this bot' : 'Configure API in Setup')
-            : 'Paper Mode — Simulated'}
+            : 'No real money — fully virtual'}
         </span>
       </div>
 
@@ -724,7 +753,9 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
               <div className="flex items-center justify-between mb-1">
                 <span className="text-[10px] text-slate-500">Available</span>
                 <span className="text-[10px] text-emerald-400 font-medium">
-                  {liveBalance !== null ? `${liveBalance.toFixed(2)} USDT` : mode === 'paper' ? '1,000 USDT (Sim)' : '— USDT'}
+                  {mode === 'paper'
+                    ? `${availableBalance.toFixed(2)} USDT (Sim)`
+                    : (liveBalance !== null ? `${liveBalance.toFixed(2)} USDT` : '— USDT')}
                   {' '}<span className="cursor-pointer">⊕</span>
                 </span>
               </div>
@@ -749,7 +780,10 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
                   <button
                     key={label}
                     onClick={() => {
-                      const base = liveBalance || 1000;
+                      // Paper mode percentage buttons use the virtual paper
+                      // balance, NOT the real KuCoin balance. Live mode
+                      // uses the real live balance if connected.
+                      const base = availableBalance > 0 ? availableBalance : 1000;
                       if (label === 'Min') setInvestment('1');
                       else setInvestment(String(Math.round(base * parseInt(label) / 100)));
                     }}
@@ -786,11 +820,11 @@ function BotCreateFlow({ bot, pair, mode, strategies, onBack, onCreated }: {
               <div className="mt-2 p-2 rounded bg-[#1e222d] border border-white/[0.04]">
                 <div className="flex justify-between text-[10px]">
                   <span className="text-slate-500">Max per trade</span>
-                  <span className="text-white font-medium">{((parseFloat(investment) || (liveBalance || 1000)) * maxPositionPct / 100).toFixed(2)} USDT</span>
+                  <span className="text-white font-medium">{((parseFloat(investment) || availableBalance || 1000) * maxPositionPct / 100).toFixed(2)} USDT</span>
                 </div>
                 <div className="flex justify-between text-[10px] mt-0.5">
                   <span className="text-slate-500">With {leverage}x leverage</span>
-                  <span className="text-emerald-400 font-medium">{((parseFloat(investment) || (liveBalance || 1000)) * maxPositionPct / 100 * leverage).toFixed(2)} USDT position</span>
+                  <span className="text-emerald-400 font-medium">{((parseFloat(investment) || availableBalance || 1000) * maxPositionPct / 100 * leverage).toFixed(2)} USDT position</span>
                 </div>
               </div>
             </div>
