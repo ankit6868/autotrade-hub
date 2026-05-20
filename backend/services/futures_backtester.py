@@ -625,14 +625,30 @@ def run_futures_backtest(
                         sl = entry_price + sl_dist
                         tp = entry_price - tp_dist
 
-                # ── ARM transformation: treat the strategy's TP as TP2,
-                # compute TP1 as midpoint between entry and TP2. Only fires
-                # when ARM is enabled AND the strategy didn't already provide
-                # its own sig_tp2 (which would mean it has a multi-TP plan
-                # we shouldn't override).
-                arm_active = arm_enabled and sig_tp2 is None
+                # ── ARM transformation: treat the strategy's furthest TP
+                # as TP2, compute TP1 as midpoint between entry and TP2.
+                # Applies to EVERY strategy when ARM is enabled — single-TP
+                # strategies get tp→TP2 promoted; multi-TP strategies get
+                # their existing TP1 OVERRIDDEN by the midpoint (user's
+                # spec is explicit: "TP1 will be calculated automatically
+                # as the midpoint between the entry price and TP2"). This
+                # makes the feature universally applicable instead of
+                # silently skipping strategies that pre-set sig_tp2.
+                arm_active = arm_enabled
                 if arm_active:
-                    sig_tp2 = tp                                  # original TP → TP2
+                    # Pick the strategy's furthest target as TP2:
+                    #   • For longs: max(tp, sig_tp2 or tp)
+                    #   • For shorts: min(tp, sig_tp2 or tp)
+                    # This is robust whether the strategy provided one TP
+                    # (tp only, sig_tp2=None) or two (tp + sig_tp2).
+                    if sig_tp2 is not None:
+                        if sig_dir == "long":
+                            final_tp2 = max(tp, sig_tp2)
+                        else:
+                            final_tp2 = min(tp, sig_tp2)
+                    else:
+                        final_tp2 = tp
+                    sig_tp2 = final_tp2
                     tp      = entry_price + (sig_tp2 - entry_price) * 0.5   # TP1 = midpoint
 
                 pos_value = sig_margin * leverage
