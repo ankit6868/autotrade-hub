@@ -368,6 +368,16 @@ def run_futures_backtest(
     # backtests where same-bar SL+TP is the dominant exit pattern.
     tick_precision     = bool(req.get("tick_precision", False))
 
+    # ── Fees: VIP tier + maker-only entry mode ──
+    # vip_tier 0..12 selects KuCoin's published maker/taker rates per
+    # tier. Default 0 (VIP0 = retail default). At VIP12 maker is a
+    # rebate (-0.008%).
+    # maker_only_entry simulates a post-only limit at the signal price —
+    # the entry only "fills" when the next bar's range touches that
+    # price; otherwise the signal is dropped (counted in diagnostics).
+    vip_tier         = max(0, min(12, int(req.get("vip_tier", 0))))
+    maker_only_entry = bool(req.get("maker_only_entry", False))
+
     # Resolve strategy — pull generated_code so the backtester can actually
     # run the user's authored logic instead of pattern-matching the name to
     # one of the hardcoded built-in signal functions.
@@ -405,6 +415,8 @@ def run_futures_backtest(
         arm_be_buffer_pct = arm_be_buffer_pct,
         arm_trail_to_tp1  = arm_trail_to_tp1,
         tick_precision    = tick_precision,
+        vip_tier          = vip_tier,
+        maker_only_entry  = maker_only_entry,
     )
 
     if "error" in result:

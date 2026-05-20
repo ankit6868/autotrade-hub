@@ -47,6 +47,39 @@ from backend.services.native_backtester import (
 KUCOIN_TAKER_FEE = 0.0006        # 0.06% — market orders, SL, liquidation
 KUCOIN_MAKER_FEE = 0.0002        # 0.02% — limit fills (TP)
 
+# Full VIP fee schedule (KuCoin Futures, retail). Backtest uses the tier
+# selected by the user — hardcoded VIP0 over-estimates fees for anyone
+# trading at meaningful volume. At VIP12 maker is NEGATIVE (rebate paid
+# back to trader). Source: kucoin.com/vip/level
+#
+# Format: tier → (maker, taker) as decimals (0.0006 = 0.06%).
+# Maker can be negative when the exchange pays a rebate at high tiers.
+KUCOIN_FUTURES_FEE_TIERS: dict[int, tuple[float, float]] = {
+    0:  (0.00020,  0.00060),
+    1:  (0.00018,  0.00055),
+    2:  (0.00016,  0.00050),
+    3:  (0.00014,  0.00043),
+    4:  (0.00012,  0.00038),
+    5:  (0.00010,  0.00030),
+    6:  (0.00008,  0.00025),
+    7:  (0.00006,  0.00022),
+    8:  (0.00003,  0.00020),
+    9:  (0.00000,  0.00018),
+    10: (-0.00005, 0.00015),
+    11: (-0.00006, 0.00013),
+    12: (-0.00008, 0.00012),
+}
+
+
+def _fees_for_tier(vip_tier: int) -> tuple[float, float]:
+    """Return (maker_rate, taker_rate) for the given VIP tier.
+
+    Clamps to [0, 12]; falls back to VIP0 for any unrecognised value so
+    a misconfigured tier never silently produces wrong fees.
+    """
+    clamped = max(0, min(12, int(vip_tier)))
+    return KUCOIN_FUTURES_FEE_TIERS.get(clamped, KUCOIN_FUTURES_FEE_TIERS[0])
+
 # Slippage in basis points (1bp = 0.01%). Applied AGAINST the position on
 # exits. Stops typically fill worse than the trigger price; take-profits
 # usually fill at or near the limit (favourable book) so we apply less.
@@ -351,6 +384,19 @@ def run_futures_backtest(
                                         #     was hit first (highest accuracy).
                                         # Improves SL/TP fill accuracy on 1m scalping backtests
                                         # by ~30-50% vs the open-distance heuristic.
+    # ── Fees: VIP tier + maker-only entry mode ─────────────────────────
+    vip_tier: int = 0,                  # KuCoin Futures VIP tier 0..12. Each tier has its
+                                        # own (maker, taker) rates. VIP0 default (0.06% taker)
+                                        # over-estimates fees for anyone with real volume.
+                                        # At VIP12 maker is -0.008% (rebate paid to trader).
+    maker_only_entry: bool = False,     # When True: every entry is simulated as a maker
+                                        # limit order at the signal price. Pays MAKER fee
+                                        # instead of TAKER. Realistic non-fill simulation:
+                                        # the order only "fills" if the NEXT bar's range
+                                        # actually touches the limit price; otherwise the
+                                        # signal is skipped (counted as no-fill). This is
+                                        # the single largest scalping cost-saving lever —
+                                        # at VIP3 it cuts entry fees by 3x vs taker.
 ) -> dict:
     """
     Run a leveraged futures backtest matching TradingView's methodology:
@@ -391,6 +437,10 @@ def run_futures_backtest(
         signal_fn = _guess_strategy(strategy_name)
     all_trades: list[dict] = []
     balance = starting_balance
+
+    # Resolve the actual maker/taker fee rates for this run from the VIP
+    # tier. These shadow the module-level constants throughout the function.
+    maker_fee_rate, taker_fee_rate = _fees_for_tier(vip_tier)
     # Sanity-check tallies surfaced in the response so the user can see if
     # the kline range was incomplete (KuCoin sometimes has gaps on older
     # data) and the funding history loaded as expected.
@@ -647,6 +697,7 @@ def run_futures_backtest(
         trades_opened_long  = 0
         trades_opened_short = 0
         skipped_no_margin   = 0   # signal fired but free margin < threshold
+        skipped_maker_nofill = 0  # maker-only mode: limit not reached by bar range
         # Legacy fields kept for response-shape compatibility.
         skipped_in_trade    = 0
         skipped_cooldown    = 0
@@ -707,7 +758,7 @@ def run_futures_backtest(
                         else:
                             move_pct = (opp["entry_price"] - rev_exit_p) / opp["entry_price"]
                         rev_leg_pnl = max(rev_margin * move_pct * leverage, -rev_margin)
-                        rev_fee = rev_pos_value * KUCOIN_TAKER_FEE
+                        rev_fee = rev_pos_value * taker_fee_rate
                         if deduct_real_costs:
                             opp["fees_paid"] += rev_fee
                             balance -= rev_fee
@@ -773,8 +824,44 @@ def run_futures_backtest(
                         skipped_no_margin += 1
                         continue
 
-                entry_price = _apply_slippage(bar_o, sig_dir, "entry",
-                                              SLIPPAGE_BPS_ENTRY)
+                # ── Entry price + maker-vs-taker fill model ─────────────
+                # Default (taker): market order fills at this bar's open
+                # adjusted for entry slippage. Always fills.
+                #
+                # Maker-only mode: simulate a post-only limit order at the
+                # SIGNAL price (the close of the bar where the signal fired).
+                # Fill ONLY if this bar's range crosses the signal price:
+                #   - LONG: bar_low <= sig_entry → limit was hit by a dip
+                #   - SHORT: bar_high >= sig_entry → limit was hit by a pop
+                # On a gap-through (bar_open already past the limit) the
+                # fill happens at the more favourable bar_open instead.
+                # If the range doesn't touch, the order doesn't fill and
+                # the signal is dropped (counted under skipped_maker_nofill).
+                used_maker_entry = False
+                if maker_only_entry:
+                    if sig_dir == "long":
+                        if bar_o <= sig_entry:
+                            entry_price = bar_o          # gap-through favours us
+                            used_maker_entry = True
+                        elif lo <= sig_entry:
+                            entry_price = sig_entry      # limit was hit by dip
+                            used_maker_entry = True
+                        else:
+                            skipped_maker_nofill += 1
+                            continue                      # no fill, skip
+                    else:  # short
+                        if bar_o >= sig_entry:
+                            entry_price = bar_o
+                            used_maker_entry = True
+                        elif hi >= sig_entry:
+                            entry_price = sig_entry
+                            used_maker_entry = True
+                        else:
+                            skipped_maker_nofill += 1
+                            continue
+                else:
+                    entry_price = _apply_slippage(bar_o, sig_dir, "entry",
+                                                  SLIPPAGE_BPS_ENTRY)
 
                 if use_signal_sltp:
                     sl, tp = sig_sl, sig_tp
@@ -817,12 +904,12 @@ def run_futures_backtest(
                 pos_value = sig_margin * leverage
                 liq_price = _calc_liquidation(entry_price, sig_dir, leverage, pos_value)
 
-                # ── KuCoin entry fee (taker — market order) ─────────────
+                # ── KuCoin entry fee — maker rate when in maker-only mode,
+                # taker otherwise. Uses the per-run rate from the VIP tier.
                 # Tracked per-trade always; deducted from balance only when
-                # the user enabled "realistic costs". In pure-strategy mode
-                # the fee is shown as 0 in the trade record so the trade
-                # P&L reflects price action only.
-                entry_fee_real = pos_value * KUCOIN_TAKER_FEE
+                # the user enabled "realistic costs".
+                entry_fee_rate = maker_fee_rate if used_maker_entry else taker_fee_rate
+                entry_fee_real = pos_value * entry_fee_rate
                 if deduct_real_costs:
                     entry_fee = entry_fee_real
                     balance  -= entry_fee
@@ -1080,12 +1167,14 @@ def run_futures_backtest(
                 leg_slippage = abs(raw_exit_p - exit_p) * units
                 pos["slippage_paid"] += leg_slippage
 
-                # KuCoin fees on this leg's notional — tracked always,
-                # only deducted from balance in realistic-costs mode.
+                # KuCoin fees on this leg's notional, using the VIP-tier
+                # rates. TP exits use MAKER (limit fills); SL / liquidation
+                # use TAKER (forced market). Tracked always, deducted from
+                # balance only in realistic-costs mode.
                 if exit_rsn in ("take_profit", "take_profit_1", "take_profit_2"):
-                    leg_fee_real = leg_pos_value * KUCOIN_MAKER_FEE
+                    leg_fee_real = leg_pos_value * maker_fee_rate
                 else:
-                    leg_fee_real = leg_pos_value * KUCOIN_TAKER_FEE
+                    leg_fee_real = leg_pos_value * taker_fee_rate
                 if deduct_real_costs:
                     leg_fee = leg_fee_real
                     pos["fees_paid"] += leg_fee
@@ -1408,6 +1497,16 @@ def run_futures_backtest(
         data_diagnostics[pair]["cooldown_bars"]        = cooldown_bars
         # Pyramiding / position-model diagnostics
         data_diagnostics[pair]["signals_skipped_no_margin"] = skipped_no_margin
+        # Maker-only mode: how many signals were dropped because the maker
+        # limit was never reached by the next bar's range. Surfaced so the
+        # user can see the realistic non-fill rate of their setup.
+        data_diagnostics[pair]["signals_skipped_maker_nofill"] = skipped_maker_nofill
+        data_diagnostics[pair]["maker_only_entry"]             = bool(maker_only_entry)
+        data_diagnostics[pair]["vip_tier"]                     = int(max(0, min(12, vip_tier)))
+        data_diagnostics[pair]["fee_rates_pct"] = {
+            "maker": round(maker_fee_rate * 100, 5),
+            "taker": round(taker_fee_rate * 100, 5),
+        }
         data_diagnostics[pair]["max_concurrent_positions"]  = max_concurrent_positions
         data_diagnostics[pair]["position_model"] = (
             "single" if max_concurrent_positions == 1
@@ -1593,8 +1692,10 @@ def run_futures_backtest(
             "total_funding_paid":   round(total_funding, 4),
             "total_slippage_paid":  round(total_slippage, 4),
             "total_fees_paid":      round(total_fees, 4),     # real KuCoin fees, deducted
-            "kucoin_taker_fee_pct": KUCOIN_TAKER_FEE * 100,
-            "kucoin_maker_fee_pct": KUCOIN_MAKER_FEE * 100,
+            "kucoin_taker_fee_pct": taker_fee_rate * 100,
+            "kucoin_maker_fee_pct": maker_fee_rate * 100,
+            "vip_tier":             int(max(0, min(12, vip_tier))),
+            "maker_only_entry":     bool(maker_only_entry),
             # Math-check rails (see comment above the computation)
             "breakeven_win_rate":   round(breakeven_wr, 4),
             "risk_reward_ratio":    round(rr_ratio, 3),

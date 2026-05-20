@@ -136,6 +136,13 @@ function FuturesBacktestInner() {
   // SL+TP ambiguity using OHLC-path inference (always) + sub-bar 1m
   // replay (for TFs > 1m). Major accuracy gain for 1m scalp backtests.
   const [tickPrecision,    setTickPrecision]    = useState(false);
+  // KuCoin Futures VIP fee tier (0..12). Each tier has its own
+  // maker/taker rates per the published schedule. Default 0 (retail).
+  const [vipTier,          setVipTier]          = useState<number>(0);
+  // Maker-only entry mode: simulates post-only limit at signal price.
+  // Trades pay maker fees (cheaper) but some signals don't fill if
+  // price moves past the limit before the next bar's range crosses it.
+  const [makerOnlyEntry,   setMakerOnlyEntry]   = useState(false);
 
   useEffect(() => {
     api.strategy.list().then(d => {
@@ -629,6 +636,8 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         arm_be_buffer_pct:  armBeBufferPct,
         arm_trail_to_tp1:   armTrailToTp1,
         tick_precision:     tickPrecision,
+        vip_tier:           vipTier,
+        maker_only_entry:   makerOnlyEntry,
       });
       if (data.error) setError(data.error);
       else {
@@ -752,6 +761,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
       `# Tick precision: ${tickPrecision
         ? (timeframe === '1m' ? 'ON (OHLC-path inference)' : 'ON (sub-bar 1m + path inference)')
         : 'OFF (open-distance heuristic)'}`,
+      `# Fees: VIP${vipTier} | Entry: ${makerOnlyEntry ? 'maker-only (post-only limit)' : 'taker (market)'}`,
       `# Results: ${m?.total_trades ?? 0} trades  WR ${((m?.win_rate ?? 0) * 100).toFixed(1)}%  Profit ${(m?.total_profit_pct ?? 0).toFixed(2)}%  MaxDD ${(m?.max_drawdown ?? 0).toFixed(2)}%`,
       `# Exported: ${new Date().toISOString()}`,
       '',
@@ -1322,6 +1332,76 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
               ? <>Same-bar SL+TP ambiguity resolved using <b className="text-cyan-300">bar shape + 1m sub-bars</b>. {timeframe !== '1m' && '⚠️ Adds extra data download.'}</>
               : <>Same-bar SL+TP picked by <b className="text-slate-300">"closer to open"</b> heuristic — fast but imprecise on 1m.</>}
           </span>
+        </div>
+
+        {/* ── KuCoin VIP fee tier + maker-only entry mode ────────────────
+            Scalping-critical: fees dominate per-trade cost at 1m. The
+            default VIP0 taker (0.06%) is wrong for any trader with real
+            volume. Maker-only mode cuts entry fees ~3x but adds realistic
+            non-fill simulation (limits don't always get hit). */}
+        <div className="mb-5 border border-[#2a3a52] rounded-lg p-3">
+          <div className="text-xs font-semibold text-slate-200 mb-3">
+            💰 Fees &amp; execution model
+            <span className="text-[10px] font-normal text-slate-500 ml-2">
+              (scalping-critical — fees dominate 1m strategies)
+            </span>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+            {/* VIP tier selector */}
+            <div>
+              <label className="text-xs text-slate-400 mb-1 block">
+                KuCoin Futures VIP tier
+              </label>
+              <select
+                value={vipTier}
+                onChange={e => setVipTier(Number(e.target.value))}
+                className="input !py-1 !text-xs w-full"
+                title="Each tier has its own maker/taker rates per KuCoin's published schedule. Default VIP0 over-estimates fees for traders with real volume. VIP12 has maker rebates (-0.008%)."
+              >
+                <option value={0}>VIP0 — maker 0.020% / taker 0.060% (retail)</option>
+                <option value={1}>VIP1 — maker 0.018% / taker 0.055%</option>
+                <option value={2}>VIP2 — maker 0.016% / taker 0.050%</option>
+                <option value={3}>VIP3 — maker 0.014% / taker 0.043%</option>
+                <option value={4}>VIP4 — maker 0.012% / taker 0.038%</option>
+                <option value={5}>VIP5 — maker 0.010% / taker 0.030%</option>
+                <option value={6}>VIP6 — maker 0.008% / taker 0.025%</option>
+                <option value={7}>VIP7 — maker 0.006% / taker 0.022%</option>
+                <option value={8}>VIP8 — maker 0.003% / taker 0.020%</option>
+                <option value={9}>VIP9 — maker 0.000% / taker 0.018%</option>
+                <option value={10}>VIP10 — maker -0.005% / taker 0.015%</option>
+                <option value={11}>VIP11 — maker -0.006% / taker 0.013%</option>
+                <option value={12}>VIP12 — maker -0.008% (REBATE) / taker 0.012%</option>
+              </select>
+              <div className="text-[10px] text-slate-500 mt-1">
+                Used when "Include real trading costs" is ON. Sets the per-fill rate
+                for every trade.
+              </div>
+            </div>
+
+            {/* Maker-only entry toggle */}
+            <div>
+              <label className="text-xs text-slate-400 mb-1 block">
+                Entry execution
+              </label>
+              <label className="label !mb-0 flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={makerOnlyEntry}
+                  onChange={e => setMakerOnlyEntry(e.target.checked)}
+                  className="accent-emerald-500"
+                />
+                <span className="text-xs">Maker-only entries (post-only limit)</span>
+                <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300">
+                  {makerOnlyEntry ? 'maker' : 'taker (market)'}
+                </span>
+              </label>
+              <div className="text-[10px] text-slate-500 mt-1">
+                {makerOnlyEntry
+                  ? <>Simulates a post-only limit at the signal price. Order fills ONLY if the next bar's range touches the limit price — otherwise the signal is dropped (logged as <b className="text-amber-300">non-fill</b>). Realistic for scalping where ~15-30% of limit orders don't fill in fast markets.</>
+                  : <>Default: every entry is a market taker order. Pays full taker fee. Always fills at the next bar's open + entry slippage.</>}
+              </div>
+            </div>
+          </div>
         </div>
 
         {/* ── Futures-specific config ─────────────────────────────────── */}
