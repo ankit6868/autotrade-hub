@@ -120,6 +120,19 @@ function FuturesBacktestInner() {
   // with shared P&L. Easier to compare side-by-side with TV's CSV export.
   const [tradeView, setTradeView] = useState<'compact' | 'tv'>('compact');
 
+  // ── Advanced Risk Management (ARM) state ──────────────────────────────────
+  // When `armEnabled` is OFF (default), all the arm_* params are ignored
+  // by the backend and the engine uses single-TP at the strategy's TP value
+  // (matches Pine and matches every prior backtest in this session).
+  // When ON, the strategy's TP value becomes TP2; TP1 = midpoint(entry, TP2).
+  // At TP1 hit: `tp1ClosePct`% closes, SL moves to BE (mode below). If price
+  // continues halfway from TP1 to TP2, SL trails up to TP1.
+  const [armEnabled,       setArmEnabled]       = useState(false);
+  const [armTp1ClosePct,   setArmTp1ClosePct]   = useState(50);          // 1-99
+  const [armBeMode,        setArmBeMode]        = useState<'leverage' | 'manual_pct' | 'entry'>('leverage');
+  const [armBeBufferPct,   setArmBeBufferPct]   = useState(1.0);         // used only when manual_pct
+  const [armTrailToTp1,    setArmTrailToTp1]    = useState(true);
+
   useEffect(() => {
     api.strategy.list().then(d => {
       setStrategies(d.strategies ?? []);
@@ -605,6 +618,12 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         // When false, backend zeros out fee/funding deductions so the
         // returned P&L reflects pure price action × leverage.
         deduct_real_costs: deductCosts,
+        // ── Advanced Risk Management (ARM) — see state declarations ──
+        arm_enabled:        armEnabled,
+        arm_tp1_close_pct:  armTp1ClosePct,
+        arm_be_mode:        armBeMode,
+        arm_be_buffer_pct:  armBeBufferPct,
+        arm_trail_to_tp1:   armTrailToTp1,
       });
       if (data.error) setError(data.error);
       else {
@@ -722,6 +741,9 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
       `# SL/TP source: ${sltpMode === 'strategy' ? 'strategy structural' : `slider (SL ${stoploss}%, TP ${takeProfit}%)`}`,
       `# Real-trading costs deducted: ${deductCosts ? 'yes' : 'no (pure P&L mode)'}`,
       `# Position model: ${pyramiding === 1 ? 'Single (TradingView mode)' : 'Concurrent'}`,
+      `# Advanced Risk Management: ${armEnabled
+        ? `ON — TP1 close ${armTp1ClosePct}% / BE mode ${armBeMode}${armBeMode === 'manual_pct' ? ` (${armBeBufferPct}%)` : ''} / trail-to-TP1 ${armTrailToTp1 ? 'on' : 'off'}`
+        : 'OFF (single TP, closes 100%)'}`,
       `# Results: ${m?.total_trades ?? 0} trades  WR ${((m?.win_rate ?? 0) * 100).toFixed(1)}%  Profit ${(m?.total_profit_pct ?? 0).toFixed(2)}%  MaxDD ${(m?.max_drawdown ?? 0).toFixed(2)}%`,
       `# Exported: ${new Date().toISOString()}`,
       '',
@@ -1137,6 +1159,132 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
               ? <>Trade P&L is <b className="text-amber-300">net of KuCoin fees + funding</b> — production-grade.</>
               : <>Trade P&L is <b className="text-emerald-300">pure price action × leverage</b> — no fees or funding deducted.</>}
           </span>
+        </div>
+
+        {/* ── Advanced Risk Management (ARM) ─────────────────────────────
+            Optional feature that splits every strategy-generated trade into
+            two TP stages: TP1 = midpoint(entry, strategy_tp), TP2 = strategy_tp.
+            At TP1: close X%, move SL to BE. After price moves halfway from
+            TP1 to TP2: trail SL up to TP1.
+            Master switch defaults OFF so existing behaviour is unchanged. */}
+        <div className="mb-5 border border-[#2a3a52] rounded-lg p-3">
+          <div className="flex items-center gap-3 flex-wrap">
+            <label className="label !mb-0 flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={armEnabled}
+                onChange={e => setArmEnabled(e.target.checked)}
+                className="accent-sky-500"
+              />
+              <span>🎯 Advanced Risk Management</span>
+              <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300"
+                    title="When ON: TP1 = midpoint(entry, strategy_tp). At TP1 hit, close N% of position and move SL to break-even. If price reaches halfway from TP1 to TP2, trail SL up to TP1. When OFF: single TP at strategy's value (closes 100%)."
+              >
+                {armEnabled ? 'partial TP + BE trail' : 'single TP (off)'}
+              </span>
+            </label>
+            <span className="text-[11px] text-slate-400 leading-snug max-w-md">
+              {armEnabled
+                ? <>Strategy's TP becomes <b className="text-purple-300">TP2</b>, TP1 = midpoint. Books partial at TP1, trails SL → BE → TP1.</>
+                : <>Strategy's TP closes <b className="text-slate-300">100%</b> of the position (legacy behaviour).</>}
+            </span>
+          </div>
+
+          {/* Reveal controls only when ARM is enabled */}
+          {armEnabled && (
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-5">
+              {/* TP1 close % slider */}
+              <div>
+                <label className="text-xs text-slate-400 flex items-center justify-between mb-1">
+                  <span>TP1 Booking: <b className="text-purple-300">{armTp1ClosePct}%</b></span>
+                  <span className="text-[10px] text-slate-500">
+                    TP2 Booking: {(100 - armTp1ClosePct).toFixed(0)}%
+                  </span>
+                </label>
+                <input
+                  type="range" min={1} max={99} step={1}
+                  value={armTp1ClosePct}
+                  onChange={e => setArmTp1ClosePct(Number(e.target.value))}
+                  className="w-full accent-purple-500"
+                  title="% of position closed at TP1 (midpoint of entry → strategy_tp). Remainder closes at TP2 or trailed SL."
+                />
+              </div>
+
+              {/* Break-even mode picker */}
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Break-even mode</label>
+                <div className="inline-flex rounded-md border border-[#2a3a52] overflow-hidden text-[11px] font-medium w-full">
+                  <button
+                    type="button"
+                    onClick={() => setArmBeMode('leverage')}
+                    className={`flex-1 px-2 py-1 ${armBeMode === 'leverage'
+                      ? 'bg-purple-500/20 text-purple-300'
+                      : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                    title={`BE = entry × (1 + leverage/1000). With ${leverage}x leverage → ${(leverage/10).toFixed(1)}% buffer.`}
+                  >
+                    Leverage-auto
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setArmBeMode('manual_pct')}
+                    className={`flex-1 px-2 py-1 ${armBeMode === 'manual_pct'
+                      ? 'bg-purple-500/20 text-purple-300'
+                      : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                    title="BE = entry × (1 + buffer%) — user-set buffer below."
+                  >
+                    Manual %
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setArmBeMode('entry')}
+                    className={`flex-1 px-2 py-1 ${armBeMode === 'entry'
+                      ? 'bg-purple-500/20 text-purple-300'
+                      : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                    title="BE = entry (no buffer — pure zero-loss line)."
+                  >
+                    At entry
+                  </button>
+                </div>
+                {armBeMode === 'manual_pct' && (
+                  <div className="mt-2">
+                    <input
+                      type="number"
+                      min={0} max={10} step={0.1}
+                      value={armBeBufferPct}
+                      onChange={e => setArmBeBufferPct(Number(e.target.value))}
+                      className="input !py-1 !text-xs"
+                      placeholder="Buffer %"
+                    />
+                    <span className="text-[10px] text-slate-500 ml-1">% above entry (long) / below (short)</span>
+                  </div>
+                )}
+                {armBeMode === 'leverage' && (
+                  <div className="text-[10px] text-slate-500 mt-1">
+                    With {leverage}x: BE buffer = <b className="text-purple-300">{(leverage/10).toFixed(1)}%</b>
+                  </div>
+                )}
+              </div>
+
+              {/* Trail-to-TP1 toggle */}
+              <div>
+                <label className="text-xs text-slate-400 mb-1 block">Trail SL upgrade</label>
+                <label className="label !mb-0 flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={armTrailToTp1}
+                    onChange={e => setArmTrailToTp1(e.target.checked)}
+                    className="accent-purple-500"
+                  />
+                  <span className="text-xs">Trail SL → TP1 after halfway to TP2</span>
+                </label>
+                <div className="text-[10px] text-slate-500 mt-1">
+                  {armTrailToTp1
+                    ? <>Once price reaches midpoint(TP1, TP2), SL moves up from BE to TP1.</>
+                    : <>SL stays at BE after TP1 (no further trailing).</>}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* ── Futures-specific config ─────────────────────────────────── */}

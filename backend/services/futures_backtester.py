@@ -135,6 +135,30 @@ def _calc_liquidation(entry: float, direction: str, leverage: int,
         return round(entry * (1 + 1.0 / leverage - mm), 6)
 
 
+def _compute_be_price(entry_price: float, direction: str, leverage: int,
+                      be_mode: str, be_buffer_pct: float) -> float:
+    """Compute the break-even SL price per the ARM spec.
+
+    Modes:
+      - "leverage": buffer = leverage / 10 (in %). e.g. 20x → 2% buffer.
+        Equivalent to `entry × (1 + leverage/1000)`. Higher leverage → wider
+        BE because position is more sensitive (also matches the user's
+        spec exactly).
+      - "manual_pct": buffer = arm_be_buffer_pct (in %). User-supplied.
+      - "entry": no buffer at all — SL moves exactly to entry price.
+    """
+    if be_mode == "leverage":
+        buffer_pct = leverage / 1000.0       # 10x → 1%, 20x → 2%, etc.
+    elif be_mode == "manual_pct":
+        buffer_pct = max(0.0, be_buffer_pct or 0.0) / 100.0
+    else:                                      # "entry" or unknown → no buffer
+        buffer_pct = 0.0
+    if direction == "long":
+        return entry_price * (1.0 + buffer_pct)
+    else:
+        return entry_price * (1.0 - buffer_pct)
+
+
 def _apply_slippage(price: float, direction: str, side: str, bps: float) -> float:
     """Apply slippage to an exit price.
 
@@ -194,6 +218,21 @@ def run_futures_backtest(
                                         # without the friction of execution costs. Slippage
                                         # is always applied because it's a fill-quality
                                         # assumption (not a cost the exchange collects).
+    # ── Advanced Risk Management (ARM) — partial TP + BE trail + trail-to-TP1 ──
+    arm_enabled: bool      = False,     # Master switch. When False, the engine uses the
+                                        # existing single-TP or strategy-multi-TP behaviour
+                                        # and ignores all the arm_* params below.
+    arm_tp1_close_pct: float = 50.0,    # 1-99: % of position closed at TP1. Remainder closes
+                                        # at TP2. Matches user spec ("TP1 Booking %").
+    arm_be_mode: str       = "leverage",   # "leverage" | "manual_pct" | "entry"
+                                            # - "leverage": BE = entry × (1 + leverage/1000)
+                                            #   e.g. 10x → 1% buffer, 20x → 2%, 30x → 3%
+                                            # - "manual_pct": BE = entry × (1 + arm_be_buffer_pct/100)
+                                            # - "entry": BE = entry (no buffer — pure breakeven)
+    arm_be_buffer_pct: float = 1.0,     # Used only when arm_be_mode == "manual_pct"
+    arm_trail_to_tp1: bool = True,      # When True: after TP1 hit AND price progresses halfway
+                                        # from TP1 to TP2, SL moves UP to TP1. Locks in TP1
+                                        # profit on the remainder before TP2 hits.
 ) -> dict:
     """
     Run a leveraged futures backtest matching TradingView's methodology:
@@ -586,6 +625,16 @@ def run_futures_backtest(
                         sl = entry_price + sl_dist
                         tp = entry_price - tp_dist
 
+                # ── ARM transformation: treat the strategy's TP as TP2,
+                # compute TP1 as midpoint between entry and TP2. Only fires
+                # when ARM is enabled AND the strategy didn't already provide
+                # its own sig_tp2 (which would mean it has a multi-TP plan
+                # we shouldn't override).
+                arm_active = arm_enabled and sig_tp2 is None
+                if arm_active:
+                    sig_tp2 = tp                                  # original TP → TP2
+                    tp      = entry_price + (sig_tp2 - entry_price) * 0.5   # TP1 = midpoint
+
                 pos_value = sig_margin * leverage
                 liq_price = _calc_liquidation(entry_price, sig_dir, leverage, pos_value)
 
@@ -630,9 +679,20 @@ def run_futures_backtest(
                     # remaining_pct is what fraction of the original margin
                     # is still in the trade; starts at 1.0.
                     "tp2":              sig_tp2,
-                    "tp1_close_pct":    0.5 if sig_tp2 is not None else 1.0,
+                    # ARM uses configurable TP1 close %. Legacy multi-TP (strategy
+                    # provided its own sig_tp2 without ARM) still defaults to 50%.
+                    # Single TP (no sig_tp2 at all) closes 100% at TP.
+                    "tp1_close_pct":    (
+                        max(0.01, min(0.99, arm_tp1_close_pct / 100.0))
+                        if arm_active
+                        else (0.5 if sig_tp2 is not None else 1.0)
+                    ),
                     "remaining_pct":    1.0,
                     "tp1_hit":          False,
+                    # ARM state tracking — let the position-management loop know
+                    # whether to apply ARM-specific BE price + trail-to-TP1 logic.
+                    "arm_active":       arm_active,
+                    "trailed_to_tp1":   False,
                     "partial_pnl":      0.0,
                     "partial_fees":     0.0,
                     "partial_slippage": 0.0,
@@ -650,6 +710,28 @@ def run_futures_backtest(
                 liq_price    = pos["liq_price"]
                 margin       = pos["margin"]
                 entry_date   = pos["entry_date"]
+
+                # ── ARM trail-to-TP1 ─────────────────────────────────────
+                # After TP1 has been hit and the partial close booked, watch
+                # for price to progress HALFWAY from TP1 to TP2. When it
+                # does, ratchet SL up from BE to TP1 — locks in the TP1
+                # profit on the remainder before TP2 hits (or in case price
+                # reverses). One-shot per position (trailed_to_tp1 flag).
+                if (pos.get("arm_active") and pos["tp1_hit"]
+                        and arm_trail_to_tp1
+                        and not pos.get("trailed_to_tp1", False)
+                        and pos.get("tp2") is not None):
+                    tp1_price = pos["tp"]
+                    tp2_price = pos["tp2"]
+                    midpoint  = tp1_price + (tp2_price - tp1_price) * 0.5
+                    if direction == "long" and hi >= midpoint:
+                        pos["sl"] = tp1_price
+                        sl = tp1_price
+                        pos["trailed_to_tp1"] = True
+                    elif direction == "short" and lo <= midpoint:
+                        pos["sl"] = tp1_price
+                        sl = tp1_price
+                        pos["trailed_to_tp1"] = True
 
                 # Funding settlements that fall inside this bar's time window.
                 # Always computed (so the diagnostic field is populated even
@@ -824,13 +906,19 @@ def run_futures_backtest(
                 balance = max(balance, 0)
 
                 if partial_event:
-                    # Position still has remaining_pct left. Move SL to
-                    # entry (breakeven trail — locks in zero downside on
-                    # the rest), and continue.
+                    # Position still has remaining_pct left. Move SL to BE
+                    # (ARM-configurable buffer; default = entry when ARM off).
                     pos["tp1_hit"] = True
                     pos["remaining_pct"] -= close_pct
-                    pos["sl"] = entry_price
-                    sl = entry_price
+                    if pos.get("arm_active"):
+                        be_price = _compute_be_price(
+                            entry_price, direction, leverage,
+                            arm_be_mode, arm_be_buffer_pct,
+                        )
+                    else:
+                        be_price = entry_price
+                    pos["sl"] = be_price
+                    sl = be_price
                     still_open.append(pos)
                     continue
 

@@ -712,6 +712,31 @@ class BestPracticesV1(IStrategy):
 '''
 
 
+# BestPracticesV1Strict — same strategy logic as V1, but with ATR regime
+# (middle 50% of 200-bar window) AND NY session (12-21 UTC) filters ON
+# by default. Generated programmatically from V1 to keep a single source
+# of truth for the entry/exit logic — only the four filter-enable
+# constants differ. Users wanting "strategy with strict filters" pick
+# this from the dropdown; users wanting "strategy with HTF trend only"
+# pick V1. Side-by-side backtest of both reveals whether the strict
+# filters actually help on the user's chosen instrument + period.
+_BESTPRACTICES_V1_STRICT_CODE = (
+    _BESTPRACTICES_V1_CODE
+    .replace("class BestPracticesV1(IStrategy):",
+             "class BestPracticesV1Strict(IStrategy):")
+    .replace("BestPracticesV1 — SMC strategy",
+             "BestPracticesV1Strict — SMC strategy")
+    .replace("ATR_PCT_LOW        = 0",
+             "ATR_PCT_LOW        = 25")
+    .replace("ATR_PCT_HIGH       = 100",
+             "ATR_PCT_HIGH       = 75")
+    .replace("SESSION_START_HR_UTC = 0",
+             "SESSION_START_HR_UTC = 12")
+    .replace("SESSION_END_HR_UTC   = 23",
+             "SESSION_END_HR_UTC   = 21")
+)
+
+
 def _cleanup_stale_test_trades(db):
     """One-time cleanup: delete open futures trades that were created during
     debugging (entry_price looks wrong or entry_time is from dev session).
@@ -809,6 +834,22 @@ def _seed_builtin_strategies(db):
             "take_profit": 0.06,
             "leverage": 10,
             "timeframe": "1h",   # Designed for 1h; overrides the 15m default.
+        },
+        {
+            "name": "BestPracticesV1Strict",
+            "description": "Same logic as BestPracticesV1 (HTF EMA200 + SMC BOS + FVG + "
+                           "structural SL/2R TP) but with BOTH optional filters ON: "
+                           "(A) ATR volatility regime — only trade when ATR(14) is in middle "
+                           "50% of last 200 bars (skips dead chop + crash vol); "
+                           "(B) NY session — only 12:00-21:00 UTC (peak BTC futures volume). "
+                           "Produces FEWER but theoretically HIGHER-quality trades. Run "
+                           "side-by-side with BestPracticesV1 to test whether the strict "
+                           "filters actually improve risk-adjusted return on your data.",
+            "code": _BESTPRACTICES_V1_STRICT_CODE,
+            "stoploss": -0.03,
+            "take_profit": 0.06,
+            "leverage": 10,
+            "timeframe": "1h",
         },
     ]
 

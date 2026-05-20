@@ -348,6 +348,17 @@ def run_futures_backtest(
     # actually deliver on KuCoin including all execution costs.
     deduct_costs    = bool(req.get("deduct_real_costs", False))
 
+    # ── Advanced Risk Management (ARM) — partial TP + BE trail + trail-to-TP1 ──
+    # All params default to OFF / safe values so existing API callers see
+    # no behaviour change unless they explicitly opt in.
+    arm_enabled        = bool(req.get("arm_enabled", False))
+    arm_tp1_close_pct  = max(1.0, min(99.0, float(req.get("arm_tp1_close_pct", 50.0))))
+    arm_be_mode        = str(req.get("arm_be_mode", "leverage"))
+    if arm_be_mode not in ("leverage", "manual_pct", "entry"):
+        arm_be_mode = "leverage"
+    arm_be_buffer_pct  = max(0.0, min(10.0, float(req.get("arm_be_buffer_pct", 1.0))))
+    arm_trail_to_tp1   = bool(req.get("arm_trail_to_tp1", True))
+
     # Resolve strategy — pull generated_code so the backtester can actually
     # run the user's authored logic instead of pattern-matching the name to
     # one of the hardcoded built-in signal functions.
@@ -379,6 +390,11 @@ def run_futures_backtest(
         risk_per_trade   = risk_per_trade,
         force_slider_sltp = force_slider,
         deduct_real_costs = deduct_costs,
+        arm_enabled       = arm_enabled,
+        arm_tp1_close_pct = arm_tp1_close_pct,
+        arm_be_mode       = arm_be_mode,
+        arm_be_buffer_pct = arm_be_buffer_pct,
+        arm_trail_to_tp1  = arm_trail_to_tp1,
     )
 
     if "error" in result:
