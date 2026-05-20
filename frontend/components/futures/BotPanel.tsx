@@ -517,6 +517,22 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState<{ botId: number; engineKey: string } | null>(null);
+
+  // ── Advanced Risk Management (ARM) state ─────────────────────────────────
+  // Mirrors the backtest ARM panel (see futures-backtest/page.tsx). When OFF,
+  // the strategy's TP closes 100% of the position (legacy single-TP behaviour).
+  // When ON: strategy's TP becomes TP2, TP1 = midpoint(entry, TP2), at TP1
+  // partial-close N% + move SL to break-even, and optionally trail SL up to
+  // TP1 once price crosses midpoint(TP1, TP2).
+  //
+  // NOTE: Phase 1 ships the UI + sends the params to the backend, which
+  // accepts them but the live engine does NOT yet act on them. The backtest
+  // engine does. Phase 3 will wire these into FuturesPosition's exit logic.
+  const [armEnabled,     setArmEnabled]     = useState(false);
+  const [armTp1ClosePct, setArmTp1ClosePct] = useState(50);
+  const [armBeMode,      setArmBeMode]      = useState<'leverage' | 'manual_pct' | 'entry'>('leverage');
+  const [armBeBufferPct, setArmBeBufferPct] = useState(1.0);
+  const [armTrailToTp1,  setArmTrailToTp1]  = useState(true);
   const [backtestData, setBacktestData] = useState<number[]>([]);
   const [backtestError, setBacktestError] = useState('');
   const [currentPrice, setCurrentPrice] = useState(0);
@@ -604,12 +620,25 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         takeprofit: takeprofit ? parseFloat(takeprofit) / 100 : 0.015,
         drawdown_tolerance: drawdownTolerance,
         max_position_pct: maxPositionPct,
+        // Advanced Risk Management — backend stores them so Phase 3 can
+        // read & enforce in the live engine. UI panel matches the backtest.
+        arm_enabled:        armEnabled,
+        arm_tp1_close_pct:  armTp1ClosePct,
+        arm_be_mode:        armBeMode,
+        arm_be_buffer_pct:  armBeBufferPct,
+        arm_trail_to_tp1:   armTrailToTp1,
       });
       if (r?.error) {
         setError(r.error);
       } else {
         setSuccess({ botId: r.bot_id, engineKey: r.engine_key });
         onCreated();
+        // Auto-return to the strategy list after a brief confirmation, so
+        // the new bot appears in Active Bots without the user having to
+        // click "Back to Strategies". Fixes the "can't see activated
+        // strategies" UX bug — Active Bots is rendered above the Create
+        // flow and is hidden while BotCreateFlow holds the panel.
+        setTimeout(() => onBack(), 2500);
       }
     } catch (e: any) {
       const msg = e?.message || String(e);
@@ -700,11 +729,18 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
               <div className="flex justify-between"><span className="text-slate-400">Leverage</span><span className="text-white">{leverage}x</span></div>
               <div className="flex justify-between"><span className="text-slate-400">Investment</span><span className="text-white">{parseFloat(investment) || 1000} USDT</span></div>
               <div className="flex justify-between"><span className="text-slate-400">Risk/Trade</span><span className="text-white">{maxPositionPct}%</span></div>
+              {armEnabled && (
+                <div className="flex justify-between"><span className="text-slate-400">ARM</span><span className="text-purple-300">TP1 {armTp1ClosePct}% + BE trail</span></div>
+              )}
               <div className="flex justify-between"><span className="text-slate-400">Mode</span><span className={mode === 'live' ? 'text-emerald-400' : 'text-indigo-400'}>{mode === 'live' ? 'Live (Lead Trading)' : 'Paper'}</span></div>
             </div>
-            <div className="flex gap-2 w-full mt-2">
-              <button onClick={onBack} className="flex-1 py-2.5 rounded-lg border border-white/[0.1] text-slate-300 text-xs font-medium hover:bg-white/[0.05]">
-                Back to Strategies
+            <p className="text-[10px] text-slate-500 -mt-1">Returning to Active Bots in a moment…</p>
+            <div className="flex gap-2 w-full mt-1">
+              <button
+                onClick={onBack}
+                className="flex-1 py-2.5 rounded-lg bg-emerald-500 text-white text-xs font-bold hover:bg-emerald-400 transition-colors"
+              >
+                View Active Bots →
               </button>
             </div>
           </div>
@@ -827,6 +863,131 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                   <span className="text-emerald-400 font-medium">{((parseFloat(investment) || availableBalance || 1000) * maxPositionPct / 100 * leverage).toFixed(2)} USDT position</span>
                 </div>
               </div>
+            </div>
+
+            {/* Advanced Risk Management — port of the futures-backtest ARM panel.
+                When OFF (default), strategy TP closes 100% of position.
+                When ON: strategy TP becomes TP2, TP1 = midpoint(entry, TP2),
+                partial-close at TP1 + trail SL → BE → TP1. */}
+            <div className="rounded-lg border border-[#2a3a52] p-2.5">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={armEnabled}
+                  onChange={e => setArmEnabled(e.target.checked)}
+                  className="accent-purple-500 w-3.5 h-3.5"
+                />
+                <span className="text-xs font-bold text-white">🎯 Advanced Risk Management</span>
+                <span
+                  className="text-[8px] font-medium px-1.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 ml-auto"
+                  title="When ON: TP1 = midpoint(entry, strategy_tp). At TP1 hit, close N% of position and move SL to break-even. If price reaches midpoint(TP1, TP2), trail SL up to TP1. When OFF: single TP at strategy's value (closes 100%)."
+                >
+                  {armEnabled ? 'partial TP + BE trail' : 'single TP'}
+                </span>
+              </label>
+              <p className="text-[10px] text-slate-500 mt-1 leading-snug">
+                {armEnabled
+                  ? <>Strategy's TP becomes <b className="text-purple-300">TP2</b>. Books partial at midpoint, trails SL → BE → TP1.</>
+                  : <>Strategy's TP closes 100% of the position.</>}
+              </p>
+
+              {armEnabled && (
+                <div className="mt-3 space-y-3">
+                  {/* TP1 Booking % */}
+                  <div>
+                    <div className="flex items-center justify-between text-[10px] mb-1">
+                      <span className="text-slate-400">TP1 Booking: <b className="text-purple-300">{armTp1ClosePct}%</b></span>
+                      <span className="text-slate-500">TP2 Booking: {100 - armTp1ClosePct}%</span>
+                    </div>
+                    <input
+                      type="range" min={1} max={99} step={1}
+                      value={armTp1ClosePct}
+                      onChange={e => setArmTp1ClosePct(Number(e.target.value))}
+                      className="w-full accent-purple-500"
+                      title="% of position closed at TP1 (midpoint of entry → strategy_tp). Remainder closes at TP2 or trailed SL."
+                    />
+                  </div>
+
+                  {/* Break-even mode */}
+                  <div>
+                    <label className="text-[10px] text-slate-400 mb-1 block">Break-even mode</label>
+                    <div className="inline-flex rounded-md border border-[#2a3a52] overflow-hidden text-[10px] font-medium w-full">
+                      <button
+                        type="button"
+                        onClick={() => setArmBeMode('leverage')}
+                        className={`flex-1 px-2 py-1 ${armBeMode === 'leverage'
+                          ? 'bg-purple-500/20 text-purple-300'
+                          : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                        title={`BE = entry × (1 + leverage/1000). With ${leverage}x leverage → ${(leverage/10).toFixed(1)}% buffer.`}
+                      >
+                        Leverage-auto
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setArmBeMode('manual_pct')}
+                        className={`flex-1 px-2 py-1 ${armBeMode === 'manual_pct'
+                          ? 'bg-purple-500/20 text-purple-300'
+                          : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                        title="BE = entry × (1 + buffer%) — user-set buffer below."
+                      >
+                        Manual %
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setArmBeMode('entry')}
+                        className={`flex-1 px-2 py-1 ${armBeMode === 'entry'
+                          ? 'bg-purple-500/20 text-purple-300'
+                          : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                        title="BE = entry (no buffer — pure zero-loss line)."
+                      >
+                        At entry
+                      </button>
+                    </div>
+                    {armBeMode === 'manual_pct' && (
+                      <div className="mt-2 flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min={0} max={10} step={0.1}
+                          value={armBeBufferPct}
+                          onChange={e => setArmBeBufferPct(Number(e.target.value))}
+                          className="flex-1 bg-[#1e222d] border border-white/[0.06] rounded px-2 py-1 text-[11px] text-white outline-none"
+                          placeholder="Buffer %"
+                        />
+                        <span className="text-[9px] text-slate-500">% above entry (long) / below (short)</span>
+                      </div>
+                    )}
+                    {armBeMode === 'leverage' && (
+                      <div className="text-[9px] text-slate-500 mt-1">
+                        With {leverage}x: BE buffer = <b className="text-purple-300">{(leverage/10).toFixed(1)}%</b>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Trail SL → TP1 */}
+                  <div>
+                    <label className="text-[10px] text-slate-400 mb-1 block">Trail SL upgrade</label>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={armTrailToTp1}
+                        onChange={e => setArmTrailToTp1(e.target.checked)}
+                        className="accent-purple-500 w-3.5 h-3.5"
+                      />
+                      <span className="text-[11px] text-slate-200">Trail SL → TP1 after halfway to TP2</span>
+                    </label>
+                    <div className="text-[9px] text-slate-500 mt-1">
+                      {armTrailToTp1
+                        ? 'Once price reaches midpoint(TP1, TP2), SL moves up from BE to TP1.'
+                        : 'SL stays at BE after TP1 (no further trailing).'}
+                    </div>
+                  </div>
+
+                  {/* Notice — engine wiring is Phase 3 */}
+                  <div className="text-[9px] text-amber-300/80 bg-amber-500/5 border border-amber-500/20 rounded px-2 py-1.5">
+                    ⓘ Settings are saved with the bot. Live partial-close enforcement ships in the next update — until then, this affects backtest results only.
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Advanced Settings */}

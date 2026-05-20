@@ -3036,6 +3036,16 @@ def create_futures_bot(
     drawdown_tolerance = float(req.get("drawdown_tolerance", 50))
     max_position_pct   = float(req.get("max_position_pct", 5.0))
 
+    # Advanced Risk Management — accepted from the UI but NOT yet enforced
+    # in the live engine (the futures backtester already supports it). The
+    # values are logged so they show up in audit/event logs, and will be
+    # consumed by FuturesPosition's exit logic in Phase 3.
+    arm_enabled       = bool(req.get("arm_enabled", False))
+    arm_tp1_close_pct = float(req.get("arm_tp1_close_pct", 50))
+    arm_be_mode       = str(req.get("arm_be_mode", "leverage"))
+    arm_be_buffer_pct = float(req.get("arm_be_buffer_pct", 1.0))
+    arm_trail_to_tp1  = bool(req.get("arm_trail_to_tp1", True))
+
     if strategy_id:
         from backend.models.strategy import Strategy
         from sqlalchemy import or_
@@ -3112,6 +3122,11 @@ def create_futures_bot(
     log_event(db, user_id, "futures.create_bot", request, payload={
         "instance_id": instance.id, "strategy": strategy_name, "leverage": leverage,
         "mode": mode, "max_position_pct": max_position_pct,
+        "arm_enabled": arm_enabled,
+        "arm_tp1_close_pct": arm_tp1_close_pct if arm_enabled else None,
+        "arm_be_mode": arm_be_mode if arm_enabled else None,
+        "arm_be_buffer_pct": arm_be_buffer_pct if arm_enabled else None,
+        "arm_trail_to_tp1": arm_trail_to_tp1 if arm_enabled else None,
     })
     return {"bot_id": instance.id, "engine_key": engine_key, **result}
 
