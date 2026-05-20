@@ -509,43 +509,43 @@ import numpy as np
 
 class BestPracticesV1(IStrategy):
     """
-    BestPracticesV1 — multi-layered SMC strategy for BTC/USDT 1h futures.
+    BestPracticesV1 — SMC strategy for BTC/USDT 1h futures with HTF trend.
 
-    Combines validated techniques layered on the SMCStrategyTV entry
-    trigger (BOS + FVG). Each gate has a specific job; removing any one
-    of them typically hurts overall performance materially:
+    Layered on the SMCStrategyTV entry trigger (BOS + FVG). The HTF
+    trend filter is the always-on differentiator; ATR regime and NY
+    session filters are AVAILABLE but DEFAULT OFF — the original
+    stacked-defaults killed almost all signals on 1h (~1 trade per 6M).
+    Re-enable them via constants below if your test data shows benefit.
 
-      LAYER 1 — HTF trend filter (EMA200 on 1h)
+      LAYER 1 (ON) — HTF trend filter (EMA200 on 1h)
         Long only when close > EMA200, short only when close < EMA200.
         BTC has dominant trend regimes; counter-trend SMC entries are
-        the primary loser bucket. This filter alone typically lifts
-        WR by 5-10 percentage points at small cost in trade count.
+        the primary loser bucket. This filter typically lifts WR by
+        5-10 percentage points at small cost in trade count.
 
-      LAYER 2 — ATR volatility regime filter
-        Trade only when ATR(14) is in the MIDDLE 50% of the last 200
-        bars (between 25th and 75th percentile). Skips:
-        - Low-ATR chop (fake BOS, range-bound losers)
-        - High-ATR news/crashes (gap risk, slippage explosion)
-        On 1h BTC this typically removes 30-40% of bars from eligibility.
+      LAYER 2 (OFF by default) — ATR volatility regime filter
+        Trade only when ATR(14) is between the ATR_PCT_LOW and
+        ATR_PCT_HIGH percentile of the last 200 bars. Defaults 0/100
+        = no filtering. Set to 25/75 to skip dead chop + crash vol.
 
-      LAYER 3 — NY session filter (12:00-21:00 UTC)
-        Covers London close + NY open + NY afternoon. ~70% of BTC
-        futures volume happens here. Asian/EU pre-market chop excluded.
+      LAYER 3 (OFF by default) — NY session filter
+        Defaults 0-23 = 24h trading. Set SESSION_START_HR_UTC=12,
+        SESSION_END_HR_UTC=21 to restrict to NY hours only.
 
-      LAYER 4 — SMC entry trigger (BOS + FVG)
+      LAYER 4 (ON) — SMC entry trigger (BOS + FVG)
         - Pivot BOS (N=5 each side): close crosses last confirmed pivot
         - FVG zone: price currently INSIDE an unfilled 3-candle imbalance
         Same proven mechanic as SMCStrategyTV (validated against
         TradingView line-for-line during parity testing).
 
-      LAYER 5 — Risk management
+      LAYER 5 (ON) — Risk management
         - Structural SL: opposing pivot ± 10bps buffer
         - Reject if SL distance > 3% of entry (broken structure)
         - Single TP at 2R (closes 100%)
         - Pairs with the engine's Single-position TV mode + stop-and-reverse
 
-    DESIGN TARGET (1h BTC, 6M backtest):
-        Trades: 30-100 over 6 months
+    DESIGN TARGET (1h BTC, 6M backtest, default filters):
+        Trades: 10-40 over 6 months
         Win rate: 40-50% (deliberately conservative — anyone promising
           you 60%+ WR on retail crypto is fitting to past data)
         Profit factor target: ≥ 1.3
@@ -570,11 +570,18 @@ class BestPracticesV1(IStrategy):
     SWING_LEN          = 5
     HTF_EMA_LEN        = 200
     ATR_LEN            = 14
-    ATR_PCT_LOW        = 25         # bottom of the "tradeable" volatility band
-    ATR_PCT_HIGH       = 75         # top of the "tradeable" volatility band
+    # ATR regime filter — DEFAULT OFF (0..100 = no filtering). The 25-75
+    # band was over-restrictive on 1h: combined with HTF trend (~50% of
+    # bars) and SMC BOS+FVG (~0.2% of bars), it produced 1 trade per 6M.
+    # Set to 25 / 75 to re-enable the middle-50% volatility band.
+    ATR_PCT_LOW        = 0
+    ATR_PCT_HIGH       = 100
     ATR_PCT_LOOKBACK   = 200
-    SESSION_START_HR_UTC = 12
-    SESSION_END_HR_UTC   = 21
+    # NY session filter — DEFAULT OFF (0..23 = trade 24h). The 12-21 UTC
+    # band cut another ~62% of bars on top of HTF trend + ATR + SMC.
+    # Set to 12 / 21 to re-enable NY-session-only trading.
+    SESSION_START_HR_UTC = 0
+    SESSION_END_HR_UTC   = 23
     MAX_SL_PCT         = 3.0        # reject if structural SL is > 3% from entry
 
     def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
@@ -787,16 +794,16 @@ def _seed_builtin_strategies(db):
         },
         {
             "name": "BestPracticesV1",
-            "description": "Multi-layered SMC strategy designed for BTC/USDT 1h futures. "
-                           "5 gates layered on the validated SMCStrategyTV entry trigger: "
-                           "(1) HTF EMA200 trend filter — trade only with the dominant trend; "
-                           "(2) ATR volatility regime — only trade when ATR is in middle 50% of "
-                           "last 200 bars (skip dead chop and crash vol); "
-                           "(3) NY session filter (12-21 UTC) — only trade peak-volume hours; "
-                           "(4) SMC BOS + FVG entry trigger (same as SMCStrategyTV); "
-                           "(5) Structural SL @ opposing pivot (cap 3%) + single 2R TP. "
-                           "Designed for 1h timeframe targeting 30-100 trades/6M with WR 40-50% "
-                           "and profit factor ≥ 1.3. Equivalent Pine script available in docs.",
+            "description": "SMC strategy for BTC/USDT 1h futures with HTF trend filter. "
+                           "Active gates (default): (1) HTF EMA200 trend filter — long only "
+                           "above EMA200, short only below; (2) SMC BOS + FVG entry trigger "
+                           "(same as SMCStrategyTV); (3) Structural SL @ opposing pivot "
+                           "(cap 3%) + single 2R TP. "
+                           "OPTIONAL gates (default OFF, edit constants in main.py to enable): "
+                           "ATR volatility regime (middle 50% of last 200 bars), NY session "
+                           "(12-21 UTC). Designed for 1h targeting 10-40 trades/6M with WR "
+                           "40-50% and profit factor ≥ 1.3. Equivalent Pine script in "
+                           "docs/pine/BestPracticesV1.pine.",
             "code": _BESTPRACTICES_V1_CODE,
             "stoploss": -0.03,
             "take_profit": 0.06,

@@ -33,11 +33,16 @@ strategy("BestPracticesV1 — BTC 1h SMC",
 swing_len         = input.int(5,    "Swing N (pivot left/right)", minval=1)
 htf_ema_len       = input.int(200,  "HTF EMA length",             minval=20)
 atr_len           = input.int(14,   "ATR length",                 minval=2)
-atr_pct_low       = input.float(25, "ATR regime lower pct",       minval=0,  maxval=100)
-atr_pct_high      = input.float(75, "ATR regime upper pct",       minval=0,  maxval=100)
+// ATR regime filter — defaults 0/100 (OFF). On 1h SMC, the 25/75 band
+// over-filtered the strategy down to ~1 trade per 6M. Change to 25/75
+// to re-enable the middle-50% volatility band.
+atr_pct_low       = input.float(0,  "ATR regime lower pct",       minval=0,  maxval=100)
+atr_pct_high      = input.float(100,"ATR regime upper pct",       minval=0,  maxval=100)
 atr_pct_lookback  = input.int(200,  "ATR percentile lookback")
-session_start_hr  = input.int(12,   "NY session start (UTC hr)",  minval=0,  maxval=23)
-session_end_hr    = input.int(21,   "NY session end (UTC hr)",    minval=0,  maxval=23)
+// NY session filter — defaults 0/23 (24h). Change to 12/21 to restrict
+// to NY hours only (12:00-21:00 UTC).
+session_start_hr  = input.int(0,    "NY session start (UTC hr)",  minval=0,  maxval=23)
+session_end_hr    = input.int(23,   "NY session end (UTC hr)",    minval=0,  maxval=23)
 max_sl_pct        = input.float(3.0,"Max structural SL distance %",minval=0.1)
 
 // ─── Layer 1: HTF trend filter (EMA200) ─────────────────────────────────────
