@@ -132,6 +132,10 @@ function FuturesBacktestInner() {
   const [armBeMode,        setArmBeMode]        = useState<'leverage' | 'manual_pct' | 'entry'>('leverage');
   const [armBeBufferPct,   setArmBeBufferPct]   = useState(1.0);         // used only when manual_pct
   const [armTrailToTp1,    setArmTrailToTp1]    = useState(true);
+  // Tick-level SL/TP precision: when ON, the engine resolves same-bar
+  // SL+TP ambiguity using OHLC-path inference (always) + sub-bar 1m
+  // replay (for TFs > 1m). Major accuracy gain for 1m scalp backtests.
+  const [tickPrecision,    setTickPrecision]    = useState(false);
 
   useEffect(() => {
     api.strategy.list().then(d => {
@@ -624,6 +628,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         arm_be_mode:        armBeMode,
         arm_be_buffer_pct:  armBeBufferPct,
         arm_trail_to_tp1:   armTrailToTp1,
+        tick_precision:     tickPrecision,
       });
       if (data.error) setError(data.error);
       else {
@@ -744,6 +749,9 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
       `# Advanced Risk Management: ${armEnabled
         ? `ON — TP1 close ${armTp1ClosePct}% / BE mode ${armBeMode}${armBeMode === 'manual_pct' ? ` (${armBeBufferPct}%)` : ''} / trail-to-TP1 ${armTrailToTp1 ? 'on' : 'off'}`
         : 'OFF (single TP, closes 100%)'}`,
+      `# Tick precision: ${tickPrecision
+        ? (timeframe === '1m' ? 'ON (OHLC-path inference)' : 'ON (sub-bar 1m + path inference)')
+        : 'OFF (open-distance heuristic)'}`,
       `# Results: ${m?.total_trades ?? 0} trades  WR ${((m?.win_rate ?? 0) * 100).toFixed(1)}%  Profit ${(m?.total_profit_pct ?? 0).toFixed(2)}%  MaxDD ${(m?.max_drawdown ?? 0).toFixed(2)}%`,
       `# Exported: ${new Date().toISOString()}`,
       '',
@@ -1285,6 +1293,35 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
               </div>
             </div>
           )}
+        </div>
+
+        {/* ── Tick-level SL/TP precision ─────────────────────────────────
+            Optional toggle that resolves same-bar SL+TP ambiguity using
+            higher-accuracy methods than the legacy "closer to bar open"
+            heuristic. Specifically aimed at 1m scalping backtests where
+            same-bar exits dominate. */}
+        <div className="mb-5 flex items-center gap-3 flex-wrap">
+          <label className="label !mb-0 flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={tickPrecision}
+              onChange={e => setTickPrecision(e.target.checked)}
+              className="accent-sky-500"
+            />
+            <span>⚡ Tick-level SL/TP precision</span>
+            <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300"
+                  title="When ON: same-bar SL+TP ambiguity is resolved by (1) OHLC-path inference using each bar's open/close shape (works on any TF including 1m), and (2) for TF > 1m, additionally fetches 1m sub-bar data and replays each minute to find which level was hit first. Major accuracy improvement for 1m scalp backtests. Adds 20-60s extra download time on TFs > 1m due to sub-bar fetch."
+            >
+              {tickPrecision
+                ? (timeframe === '1m' ? 'OHLC-path inference' : 'sub-bar + path inference')
+                : 'open-distance heuristic (legacy)'}
+            </span>
+          </label>
+          <span className="text-[11px] text-slate-400 leading-snug max-w-lg">
+            {tickPrecision
+              ? <>Same-bar SL+TP ambiguity resolved using <b className="text-cyan-300">bar shape + 1m sub-bars</b>. {timeframe !== '1m' && '⚠️ Adds extra data download.'}</>
+              : <>Same-bar SL+TP picked by <b className="text-slate-300">"closer to open"</b> heuristic — fast but imprecise on 1m.</>}
+          </span>
         </div>
 
         {/* ── Futures-specific config ─────────────────────────────────── */}

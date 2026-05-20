@@ -359,6 +359,15 @@ def run_futures_backtest(
     arm_be_buffer_pct  = max(0.0, min(10.0, float(req.get("arm_be_buffer_pct", 1.0))))
     arm_trail_to_tp1   = bool(req.get("arm_trail_to_tp1", True))
 
+    # ── Tick-level SL/TP precision ──
+    # When enabled, the engine replaces the legacy "closer to bar open"
+    # heuristic for same-bar SL+TP ambiguity with (1) sub-bar replay
+    # using 1m candles within each main TF bar (5m+ only — adds ~30s
+    # data fetch), and (2) OHLC-path inference fallback for 1m bars or
+    # when sub-bar data was ambiguous. Major accuracy gain for 1m scalp
+    # backtests where same-bar SL+TP is the dominant exit pattern.
+    tick_precision     = bool(req.get("tick_precision", False))
+
     # Resolve strategy — pull generated_code so the backtester can actually
     # run the user's authored logic instead of pattern-matching the name to
     # one of the hardcoded built-in signal functions.
@@ -395,6 +404,7 @@ def run_futures_backtest(
         arm_be_mode       = arm_be_mode,
         arm_be_buffer_pct = arm_be_buffer_pct,
         arm_trail_to_tp1  = arm_trail_to_tp1,
+        tick_precision    = tick_precision,
     )
 
     if "error" in result:
