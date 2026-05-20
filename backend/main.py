@@ -27,6 +27,7 @@ from backend.routers import auth, strategy, backtest, trading, market, analysis,
 from backend.routers import futures as futures_router  # noqa: E402
 from backend.routers import copy_trading as copy_router  # noqa: E402
 from backend.routers import multi_strategy as multi_router  # noqa: E402
+from backend.routers import paper_scalp as paper_scalp_router  # noqa: E402
 from backend.services.freqtrade_manager import freqtrade_mgr  # noqa: E402
 from backend.services.autotrade_engine import autotrade_engine  # noqa: E402
 from backend.utils.clerk_auth import (  # noqa: E402
@@ -1090,6 +1091,7 @@ app.include_router(webhook.router)
 app.include_router(futures_router.router)
 app.include_router(copy_router.router)
 app.include_router(multi_router.router)
+app.include_router(paper_scalp_router.router)
 
 
 @app.get("/")

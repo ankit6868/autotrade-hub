@@ -4,6 +4,7 @@ import { api } from '@/lib/api';
 import StrategyChart from '@/components/dashboard/StrategyChart';
 import StrategySignalMonitor from '@/components/dashboard/StrategySignalMonitor';
 import PairPicker from '@/components/ui/PairPicker';
+import ScalpEnginePanel from '@/components/futures/ScalpEnginePanel';
 
 function FuturesPaperInner() {
   const [strategies, setStrategies] = useState<any[]>([]);
@@ -110,6 +111,11 @@ function FuturesPaperInner() {
           </span>
         </div>
       )}
+
+      {/* WebSocket-driven Scalp Engine — purpose-built for 1m scalping.
+          Independent from the regular paper bot above (different engine,
+          different state). Can run multiple engines simultaneously. */}
+      <ScalpEnginePanel strategies={strategies} />
 
       {/* Bot Config */}
       <div className="card mb-6">
