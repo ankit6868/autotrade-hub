@@ -1118,6 +1118,23 @@ def run_futures_backtest(
                             entry_price, direction, leverage,
                             arm_be_mode, arm_be_buffer_pct,
                         )
+                        # ── Safety clamp: BE must never be on the WRONG
+                        # side of TP1. On tight setups (especially 1m
+                        # scalps where TP1 is 0.05-0.5% from entry) at
+                        # high leverage, the leverage-auto BE buffer
+                        # (lev/1000 = 1% @ 10x, 2% @ 20x) often lands
+                        # FURTHER from entry than TP1 itself.
+                        # For LONG: BE > TP1 would mean SL is set ABOVE
+                        # current price → instant stop-out of remainder.
+                        # For SHORT: BE < TP1 has the symmetric problem.
+                        # Clamp BE to TP1 (the just-touched profit level)
+                        # so the remainder can never exit at a loss
+                        # immediately after a TP1 hit.
+                        tp1_price = pos["tp"]   # TP1 = the level just touched
+                        if direction == "long" and be_price > tp1_price:
+                            be_price = tp1_price
+                        elif direction == "short" and be_price < tp1_price:
+                            be_price = tp1_price
                     else:
                         be_price = entry_price
                     pos["sl"] = be_price
