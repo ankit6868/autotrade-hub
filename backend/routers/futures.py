@@ -785,6 +785,17 @@ def futures_open_positions(
                 "liquidation_price": round(liq, 6) if liq else None,
                 "_pos_mode":         pos_mode,
                 "exchange_order_id": getattr(p, "exchange_order_id", None),
+                # UX#14: Phase-3 ARM state surfaced so the UI shows
+                # partial-close history per position.
+                "arm_active":        bool(getattr(p, "arm_active", False)),
+                "tp1_price":         round(p.tp1_price, 6) if getattr(p, "tp1_price", None) else None,
+                "tp2_price":         round(p.tp2_price, 6) if getattr(p, "tp2_price", None) else None,
+                "tp1_hit":           bool(getattr(p, "tp1_hit", False)),
+                "tp1_close_pct":     round(getattr(p, "tp1_close_pct", 0.0) * 100, 1) if getattr(p, "arm_active", False) else None,
+                "remaining_pct":     round(getattr(p, "remaining_pct", 1.0) * 100, 1),
+                "partial_pnl_abs":   round(getattr(p, "partial_pnl_abs", 0.0), 4),
+                "partial_exits":     list(getattr(p, "partial_exits", []) or []),
+                "trailed_to_tp1":    bool(getattr(p, "trailed_to_tp1", False)),
             })
 
     # Fetch live prices
@@ -3308,6 +3319,14 @@ def create_futures_bot(
     arm_be_buffer_pct = float(req.get("arm_be_buffer_pct", 1.0))
     arm_trail_to_tp1  = bool(req.get("arm_trail_to_tp1", True))
 
+    # Phase 8 — Cooldown / max-trades-per-day / daily DD trip.
+    # Defaults are mode-based (scalp = 8 trades, intraday = 4, swing = 2)
+    # picked by the validator. The router accepts overrides from the UI
+    # so power users can tune per-bot. Range-clamped to safe bounds.
+    max_trades_per_day = max(1, min(50, int(req.get("max_trades_per_day", 8))))
+    cooldown_candles   = max(0, min(50, int(req.get("cooldown_candles", 3))))
+    max_daily_dd_pct   = max(5.0, min(80.0, float(req.get("max_daily_dd_pct", 25.0))))
+
     strat = None
     if strategy_id:
         from backend.models.strategy import Strategy
@@ -3457,6 +3476,9 @@ def create_futures_bot(
         arm_be_mode        = arm_be_mode,
         arm_be_buffer_pct  = arm_be_buffer_pct,
         arm_trail_to_tp1   = arm_trail_to_tp1,
+        max_trades_per_day = max_trades_per_day,
+        cooldown_candles   = cooldown_candles,
+        max_daily_dd_pct   = max_daily_dd_pct,
     )
 
     log_event(db, user_id, "futures.create_bot", request, payload={

@@ -337,6 +337,33 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                     <div className={p.stoploss_price ? 'text-red-400' : 'text-slate-500'}>
                       SL: {p.stoploss_price ? Number(p.stoploss_price).toFixed(2) : '—'}
                     </div>
+                    {/* UX#14 — ARM partial-state surface. Shows the user
+                        which phase the position is in (pre-TP1 / post-TP1 /
+                        post-midpoint-trail) and how much remains open. */}
+                    {p.arm_active && (
+                      <div
+                        className={`mt-0.5 px-1 py-0.5 rounded text-[8px] font-medium ${
+                          p.tp1_hit
+                            ? (p.trailed_to_tp1
+                                ? 'bg-emerald-500/15 text-emerald-300'
+                                : 'bg-amber-500/15 text-amber-300')
+                            : 'bg-purple-500/15 text-purple-300'
+                        }`}
+                        title={
+                          p.tp1_hit
+                            ? (p.trailed_to_tp1
+                                ? `Trailing to TP1. ${p.remaining_pct?.toFixed(0)}% of position remains, partial booked: ${p.partial_pnl_abs?.toFixed(2)} USDT`
+                                : `TP1 hit. ${p.remaining_pct?.toFixed(0)}% remains @ BE SL, targeting TP2. Partial booked: ${p.partial_pnl_abs?.toFixed(2)} USDT`)
+                            : `ARM ON. ${p.tp1_close_pct?.toFixed(0)}% to book @ TP1 = ${p.tp1_price?.toFixed(2)}, then trail to TP2 = ${p.tp2_price?.toFixed(2)}`
+                        }
+                      >
+                        {p.tp1_hit
+                          ? (p.trailed_to_tp1
+                              ? `🛡 SL→TP1 (${p.remaining_pct?.toFixed(0)}%)`
+                              : `✓ TP1 (${p.remaining_pct?.toFixed(0)}%)`)
+                          : `🎯 ARM ${p.tp1_close_pct?.toFixed(0)}%`}
+                      </div>
+                    )}
                     <button
                       onClick={() => setTpslPair(p.pair)}
                       className="text-[9px] text-brand-400 hover:text-brand-300 underline mt-0.5"

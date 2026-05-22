@@ -165,6 +165,94 @@ class RiskPlan:
         }
 
 
+# ─────────────────────────── Structural snap (FR-07) ─────────────────────────
+# When the risk engine falls back to ATR-based SL/TP (Path 2), we optionally
+# nudge those levels onto the nearest swing high/low so the stop sits BEYOND
+# real market structure rather than inside random candle noise.
+#
+# The buffer is the maximum % adjustment we'll allow — if the nearest swing
+# is further than this, we leave the ATR level alone (the swing isn't
+# relevant, e.g. price is in a fresh breakout area with no recent swings).
+SNAP_BUFFER_PCT = 0.005   # 0.5% — matches the architecture-audit spec
+
+def _find_recent_swing_low(df: pd.DataFrame, lookback: int = 20) -> Optional[float]:
+    """Lowest low in the last `lookback` bars. Used for long SL anchoring."""
+    if df is None or len(df) < lookback:
+        return None
+    tail = df.iloc[-lookback:]
+    val = float(tail["low"].min())
+    return val if val > 0 else None
+
+def _find_recent_swing_high(df: pd.DataFrame, lookback: int = 20) -> Optional[float]:
+    """Highest high in the last `lookback` bars. Used for short SL anchoring."""
+    if df is None or len(df) < lookback:
+        return None
+    tail = df.iloc[-lookback:]
+    val = float(tail["high"].max())
+    return val if val > 0 else None
+
+def _snap_to_structure(
+    *,
+    sl: float,
+    tp: float,
+    entry: float,
+    direction: str,
+    df: pd.DataFrame,
+    buffer_pct: float = SNAP_BUFFER_PCT,
+) -> tuple[float, float, str]:
+    """Snap SL to the nearest swing extreme IF it's within `buffer_pct` of
+    the ATR-derived SL, with a small protective extension past the swing.
+    Returns (new_sl, new_tp, reason). Reason is empty when no snap happened.
+
+    Long trade rules:
+      • SL was below entry. Find recent swing low.
+      • If swing_low is between SL and entry AND within buffer_pct of SL,
+        move SL to swing_low × (1 - 0.001) — just below the swing.
+      • TP can shift proportionally to preserve the original RR (keeps
+        the trade from becoming a worse setup).
+    Short trade is the mirror.
+
+    Conservative: when the snap would WIDEN risk by > 30%, we abort the
+    snap (better to keep the ATR SL than blow up the risk budget).
+    """
+    if df is None or len(df) < 21:
+        return sl, tp, ""
+
+    orig_risk = abs(entry - sl)
+    if orig_risk <= 0:
+        return sl, tp, ""
+
+    if direction == "long":
+        swing = _find_recent_swing_low(df, lookback=20)
+        if swing is None or swing >= entry:
+            return sl, tp, ""
+        # Distance from swing to ATR SL.
+        delta = abs(swing - sl)
+        if delta > entry * buffer_pct:
+            return sl, tp, ""
+        new_sl = swing * (1.0 - 0.001)   # 10bps below the swing
+        # Risk inflation check — reject if too wide.
+        new_risk = entry - new_sl
+        if new_risk <= 0 or new_risk > orig_risk * 1.3:
+            return sl, tp, ""
+        # Keep RR roughly intact by extending TP by the SAME absolute amount.
+        new_tp = entry + (tp - entry) * (new_risk / orig_risk)
+        return new_sl, new_tp, f"snapped SL to 20-bar swing low {swing:.4f}"
+    else:
+        swing = _find_recent_swing_high(df, lookback=20)
+        if swing is None or swing <= entry:
+            return sl, tp, ""
+        delta = abs(swing - sl)
+        if delta > entry * buffer_pct:
+            return sl, tp, ""
+        new_sl = swing * (1.0 + 0.001)
+        new_risk = new_sl - entry
+        if new_risk <= 0 or new_risk > orig_risk * 1.3:
+            return sl, tp, ""
+        new_tp = entry - (entry - tp) * (new_risk / orig_risk)
+        return new_sl, new_tp, f"snapped SL to 20-bar swing high {swing:.4f}"
+
+
 # ─────────────────────────── Main entrypoint ──────────────────────────────────
 
 def compute_tp_sl(
@@ -307,6 +395,21 @@ def compute_tp_sl(
         sl = entry + stop_distance
         tp = entry - target_distance
 
+    # ── FR-07: Structural snap to nearest swing if close enough ───────────
+    # Conservative — only snaps if the swing is within 0.5% of the ATR SL.
+    # Otherwise leaves the ATR levels alone (clean breakout with no nearby
+    # swing). Risk inflation capped at +30%.
+    snap_reason = ""
+    snapped_sl, snapped_tp, snap_reason = _snap_to_structure(
+        sl=sl, tp=tp, entry=entry, direction=direction, df=df,
+    )
+    if snap_reason:
+        sl, tp = snapped_sl, snapped_tp
+        source = "atr_snapped"
+        # Recompute distances for the RR check below.
+        stop_distance = abs(entry - sl)
+        target_distance = abs(tp - entry)
+
     rr = target_distance / max(stop_distance, 1e-9)
     if rr < min_rr:
         # This branch is mostly defensive — the multipliers in TIMEFRAME_CONFIG
@@ -320,15 +423,18 @@ def compute_tp_sl(
             rejected_reason=f"RR {rr:.2f} below min {min_rr} for {timeframe}",
         )
 
+    why = (
+        f"ATR({cfg['atr_period']})={atr:.2f} × SL_mult={sl_mult} "
+        f"= stop {stop_distance:.2f}; × TP_mult={tp_mult} "
+        f"= target {target_distance:.2f} on {timeframe} ({cfg['style']})"
+    )
+    if snap_reason:
+        why += f" — {snap_reason}"
     return RiskPlan(
         valid=True, direction=direction, entry=entry, sl=sl, tp=tp,
         atr=atr, sl_mult=sl_mult, tp_mult=tp_mult, rr=rr,
         timeframe=timeframe, source=source,
-        why=(
-            f"ATR({cfg['atr_period']})={atr:.2f} × SL_mult={sl_mult} "
-            f"= stop {stop_distance:.2f}; × TP_mult={tp_mult} "
-            f"= target {target_distance:.2f} on {timeframe} ({cfg['style']})"
-        ),
+        why=why,
     )
 
 

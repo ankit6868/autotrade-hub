@@ -542,9 +542,23 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   const [livePermission, setLivePermission] = useState<string>('blocked');
   const [confidenceScore, setConfidenceScore] = useState<number>(0);
   const [liveAllowed, setLiveAllowed] = useState<boolean>(false);
-  // Selected execution timeframe — for now we hardcode 15m but expose
-  // here so the preview re-runs when the parent passes it down.
+  // Selected execution timeframe — exposed so the preview + TF check re-run
+  // when the user changes it on the form.
   const [executionTimeframe, setExecutionTimeframe] = useState<string>('15m');
+  // UX#15 — TF mismatch warning from /api/strategy/{id}/tf-check.
+  const [tfWarning, setTfWarning] = useState<string | null>(null);
+
+  useEffect(() => {
+    const sid = bot.id || strategies.find(s => s.name === bot.name)?.id;
+    if (!sid) { setTfWarning(null); return; }
+    let cancelled = false;
+    api.futures.strategyTfCheck(sid, executionTimeframe)
+      .then((d: any) => {
+        if (!cancelled) setTfWarning(d?.warning || null);
+      })
+      .catch(() => { if (!cancelled) setTfWarning(null); });
+    return () => { cancelled = true; };
+  }, [bot, executionTimeframe, strategies]);
   const [backtestData, setBacktestData] = useState<number[]>([]);
   const [backtestError, setBacktestError] = useState('');
   const [currentPrice, setCurrentPrice] = useState(0);
@@ -767,6 +781,11 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                 inferred fields. When mode=live AND live_permission is not
                 'live_eligible', the Create button below is auto-disabled
                 so the user can't bypass the hard backend guardrail. */}
+            {tfWarning && (
+              <div className="text-[10px] text-amber-200 bg-amber-500/5 border border-amber-500/30 rounded px-2 py-1.5 leading-snug">
+                {tfWarning}
+              </div>
+            )}
             {(bot.id || strategies.find(s => s.name === bot.name)?.id) && (
               <StrategyPreview
                 strategyId={bot.id || (strategies.find(s => s.name === bot.name)?.id ?? null)}

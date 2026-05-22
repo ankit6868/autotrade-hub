@@ -331,6 +331,43 @@ def validate_strategy_by_id(
     }
 
 
+@router.get("/{strategy_id}/tf-check")
+def check_tf_mismatch(
+    strategy_id: int,
+    execution_tf: str = "15m",
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """UX#15 — TF-mismatch warning. Compares the strategy's declared
+    `timeframe` class attribute to the user's selected execution TF and
+    returns a human-readable warning when they differ (with adapter
+    behaviour explanation), or `null` warning when they align."""
+    from sqlalchemy import or_
+    from backend.services.timeframe_adapter import tf_mismatch_warning, adapt
+    strategy = db.execute(
+        select(Strategy).where(
+            Strategy.id == strategy_id,
+            or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if not strategy:
+        return {"error": "Strategy not found"}
+    strat_tf = strategy.timeframe or execution_tf
+    warning = tf_mismatch_warning(strat_tf, execution_tf)
+    bundle = adapt(strat_tf, execution_tf)
+    return {
+        "strategy_timeframe":   strat_tf,
+        "execution_timeframe":  execution_tf,
+        "warning":              warning,
+        "adapter_active":       bundle.adapter_active,
+        "bias_tfs":             list(bundle.bias_tfs),
+        "setup_tfs":            list(bundle.setup_tfs),
+        "entry_tf":             bundle.entry_tf,
+        "risk_tf":              bundle.risk_tf,
+        "notes":                bundle.notes,
+    }
+
+
 @router.get("/{strategy_id}/preview")
 def preview_strategy_template(
     strategy_id: int,

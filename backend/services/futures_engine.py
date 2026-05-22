@@ -31,6 +31,8 @@ from .native_trading_engine import (
     _fetch_candles, _build_df, KUCOIN_BASE, TF_KUCOIN,
 )
 from . import risk_engine
+from . import mtf_candles
+from . import timeframe_adapter
 
 log = logging.getLogger("futures_engine")
 
@@ -319,6 +321,22 @@ class FuturesEngine(NativeTradingEngine):
         self._arm_be_mode:        str   = "leverage"
         self._arm_be_buffer_pct:  float = 1.0
         self._arm_trail_to_tp1:   bool  = True
+        # ── Phase 8: cooldown + max-trades/day + daily DD trip ──────────
+        # Resolves PDF §7 safe-default + §16 edge-case ("max daily loss")
+        # requirements that were missing from the live engine.
+        #
+        # cooldown_until[pair] holds the epoch-seconds before which no new
+        # signal may fire on this pair (set on every close).
+        # day_counters tracks trades opened today (resets at UTC midnight)
+        # and trips the daily-DD breaker.
+        self._cooldown_until:    dict[str, float] = {}
+        self._max_trades_per_day:int   = 8
+        self._cooldown_seconds:  int   = 0
+        self._day_key:           str   = ""           # YYYY-MM-DD UTC
+        self._day_trades:        int   = 0
+        self._day_start_balance: float = 0.0
+        self._day_max_dd_pct:    float = 25.0          # 25% daily DD trips bot
+        self._day_dd_tripped:    bool  = False
 
     def wind_down(self):
         """Stop opening new positions but keep managing existing ones until all are closed."""
@@ -366,6 +384,13 @@ class FuturesEngine(NativeTradingEngine):
         arm_be_mode:        str   = "leverage",
         arm_be_buffer_pct:  float = 1.0,
         arm_trail_to_tp1:   bool  = True,
+        # Phase 8 — Cooldown + max-trades-per-day + daily DD trip
+        # Defaults come from the StrategyTemplate's trade_limits when
+        # available; the bot create endpoint computes appropriate mode-based
+        # values per PDF §7.
+        max_trades_per_day: int   = 8,
+        cooldown_candles:   int   = 3,
+        max_daily_dd_pct:   float = 25.0,
         **_kwargs,
     ) -> dict:
         # Always do a clean stop before (re)starting.
@@ -399,6 +424,18 @@ class FuturesEngine(NativeTradingEngine):
         self._arm_be_mode        = str(arm_be_mode or "leverage")
         self._arm_be_buffer_pct  = float(arm_be_buffer_pct or 0.0)
         self._arm_trail_to_tp1   = bool(arm_trail_to_tp1)
+        # Phase 8 — cooldown / max-trades-per-day / daily DD config.
+        # Convert cooldown_candles into seconds using the engine TF.
+        tf_seconds = {"1m":60, "5m":300, "15m":900, "30m":1800,
+                      "1h":3600, "4h":14400, "1d":86400}.get(timeframe, 900)
+        self._cooldown_seconds   = max(0, int(cooldown_candles)) * tf_seconds
+        self._max_trades_per_day = max(1, int(max_trades_per_day))
+        self._day_max_dd_pct     = max(1.0, float(max_daily_dd_pct))
+        self._cooldown_until     = {}
+        self._day_key            = ""        # populated lazily by tick
+        self._day_trades         = 0
+        self._day_start_balance  = float(wallet)
+        self._day_dd_tripped     = False
         self.balance       = wallet
         self.positions     = {}
         self.closed_trades = []
@@ -533,6 +570,9 @@ class FuturesEngine(NativeTradingEngine):
                             del self.positions[trade_key]
                             # Reset to None (Phase 2 edge detection stores direction).
                             seen_signal[pair] = None
+                            # Phase 8: arm cooldown so the bot doesn't immediately
+                            # re-enter on the same signal after a forced exit.
+                            self._cooldown_until[pair] = time.time() + self._cooldown_seconds
                             self.last_action = (
                                 f"LIQUIDATED {pair} @ {live_price:.4f} "
                                 f"liq={pos.liquidation_price:.4f} P&L={pos.pnl_abs:+.2f}"
@@ -608,6 +648,8 @@ class FuturesEngine(NativeTradingEngine):
                         del self.positions[trade_key]
                         # Reset to None (Phase 2 edge detection stores direction).
                         seen_signal[pair] = None
+                        # Phase 8: arm cooldown after every close (TP, SL, manual).
+                        self._cooldown_until[pair] = time.time() + self._cooldown_seconds
                         # Include ARM partial-history in the summary when present.
                         arm_summary = ""
                         if isinstance(pos, FuturesPosition) and pos.partial_exits:
@@ -735,6 +777,47 @@ class FuturesEngine(NativeTradingEngine):
             else:
                 entry_s, sl_s, tp_s, direction = sig
 
+            # ── Phase 7 — HTF bias filter (closed-candle policy) ─────────
+            # When the strategy was authored for a different TF than the
+            # engine's execution TF, the Timeframe Adapter asks us to gate
+            # entries by HTF bias (PDF §5/§6). We do this AFTER signal
+            # detection so we don't waste a candle fetch on every tick,
+            # only when there's a candidate signal.
+            strategy_class_tf = getattr(user_signal_fn, "diagnostics", {}).get("class_tf") if hasattr(user_signal_fn, "diagnostics") else None
+            # Fall back to the strategy's declared timeframe via dataframe attrs.
+            if not strategy_class_tf:
+                strategy_class_tf = df.attrs.get("class_timeframe") if hasattr(df, "attrs") else None
+            tf_bundle = timeframe_adapter.adapt(
+                strategy_tf  = strategy_class_tf or self._timeframe,
+                execution_tf = self._timeframe,
+            )
+            if tf_bundle.adapter_active and tf_bundle.bias_tfs:
+                # Pick the smallest HTF that's > execution TF as the primary bias.
+                primary_bias_tf = tf_bundle.bias_tfs[0]
+                bias_long = mtf_candles.htf_bias_long(pair, primary_bias_tf, ema_period=200)
+                if bias_long is not None:
+                    # Block counter-trend trades (the #1 SMC loser pattern).
+                    if direction == "long" and not bias_long:
+                        self.last_action = (
+                            f"BLOCKED long {pair} @ {live_price:.4f} — "
+                            f"{primary_bias_tf} bias is bearish (price below EMA200)"
+                        )
+                        self._log_action("htf_bias_block", self.last_action,
+                            pair=pair, direction=direction,
+                            bias_tf=primary_bias_tf, bias_long=False)
+                        log.info("[%s] %s", self.user_id, self.last_action)
+                        continue
+                    if direction == "short" and bias_long:
+                        self.last_action = (
+                            f"BLOCKED short {pair} @ {live_price:.4f} — "
+                            f"{primary_bias_tf} bias is bullish (price above EMA200)"
+                        )
+                        self._log_action("htf_bias_block", self.last_action,
+                            pair=pair, direction=direction,
+                            bias_tf=primary_bias_tf, bias_long=True)
+                        log.info("[%s] %s", self.user_id, self.last_action)
+                        continue
+
             # ── Edge detection + stop-and-reverse ─────────────────────────
             # seen_signal[pair] now holds the DIRECTION of the last fired
             # signal (None | 'long' | 'short'). Skip if the same direction
@@ -744,6 +827,63 @@ class FuturesEngine(NativeTradingEngine):
                 # Same-direction repeat — don't fire again until the signal
                 # flips or the position closes (the close path resets to None).
                 continue
+
+            # ── Phase 8: cooldown + max-trades-per-day + daily DD trip ────
+            # Cooldown: skip if we're still inside the post-close window.
+            cooldown_end = self._cooldown_until.get(pair, 0.0)
+            if now_epoch < cooldown_end:
+                remain = int(cooldown_end - now_epoch)
+                self.last_action = (
+                    f"COOLDOWN {pair} {direction} — {remain}s remaining of "
+                    f"{self._cooldown_seconds // max(60,1)}m post-close cooldown"
+                )
+                self._log_action("cooldown_skip", self.last_action,
+                    pair=pair, direction=direction, remaining_seconds=remain)
+                continue
+
+            # Rotate day-counter window at UTC midnight, capture start-of-day
+            # balance for the DD calculation.
+            day_now = now.strftime("%Y-%m-%d")
+            if day_now != self._day_key:
+                self._day_key            = day_now
+                self._day_trades         = 0
+                self._day_start_balance  = self.balance
+                self._day_dd_tripped     = False
+                self._log_action("day_rollover", f"New trading day {day_now} — counters reset",
+                                 starting_balance=self._day_start_balance)
+
+            # Max-trades-per-day cap.
+            if self._day_trades >= self._max_trades_per_day:
+                self.last_action = (
+                    f"DAILY CAP {pair} {direction} — {self._day_trades}/"
+                    f"{self._max_trades_per_day} trades already today"
+                )
+                self._log_action("daily_cap_skip", self.last_action,
+                    pair=pair, direction=direction,
+                    day_trades=self._day_trades,
+                    max_trades_per_day=self._max_trades_per_day)
+                continue
+
+            # Daily-DD breaker: trips the bot if today's loss exceeds the
+            # threshold. Once tripped, no new entries are taken for the rest
+            # of the UTC day (resets at midnight).
+            if self._day_start_balance > 0:
+                today_pnl_pct = (self.balance - self._day_start_balance) / self._day_start_balance * 100.0
+                if today_pnl_pct <= -self._day_max_dd_pct:
+                    if not self._day_dd_tripped:
+                        self._day_dd_tripped = True
+                        self.last_action = (
+                            f"DAILY DD TRIPPED {today_pnl_pct:.2f}% (limit -{self._day_max_dd_pct}%) — "
+                            f"no new entries until {day_now} UTC midnight"
+                        )
+                        self._log_action("daily_dd_trip", self.last_action,
+                            day_pnl_pct=today_pnl_pct, limit=-self._day_max_dd_pct,
+                            day_trades=self._day_trades)
+                        log.warning("[%s] %s", self.user_id, self.last_action)
+                    continue
+                if self._day_dd_tripped:
+                    # Already tripped today — keep skipping new entries.
+                    continue
 
             self.signal_count += 1
 
@@ -777,6 +917,10 @@ class FuturesEngine(NativeTradingEngine):
                                           self._strategy_id, old_pos.db_id)
                     if self._mode == "live":
                         self._place_live_exit(pair, old_pos, exit_price)
+                    # Phase 8: don't trigger cooldown for stop-and-reverse —
+                    # the new position opens RIGHT AFTER this close in the
+                    # same tick. Cooldown only kicks in when a position
+                    # closes WITHOUT an immediate replacement.
 
             entry = live_price
 
@@ -807,6 +951,18 @@ class FuturesEngine(NativeTradingEngine):
                 continue
 
             sl, tp = plan.sl, plan.tp
+
+            # ── Op#10: live-only spread check ────────────────────────────
+            # Reject entries when KuCoin's bid-ask spread eats > 25% of the
+            # expected reward — common on altcoins during Asia session.
+            expected_reward_pct = abs(tp - entry) / max(entry, 1e-9) * 100.0
+            too_wide, spread_info = self._live_spread_too_wide(pair, expected_reward_pct)
+            if too_wide:
+                self.last_action = f"SPREAD BLOCK {pair} {direction} — {spread_info.get('reason')}"
+                self._log_action("spread_block", self.last_action,
+                    pair=pair, direction=direction, **spread_info)
+                log.info("[%s] %s", self.user_id, self.last_action)
+                continue
 
             with self._lock:
                 stake = self.balance * self._risk_pct
@@ -844,6 +1000,8 @@ class FuturesEngine(NativeTradingEngine):
                 # the next signal scan knows whether this is a same-side
                 # repeat or a genuine flip.
                 seen_signal[pair] = direction
+                # Phase 8: count this opening toward the daily cap.
+                self._day_trades += 1
                 # If ARM kicked in, surface TP1/TP2/closepct in the log
                 # so the bot panel shows what the engine will actually do.
                 arm_tag = ""
@@ -925,6 +1083,54 @@ class FuturesEngine(NativeTradingEngine):
         except Exception as e:
             log.error("[%s] Lead Trading entry order failed: %s", self.user_id, e)
 
+    def _live_spread_too_wide(self, pair: str, expected_reward_pct: float) -> tuple[bool, dict]:
+        """Op#10 — Spread / slippage gate.
+
+        Read the current orderbook top-of-book from KuCoin Futures, compute
+        the % spread, and reject the entry if it eats more than 25% of the
+        expected reward. Returns (too_wide, info_dict).
+
+        Backtester models slippage via SLIPPAGE_BPS_*; live needs this
+        runtime check because actual spreads vary (especially on altcoins
+        during low-liquidity hours).
+        """
+        if self._mode != "live":
+            return False, {"reason": "spread check skipped — paper mode"}
+        try:
+            from .kucoin_futures_client import normalize_futures_symbol, KUCOIN_FUTURES_BASE
+            from ._kucoin_proxy import urlopen as _proxy_urlopen
+            import urllib.request as _ureq, json as _json
+            symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+            url = f"{KUCOIN_FUTURES_BASE}/api/v1/level1/orderbook?symbol={symbol}"
+            req = _ureq.Request(url)
+            with _proxy_urlopen(req, timeout=5) as r:
+                payload = _json.loads(r.read().decode())
+            data = payload.get("data") or {}
+            bid = float(data.get("bestBidPrice") or 0)
+            ask = float(data.get("bestAskPrice") or 0)
+            if bid <= 0 or ask <= 0 or ask <= bid:
+                return False, {"reason": "spread check inconclusive — bad orderbook"}
+            mid = (bid + ask) / 2.0
+            spread_pct = (ask - bid) / mid * 100.0
+            # Reject when half-spread (cost to cross) > 25% of expected reward.
+            # half-spread × 2 (in + out) gives the round-trip cost.
+            roundtrip_cost_pct = spread_pct
+            if roundtrip_cost_pct > 0.25 * expected_reward_pct:
+                return True, {
+                    "spread_pct":            round(spread_pct, 4),
+                    "expected_reward_pct":   round(expected_reward_pct, 4),
+                    "roundtrip_cost_pct":    round(roundtrip_cost_pct, 4),
+                    "reason": (
+                        f"Spread {spread_pct:.3f}% eats >25% of expected "
+                        f"reward {expected_reward_pct:.2f}% (round-trip)."
+                    ),
+                }
+            return False, {"spread_pct": round(spread_pct, 4)}
+        except Exception as e:
+            log.debug("[%s] spread check failed (%s) — allowing entry",
+                      self.user_id, e)
+            return False, {"reason": f"spread check error: {e}"}
+
     def _place_live_partial_close(self, pair: str, pos, close_pct: float, fill_price: float) -> None:
         """LIVE-mode: send a reduce-only market order to close `close_pct` of the
         position via KuCoin Lead Trading. Mirrors the partial-close booked
@@ -966,6 +1172,50 @@ class FuturesEngine(NativeTradingEngine):
                      self.user_id, close_pct * 100, resp)
         except Exception as e:
             log.error("[%s] Lead Trading TP1 partial close failed: %s", self.user_id, e)
+            return
+
+        # ── Op#9 — rewrite on-exchange TP/SL after the partial ────────────
+        # KuCoin keeps the original stops on the position until we update them.
+        # If the bot crashes between the partial close and the remainder's
+        # exit, the original SL/TP would still execute — which is fine
+        # SL-wise (limits the loss) but means TP would fire too small.
+        # Push the BE-buffered SL and TP2 to the exchange now so the remainder
+        # has correct stops even without the bot running.
+        if not isinstance(pos, FuturesPosition) or pos.tp2_price is None:
+            return
+        try:
+            from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
+            from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+            from urllib.parse import urlencode
+            import urllib.request as _ureq, json as _json
+            # KuCoin Lead Trading's TP/SL endpoint is documented as
+            # POST /api/v1/copy-trade/futures/position/risk-limit/sl-tp
+            # with body {symbol, stopLossPrice, takeProfitPrice}.
+            body = {
+                "symbol":          symbol,
+                "stopLossPrice":   str(round(pos.sl, 4)),
+                "takeProfitPrice": str(round(pos.tp2_price, 4)),
+            }
+            data = _json.dumps(body).encode()
+            ts2 = str(int(time.time() * 1000))
+            endpoint = "/api/v1/copy-trade/futures/position/risk-limit/sl-tp"
+            headers = _sign_request(
+                self._api_sec, self._api_pass, self._api_key,
+                ts2, "POST", endpoint, body_str=data.decode(),
+            )
+            headers["Content-Type"] = "application/json"
+            req2 = _ureq.Request(f"{_base}{endpoint}", data=data, headers=headers, method="POST")
+            with _proxy_urlopen(req2, timeout=15) as r2:
+                tpsl_resp = _json.loads(r2.read().decode())
+            log.info("[%s] Lead Trading TP/SL rewrite after TP1: %s",
+                     self.user_id, tpsl_resp.get("code"))
+        except Exception as e2:
+            # Non-fatal — the bot's own check_exit will still close at SL/TP
+            # on the next tick. Just log so it's visible.
+            log.warning(
+                "[%s] Could not rewrite exchange-side TP/SL after partial: %s",
+                self.user_id, e2,
+            )
 
     def _place_live_exit(self, pair: str, pos, price: float) -> None:
         """Close a futures position via KuCoin Lead Trading API."""

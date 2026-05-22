@@ -457,6 +457,9 @@ export const api = {
     // panel BEFORE the user picks Live.
     strategyPreview: (strategyId: number, timeframe: string) =>
       request<any>(`/api/strategy/${strategyId}/preview?timeframe=${encodeURIComponent(timeframe)}`),
+    // UX#15 — TF-mismatch warning (strategy's authored TF vs user's pick)
+    strategyTfCheck: (strategyId: number, executionTf: string) =>
+      request<any>(`/api/strategy/${strategyId}/tf-check?execution_tf=${encodeURIComponent(executionTf)}`),
     // Phase 6 — partial close (e.g. book 50% then leave remainder)
     partialClose: (data: { pair: string; mode: 'paper' | 'live'; close_pct: number }) =>
       request<any>('/api/futures/position/partial-close', { method: 'POST', body: JSON.stringify(data) }),
