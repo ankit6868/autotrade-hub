@@ -47,13 +47,179 @@ def _calc_liquidation_price(entry: float, direction: str, leverage: int) -> floa
 
 
 class FuturesPosition(Position):
-    """Position with leverage and liquidation tracking."""
+    """Position with leverage, liquidation tracking, and Advanced Risk
+    Management (TP1/TP2 partial-close + BE trail + trail-to-TP1).
+
+    ARM state machine
+    -----------------
+      pre_tp1   — TP from base class points at TP1 (midpoint of entry/tp2);
+                  SL is the strategy's structural stop. TP1 hit → partial
+                  close `tp1_close_pct` of size, move SL to BE-buffered
+                  price (clamped to TP1 so the remainder can't instantly
+                  stop out), set tp = tp2.
+      post_tp1  — TP points at TP2; SL is the BE level. Once price reaches
+                  midpoint(TP1, TP2) AND trail-to-TP1 is on, SL ratchets
+                  up to TP1 (one-shot). At TP2 (or trailed SL) → close
+                  the remainder and the position closes for real.
+
+    When arm_active=False (default), the class behaves exactly like the
+    legacy single-TP Position with leverage — no behaviour change.
+    """
 
     def __init__(self, *args, leverage: int = 1, **kwargs):
         super().__init__(*args, **kwargs)
         self.leverage           = leverage
         self.liquidation_price  = _calc_liquidation_price(self.entry, self.direction, leverage)
         self._market_type       = "futures"
+
+        # ── Advanced Risk Management state ──────────────────────────────
+        # Defaults are the "ARM-disabled" identity: a single-TP position
+        # that closes 100% on tp hit. configure_arm() flips these to enable
+        # partial-close / BE-trail / trail-to-TP1 behaviour.
+        self.arm_active:        bool  = False
+        self.tp1_price:         Optional[float] = None    # midpoint(entry, tp2_price)
+        self.tp2_price:         Optional[float] = None    # strategy's furthest TP
+        self.tp1_close_pct:     float = 1.0               # 0.0..1.0 — fraction closed at TP1
+        self.arm_be_mode:       str   = "leverage"        # "leverage" | "manual_pct" | "entry"
+        self.arm_be_buffer_pct: float = 1.0
+        self.arm_trail_to_tp1:  bool  = True
+        # Runtime state
+        self.tp1_hit:           bool  = False
+        self.trailed_to_tp1:    bool  = False
+        self.remaining_pct:     float = 1.0
+        self.partial_pnl_abs:   float = 0.0
+        # Audit log of partial fills — read by /api/futures/bots performance.
+        self.partial_exits:     list  = []                # list[dict(price, reason, close_pct, pnl_abs, ts)]
+
+    def configure_arm(
+        self,
+        *,
+        tp2_price: float,
+        tp1_close_pct: float,
+        arm_be_mode: str = "leverage",
+        arm_be_buffer_pct: float = 1.0,
+        arm_trail_to_tp1: bool = True,
+    ) -> None:
+        """Enable ARM on this position. Call right after construction when
+        the parent engine knows the user enabled ARM for this bot.
+
+        Side effects:
+          • self.tp1_price = midpoint(entry, tp2_price)
+          • self.tp        = tp1_price (so check_exit fires TP1 first)
+          • self.tp2_price = tp2_price (kept for post-TP1 phase)
+          • self.tp1_close_pct = sanitised into (0.01, 0.99)
+        """
+        if tp2_price is None:
+            return  # silently no-op — no TP2 to split, ARM can't engage
+        if self.direction == "long" and tp2_price <= self.entry:
+            return
+        if self.direction == "short" and tp2_price >= self.entry:
+            return
+
+        self.arm_active        = True
+        self.tp2_price         = float(tp2_price)
+        # TP1 = midpoint between entry and TP2 — matches the user spec.
+        self.tp1_price         = self.entry + (self.tp2_price - self.entry) * 0.5
+        # Override the legacy tp with TP1 so check_exit's high>=tp / low<=tp
+        # branch detects TP1 first. Once TP1 fires, the tick loop calls
+        # _book_partial_at_tp1 which moves self.tp to TP2.
+        self.tp                = self.tp1_price
+        # Input is a PERCENTAGE (e.g. 50 for 50%), matching the bot create
+        # form and the backtester's API. Convert to fraction and clamp into
+        # (0.01, 0.99) so a 100% close at TP1 can't sneak through (would
+        # make TP2 dead) and 0% can't either (would skip the partial step).
+        self.tp1_close_pct     = max(0.01, min(0.99, float(tp1_close_pct) / 100.0))
+        self.arm_be_mode       = arm_be_mode or "leverage"
+        self.arm_be_buffer_pct = float(arm_be_buffer_pct or 0.0)
+        self.arm_trail_to_tp1  = bool(arm_trail_to_tp1)
+
+    def maybe_trail_to_tp1(self, current_price: float) -> bool:
+        """One-shot SL ratchet: after TP1 has been booked and price has
+        progressed to midpoint(TP1, TP2), move SL up from BE to TP1.
+
+        Returns True if the SL was just moved (caller can log it).
+        """
+        if not (
+            self.arm_active and self.tp1_hit and self.arm_trail_to_tp1
+            and not self.trailed_to_tp1
+            and self.tp1_price is not None and self.tp2_price is not None
+        ):
+            return False
+        midpoint = self.tp1_price + (self.tp2_price - self.tp1_price) * 0.5
+        crossed = (
+            (self.direction == "long"  and current_price >= midpoint) or
+            (self.direction == "short" and current_price <= midpoint)
+        )
+        if not crossed:
+            return False
+        self.sl = self.tp1_price
+        self.trailed_to_tp1 = True
+        return True
+
+    def _compute_be_price(self) -> float:
+        """Break-even SL price per the ARM spec — same formula as the
+        backtester's _compute_be_price so live and backtest agree.
+
+        Modes:
+          • 'leverage'   — buffer = leverage / 10 (%). 20x → 2% above entry (long).
+          • 'manual_pct' — buffer = arm_be_buffer_pct (%).
+          • 'entry'      — no buffer (BE = entry).
+        """
+        if self.arm_be_mode == "leverage":
+            buffer_pct = self.leverage / 1000.0
+        elif self.arm_be_mode == "manual_pct":
+            buffer_pct = max(0.0, self.arm_be_buffer_pct or 0.0) / 100.0
+        else:
+            buffer_pct = 0.0
+        if self.direction == "long":
+            be = self.entry * (1.0 + buffer_pct)
+            # Safety clamp: BE must never sit on the wrong side of TP1, else
+            # the remainder instantly stops out for a loss right after TP1.
+            if self.tp1_price is not None and be > self.tp1_price:
+                be = self.tp1_price
+            return be
+        else:
+            be = self.entry * (1.0 - buffer_pct)
+            if self.tp1_price is not None and be < self.tp1_price:
+                be = self.tp1_price
+            return be
+
+    def book_partial_at_tp1(self, fill_price: float, ts: datetime) -> float:
+        """Realise the TP1 partial close: compute leg P&L on `tp1_close_pct`
+        of the original size, append a partial-exit record, move SL to BE
+        (clamped), and re-target tp = tp2_price.
+
+        Returns the leg P&L (caller adds to engine balance).
+
+        Idempotent — subsequent calls are no-ops since tp1_hit guards.
+        """
+        if not self.arm_active or self.tp1_hit or self.tp2_price is None:
+            return 0.0
+
+        close_pct = self.tp1_close_pct
+        leg_margin = self.size * close_pct
+        if self.direction == "long":
+            raw_pct = (fill_price - self.entry) / self.entry
+        else:
+            raw_pct = (self.entry - fill_price) / self.entry
+        leveraged_pct = raw_pct * self.leverage
+        leg_pnl = leg_margin * leveraged_pct
+
+        # Update state
+        self.partial_pnl_abs += leg_pnl
+        self.tp1_hit          = True
+        self.remaining_pct   -= close_pct
+        # Move SL to BE (clamped), re-target TP at TP2.
+        self.sl = self._compute_be_price()
+        self.tp = self.tp2_price
+        self.partial_exits.append({
+            "ts":         ts.isoformat() if ts else None,
+            "price":      round(float(fill_price), 6),
+            "reason":     "take_profit_1",
+            "close_pct":  round(float(close_pct), 4),
+            "pnl_abs":    round(float(leg_pnl), 4),
+        })
+        return leg_pnl
 
     def check_liquidation(self, price: float) -> bool:
         """Return True if current price has crossed the liquidation level."""
@@ -63,10 +229,32 @@ class FuturesPosition(Position):
             return price >= self.liquidation_price
 
     def close(self, price: float, reason: str, ts: datetime):
-        """Override: multiply raw pnl_pct by leverage."""
-        super().close(price, reason, ts)
-        self.pnl_pct *= self.leverage
-        self.pnl_abs  = self.size * (self.pnl_pct / 100)
+        """Close the position. For ARM positions, only the REMAINING fraction
+        realises the final-leg P&L; partial_pnl_abs (booked at TP1) is added
+        on top so pnl_abs reflects the total round-trip return.
+
+        For non-ARM positions, remaining_pct=1.0 and partial_pnl_abs=0.0 so
+        the math reduces to the legacy single-leg path.
+        """
+        # Compute leg P&L manually (don't call super().close which clobbers
+        # pnl_abs with size*pnl_pct/100, ignoring remaining_pct).
+        self.closed_at   = ts
+        self.exit_price  = price
+        self.exit_reason = reason
+        if self.direction == "long":
+            raw_pct = (price - self.entry) / self.entry * 100
+        else:
+            raw_pct = (self.entry - price) / self.entry * 100
+        leveraged_pct = raw_pct * self.leverage
+        remaining_margin = self.size * self.remaining_pct
+        final_leg_pnl = remaining_margin * (leveraged_pct / 100.0)
+        # Liquidation can't lose more than the leg's margin.
+        if reason == "liquidated":
+            final_leg_pnl = max(final_leg_pnl, -remaining_margin)
+        self.pnl_abs = final_leg_pnl + self.partial_pnl_abs
+        # pnl_pct reflects ROI on the FULL initial margin so the UI shows
+        # a sensible number even after a partial booking.
+        self.pnl_pct = (self.pnl_abs / self.size * 100.0) if self.size > 0 else 0.0
 
 
 class PendingOrder:
@@ -123,6 +311,14 @@ class FuturesEngine(NativeTradingEngine):
         self.action_log: list[dict] = []
         self.signal_count: int = 0
         self._winding_down: bool = False
+        # ── Advanced Risk Management config (Phase 3) ───────────────────
+        # Set by start_futures from the bot create payload. When ARM is
+        # off, these are ignored and positions use single-TP behaviour.
+        self._arm_enabled:        bool  = False
+        self._arm_tp1_close_pct:  float = 50.0           # %, sliced into (1, 99)
+        self._arm_be_mode:        str   = "leverage"
+        self._arm_be_buffer_pct:  float = 1.0
+        self._arm_trail_to_tp1:   bool  = True
 
     def wind_down(self):
         """Stop opening new positions but keep managing existing ones until all are closed."""
@@ -164,6 +360,12 @@ class FuturesEngine(NativeTradingEngine):
         kucoin_secret: str = "",
         kucoin_passphrase: str = "",
         strategy_id: int | None = None,
+        # Phase 3 — Advanced Risk Management
+        arm_enabled:        bool  = False,
+        arm_tp1_close_pct:  float = 50.0,
+        arm_be_mode:        str   = "leverage",
+        arm_be_buffer_pct:  float = 1.0,
+        arm_trail_to_tp1:   bool  = True,
         **_kwargs,
     ) -> dict:
         # Always do a clean stop before (re)starting.
@@ -190,6 +392,13 @@ class FuturesEngine(NativeTradingEngine):
         self._api_key      = kucoin_key
         self._api_sec      = kucoin_secret
         self._api_pass     = kucoin_passphrase
+        # ── ARM config — copied so every position opened by this engine
+        # inherits the same settings (Phase 3 wiring).
+        self._arm_enabled        = bool(arm_enabled)
+        self._arm_tp1_close_pct  = float(arm_tp1_close_pct)
+        self._arm_be_mode        = str(arm_be_mode or "leverage")
+        self._arm_be_buffer_pct  = float(arm_be_buffer_pct or 0.0)
+        self._arm_trail_to_tp1   = bool(arm_trail_to_tp1)
         self.balance       = wallet
         self.positions     = {}
         self.closed_trades = []
@@ -336,6 +545,58 @@ class FuturesEngine(NativeTradingEngine):
                                                   self._strategy_id, pos.db_id)
                             continue
 
+                    # ── Phase 3 — ARM trail-to-TP1 ratchet ─────────────
+                    # After TP1 has been booked and price reaches the
+                    # midpoint of (TP1, TP2), move SL up to TP1 so the
+                    # remainder can never exit below TP1.
+                    if isinstance(pos, FuturesPosition) and pos.maybe_trail_to_tp1(live_price):
+                        self.last_action = (
+                            f"ARM TRAIL {pair} {pos.direction} SL→TP1 ({pos.sl:.4f}) "
+                            f"price={live_price:.4f}"
+                        )
+                        self._log_action("arm_trail_tp1", self.last_action,
+                            pair=pair, price=live_price, new_sl=pos.sl,
+                            direction=pos.direction)
+                        log.info("[%s] %s", self.user_id, self.last_action)
+
+                    # ── Phase 3 — ARM pre-TP1 partial-close detection ──
+                    # When ARM is active AND TP1 hasn't fired yet, check
+                    # whether the current price has crossed TP1. If so,
+                    # book the partial profit, move SL to BE (clamped),
+                    # update pos.tp → tp2, and KEEP the position open.
+                    # The remainder runs on the next tick with TP2 as target.
+                    if (isinstance(pos, FuturesPosition) and pos.arm_active
+                            and not pos.tp1_hit and pos.tp1_price is not None):
+                        long_tp1_hit  = pos.direction == "long"  and live_price >= pos.tp1_price
+                        short_tp1_hit = pos.direction == "short" and live_price <= pos.tp1_price
+                        # SL hit before TP1? Fall through to standard exit.
+                        sl_hit_first  = (
+                            (pos.direction == "long"  and live_price <= pos.sl) or
+                            (pos.direction == "short" and live_price >= pos.sl)
+                        )
+                        if (long_tp1_hit or short_tp1_hit) and not sl_hit_first:
+                            leg_pnl = pos.book_partial_at_tp1(pos.tp1_price, now)
+                            self.balance += leg_pnl
+                            self.last_action = (
+                                f"PARTIAL CLOSE {pair} {pos.direction} "
+                                f"{pos.tp1_close_pct*100:.0f}% @ TP1 {pos.tp1_price:.4f} "
+                                f"P&L={leg_pnl:+.2f}  SL→{pos.sl:.4f}  target TP2={pos.tp2_price:.4f}"
+                            )
+                            self._log_action("partial_close_tp1", self.last_action,
+                                pair=pair, price=pos.tp1_price, pnl=leg_pnl,
+                                close_pct=pos.tp1_close_pct,
+                                new_sl=pos.sl, new_tp=pos.tp,
+                                direction=pos.direction)
+                            log.info("[%s] %s", self.user_id, self.last_action)
+                            # In LIVE mode, send a reduce-only partial close
+                            # to KuCoin so the real position is also reduced.
+                            if self._mode == "live":
+                                self._place_live_partial_close(pair, pos, pos.tp1_close_pct, pos.tp1_price)
+                            # Don't fall through to check_exit on this tick —
+                            # the position state has just changed; let the
+                            # next tick re-evaluate against the new SL/TP.
+                            continue
+
                     # TP/SL exit — checked every tick (5 s when positions open)
                     pos.update_trail(live_price)
                     exit_info = pos.check_exit(live_price, live_price)
@@ -347,14 +608,23 @@ class FuturesEngine(NativeTradingEngine):
                         del self.positions[trade_key]
                         # Reset to None (Phase 2 edge detection stores direction).
                         seen_signal[pair] = None
+                        # Include ARM partial-history in the summary when present.
+                        arm_summary = ""
+                        if isinstance(pos, FuturesPosition) and pos.partial_exits:
+                            arm_summary = (
+                                f" (ARM: {len(pos.partial_exits)} partial(s), "
+                                f"partial P&L={pos.partial_pnl_abs:+.2f})"
+                            )
                         self.last_action = (
                             f"CLOSED {pair} @ {exit_price:.4f} ({reason}) "
-                            f"P&L={pos.pnl_abs:+.2f} lev={getattr(pos,'leverage',1)}x"
+                            f"P&L={pos.pnl_abs:+.2f} lev={getattr(pos,'leverage',1)}x{arm_summary}"
                         )
                         self._log_action("closed", self.last_action,
                             pair=pair, price=exit_price, pnl=pos.pnl_abs,
                             direction=pos.direction, reason=reason,
-                            entry_price=pos.entry)
+                            entry_price=pos.entry,
+                            arm_partial_exits=getattr(pos, "partial_exits", None),
+                            arm_partial_pnl=getattr(pos, "partial_pnl_abs", 0.0))
                         log.info("[%s] %s", self.user_id, self.last_action)
                         _persist_closed_trade(self.user_id, pos, self._mode,
                                               self._strategy_id, pos.db_id)
@@ -551,6 +821,19 @@ class FuturesEngine(NativeTradingEngine):
                     trade_id=trade_key,
                     leverage=self._leverage,
                 )
+
+                # ── Phase 3 — configure ARM on the new position ─────────
+                # The strategy's TP (plan.tp) becomes TP2; configure_arm
+                # computes TP1 = midpoint(entry, tp2) and overrides pos.tp
+                # so the position-management loop checks TP1 first.
+                if self._arm_enabled and plan.tp is not None:
+                    pos.configure_arm(
+                        tp2_price         = plan.tp,
+                        tp1_close_pct     = self._arm_tp1_close_pct,
+                        arm_be_mode       = self._arm_be_mode,
+                        arm_be_buffer_pct = self._arm_be_buffer_pct,
+                        arm_trail_to_tp1  = self._arm_trail_to_tp1,
+                    )
                 pos.db_id = _persist_open_trade(
                     self.user_id, pos, self._mode, self._strategy_id,
                     leverage=self._leverage, market_type="futures",
@@ -561,14 +844,26 @@ class FuturesEngine(NativeTradingEngine):
                 # the next signal scan knows whether this is a same-side
                 # repeat or a genuine flip.
                 seen_signal[pair] = direction
+                # If ARM kicked in, surface TP1/TP2/closepct in the log
+                # so the bot panel shows what the engine will actually do.
+                arm_tag = ""
+                if pos.arm_active:
+                    arm_tag = (
+                        f" ARM[TP1={pos.tp1_price:.4f} TP2={pos.tp2_price:.4f} "
+                        f"close@TP1={pos.tp1_close_pct*100:.0f}% be={pos.arm_be_mode}]"
+                    )
                 self.last_action = (
                     f"OPENED futures {direction} {pair} @ {entry:.4f} "
                     f"{self._leverage}x liq={pos.liquidation_price:.4f} "
-                    f"SL={sl:.4f} TP={tp:.4f} RR={plan.rr:.2f} [{plan.source}/{self._timeframe}]"
+                    f"SL={pos.sl:.4f} TP={pos.tp:.4f} RR={plan.rr:.2f} "
+                    f"[{plan.source}/{self._timeframe}]{arm_tag}"
                 )
                 self._log_action("opened", self.last_action,
                     pair=pair, price=entry, direction=direction,
-                    leverage=self._leverage, sl=sl, tp=tp,
+                    leverage=self._leverage, sl=pos.sl, tp=pos.tp,
+                    tp1=pos.tp1_price, tp2=pos.tp2_price,
+                    arm_active=pos.arm_active,
+                    arm_tp1_close_pct=pos.tp1_close_pct if pos.arm_active else None,
                     liquidation=pos.liquidation_price, stake=stake,
                     rr=plan.rr, atr=plan.atr, risk_source=plan.source,
                     timeframe=self._timeframe,
@@ -630,6 +925,48 @@ class FuturesEngine(NativeTradingEngine):
         except Exception as e:
             log.error("[%s] Lead Trading entry order failed: %s", self.user_id, e)
 
+    def _place_live_partial_close(self, pair: str, pos, close_pct: float, fill_price: float) -> None:
+        """LIVE-mode: send a reduce-only market order to close `close_pct` of the
+        position via KuCoin Lead Trading. Mirrors the partial-close booked
+        in the local position state so the on-exchange position size matches.
+
+        Best-effort: failures are logged but don't roll back the local state.
+        The /position/tp-sl endpoint should also be re-written to TP2 by the
+        live exit path so the exchange-side SL/TP catches the remainder.
+        """
+        if self._mode != "live" or not self._api_key or close_pct <= 0:
+            return
+        try:
+            from .native_trading_engine import _kucoin_post_signed
+            from .kucoin_futures_client import normalize_futures_symbol
+            symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+            side   = "sell" if pos.direction == "long" else "buy"
+            position_side = "LONG" if pos.direction == "long" else "SHORT"
+            # Contracts in the partial leg = total contracts × close_pct, min 1.
+            full_contracts = max(1, int(pos.size * self._leverage / max(pos.entry, 1e-9) * 1000))
+            leg_contracts  = max(1, int(full_contracts * close_pct))
+            margin_mode    = self.get_symbol_margin(symbol).upper() or "ISOLATED"
+            body = {
+                "clientOid":    f"atf-tp1-{int(time.time()*1000)}",
+                "side":          side,
+                "symbol":        symbol,
+                "type":          "market",
+                "size":          leg_contracts,
+                "leverage":      self._leverage,
+                "marginMode":    margin_mode,
+                "positionSide":  position_side,
+                "reduceOnly":    True,
+            }
+            resp = _kucoin_post_signed(
+                "/api/v1/copy-trade/futures/orders", body,
+                self._api_key, self._api_sec, self._api_pass,
+                base_url=KUCOIN_FUTURES_BASE,
+            )
+            log.info("[%s] Lead Trading TP1 PARTIAL close (%.0f%%): %s",
+                     self.user_id, close_pct * 100, resp)
+        except Exception as e:
+            log.error("[%s] Lead Trading TP1 partial close failed: %s", self.user_id, e)
+
     def _place_live_exit(self, pair: str, pos, price: float) -> None:
         """Close a futures position via KuCoin Lead Trading API."""
         if self._mode != "live" or not self._api_key:
@@ -640,8 +977,13 @@ class FuturesEngine(NativeTradingEngine):
             symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
             side   = "sell" if pos.direction == "long" else "buy"
             position_side = "LONG" if pos.direction == "long" else "SHORT"
+            # ARM-aware sizing: when the position had a TP1 partial close,
+            # only the REMAINING fraction is still open on KuCoin's side.
+            # Closing the full original size would oversell and likely fail.
+            remaining_pct = getattr(pos, "remaining_pct", 1.0) or 1.0
             contract_size = pos.size * self._leverage
-            contracts     = max(1, int(contract_size / pos.entry * 1000))
+            full_contracts = max(1, int(contract_size / max(pos.entry, 1e-9) * 1000))
+            contracts     = max(1, int(full_contracts * remaining_pct))
             margin_mode = self.get_symbol_margin(symbol).upper() or "ISOLATED"
             body = {
                 "clientOid":    f"atf-exit-{int(time.time()*1000)}",

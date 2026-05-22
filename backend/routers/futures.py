@@ -2960,8 +2960,16 @@ def list_futures_bots(
                 max_position_pct=(i.risk_pct or 5.0),
                 strategy_id=i.strategy_id,
                 kucoin_key=_kk, kucoin_secret=_ks, kucoin_passphrase=_kp,
+                # Phase 3 — restore ARM config from the persisted instance row
+                arm_enabled       = bool(getattr(i, "arm_enabled", False) or False),
+                arm_tp1_close_pct = float(getattr(i, "arm_tp1_close_pct", 50.0) or 50.0),
+                arm_be_mode       = str(getattr(i, "arm_be_mode", "leverage") or "leverage"),
+                arm_be_buffer_pct = float(getattr(i, "arm_be_buffer_pct", 1.0) or 1.0),
+                arm_trail_to_tp1  = bool(getattr(i, "arm_trail_to_tp1", True)
+                                          if i.arm_trail_to_tp1 is not None else True),
             )
-            log.info("Auto-resumed bot %s for user %s", i.engine_key, user_id)
+            log.info("Auto-resumed bot %s for user %s (ARM=%s)",
+                     i.engine_key, user_id, getattr(i, "arm_enabled", False))
         except Exception as exc:
             log.warning("Failed to auto-resume bot %s: %s", i.engine_key, exc)
     # Refresh engine list after potential resumes
@@ -3090,6 +3098,12 @@ def create_futures_bot(
         leverage=leverage, timeframe=timeframe, wallet=wallet,
         stoploss=stoploss, takeprofit=takeprofit, risk_pct=max_position_pct,
         is_running=True, engine_key=engine_key,
+        # Phase 3 — persist ARM config so auto-resume keeps the same settings
+        arm_enabled       = arm_enabled,
+        arm_tp1_close_pct = arm_tp1_close_pct,
+        arm_be_mode       = arm_be_mode,
+        arm_be_buffer_pct = arm_be_buffer_pct,
+        arm_trail_to_tp1  = arm_trail_to_tp1,
     )
     db.add(instance)
     db.commit()
@@ -3108,7 +3122,10 @@ def create_futures_bot(
             except Exception:
                 pass
 
-    # Start an ISOLATED engine for this bot (supports multiple concurrent bots)
+    # Start an ISOLATED engine for this bot (supports multiple concurrent bots).
+    # Phase 3: pass ARM params so the engine wires partial-TP / BE-trail /
+    # trail-to-TP1 behaviour on every position this bot opens. When
+    # arm_enabled=False these are ignored.
     eng = futures_engine_registry.for_bot(user_id, engine_key)
     result = eng.start_futures(
         strategy_name=strategy_name, pairs=pairs, leverage=leverage,
@@ -3117,6 +3134,11 @@ def create_futures_bot(
         max_position_pct=max_position_pct,
         strategy_id=strategy_id,
         kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
+        arm_enabled        = arm_enabled,
+        arm_tp1_close_pct  = arm_tp1_close_pct,
+        arm_be_mode        = arm_be_mode,
+        arm_be_buffer_pct  = arm_be_buffer_pct,
+        arm_trail_to_tp1   = arm_trail_to_tp1,
     )
 
     log_event(db, user_id, "futures.create_bot", request, payload={

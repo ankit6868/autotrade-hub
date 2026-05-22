@@ -102,6 +102,16 @@ class StrategyInstance(Base):
     engine_key = Column(Text, unique=True)        # user_id:instance_id
     total_trades = Column(Integer, default=0)
     total_pnl = Column(Float, default=0.0)
+    # ── Advanced Risk Management (Phase 3) ─────────────────────────────
+    # Survives backend restart so auto-resume restarts bots with the same
+    # ARM config the user picked. Defaults match "ARM off" so pre-existing
+    # bots created before this column was added keep their legacy single-TP
+    # behaviour unchanged.
+    arm_enabled       = Column(Boolean, default=False)
+    arm_tp1_close_pct = Column(Float,   default=50.0)
+    arm_be_mode       = Column(Text,    default="leverage")
+    arm_be_buffer_pct = Column(Float,   default=1.0)
+    arm_trail_to_tp1  = Column(Boolean, default=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 
