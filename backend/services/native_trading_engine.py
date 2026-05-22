@@ -290,317 +290,6 @@ def _build_df(candles: list[dict]) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
-# ─────────────────────────── signal functions ─────────────────────────────
-
-def _sig_miss_candle_short(df: pd.DataFrame) -> Optional[tuple]:
-    """Returns (entry, sl, tp, 'short') or None."""
-    if len(df) < 4:
-        return None
-    i = len(df) - 1
-    prev2, prev, row = df.iloc[i-2], df.iloc[i-1], df.iloc[i]
-    if prev2["high"] >= prev2["ema5"]:
-        return None
-    if not (prev["macd_h"] < 0 and abs(prev["macd_h"]) > abs(df.iloc[i-3]["macd_h"])):
-        return None
-    if prev["close"] >= prev["open"]:
-        return None
-    if prev["high"] > prev2["high"]:
-        return None
-    if row["low"] > prev2["low"]:
-        return None
-    entry = prev2["low"]
-    sl    = prev2["high"]
-    risk  = sl - entry
-    if risk <= 0:
-        return None
-    return entry, sl, entry - 3 * risk, "short"
-
-
-def _sig_miss_candle_long(df: pd.DataFrame) -> Optional[tuple]:
-    if len(df) < 4:
-        return None
-    i = len(df) - 1
-    prev2, prev, row = df.iloc[i-2], df.iloc[i-1], df.iloc[i]
-    if prev2["low"] <= prev2["ema5"]:
-        return None
-    if not (prev["macd_h"] > 0 and abs(prev["macd_h"]) > abs(df.iloc[i-3]["macd_h"])):
-        return None
-    if prev["close"] <= prev["open"]:
-        return None
-    if prev["low"] < prev2["low"]:
-        return None
-    if row["high"] < prev2["high"]:
-        return None
-    entry = prev2["high"]
-    sl    = prev2["low"]
-    risk  = entry - sl
-    if risk <= 0:
-        return None
-    return entry, sl, entry + 3 * risk, "long"
-
-
-def _sig_macd_crossover(df: pd.DataFrame) -> Optional[tuple]:
-    """MACD crossover — LONG on bullish cross, SHORT on bearish cross."""
-    if len(df) < 3:
-        return None
-    prev, row = df.iloc[-2], df.iloc[-1]
-    e = row["close"]
-    # Bullish crossover: MACD crosses above signal → LONG
-    if prev["macd"] < prev["macd_s"] and row["macd"] > row["macd_s"]:
-        return e, e * 0.97, e * 1.09, "long"
-    # Bearish crossover: MACD crosses below signal → SHORT
-    if prev["macd"] > prev["macd_s"] and row["macd"] < row["macd_s"]:
-        return e, e * 1.03, e * 0.91, "short"
-    return None
-
-
-def _sig_rsi_bollinger(df: pd.DataFrame) -> Optional[tuple]:
-    """RSI + Bollinger Bands — LONG on oversold, SHORT on overbought."""
-    if len(df) < 20:
-        return None
-    row = df.iloc[-1]
-    e = row["close"]
-    # Oversold: RSI < 30 AND price below lower band → LONG
-    if row["rsi"] < 30 and e < row["bb_lower"]:
-        return e, e * 0.97, row["bb_mid"], "long"
-    # Overbought: RSI > 70 AND price above upper band → SHORT
-    if row["rsi"] > 70 and e > row["bb_upper"]:
-        return e, e * 1.03, row["bb_mid"], "short"
-    return None
-
-
-def _sig_ema_scalping(df: pd.DataFrame) -> Optional[tuple]:
-    """EMA scalping — LONG on golden cross, SHORT on death cross (volume confirmed)."""
-    if len(df) < 21:
-        return None
-    prev, row = df.iloc[-2], df.iloc[-1]
-    vol_ok = row["vol"] > row["vol_sma"] * 1.5
-    e = row["close"]
-    # Golden cross: EMA9 crosses above EMA21 → LONG
-    if prev["ema9"] < prev["ema21"] and row["ema9"] > row["ema21"] and vol_ok:
-        return e, e * 0.985, e * 1.015, "long"
-    # Death cross: EMA9 crosses below EMA21 → SHORT
-    if prev["ema9"] > prev["ema21"] and row["ema9"] < row["ema21"] and vol_ok:
-        return e, e * 1.015, e * 0.985, "short"
-    return None
-
-
-def _sig_simple_target(df: pd.DataFrame) -> Optional[tuple]:
-    """
-    SimpleTargetStrategy — bidirectional mean-reversion.
-
-    LONG : RSI < 55 AND price near/below EMA20, OR RSI < 38 (strong oversold)
-    SHORT: RSI > 65 AND price above EMA20 × 1.005, OR RSI > 72 (strong overbought)
-    SL/TP: 1.5% / 3.0% (2:1 reward:risk)
-    """
-    if len(df) < 21:
-        return None
-    row   = df.iloc[-1]
-    rsi   = row.get("rsi",   50.0)
-    close = row["close"]
-    ema20 = row.get("ema20", row.get("ema_20", close))
-
-    # ── LONG conditions ───────────────────────────────────────────────────────
-    near_ema = close <= ema20 * 1.005
-    oversold = rsi < 38
-    mild_dip = rsi < 55 and near_ema
-
-    if oversold or mild_dip:
-        entry = close
-        sl    = round(entry * 0.985, 8)    # -1.5% stop-loss
-        tp    = round(entry * 1.030, 8)    # +3.0% take-profit (2:1 R:R)
-        return entry, sl, tp, "long"
-
-    # ── SHORT conditions ──────────────────────────────────────────────────────
-    extended  = close >= ema20 * 0.995    # at or slightly below EMA20 from above
-    overbought  = rsi > 72               # strongly overbought
-    mild_top    = rsi > 65 and not near_ema  # elevated RSI + price extended above EMA
-
-    if overbought or mild_top:
-        entry = close
-        sl    = round(entry * 1.015, 8)    # +1.5% stop-loss
-        tp    = round(entry * 0.970, 8)    # -3.0% take-profit (2:1 R:R)
-        return entry, sl, tp, "short"
-
-    return None
-
-
-def _sig_bidirectional(df: pd.DataFrame) -> Optional[tuple]:
-    """
-    BidirectionalStrategy — explicit LONG + SHORT test strategy.
-
-    LONG entry:  EMA9 > EMA21 (uptrend) AND RSI < 60 (not extreme overbought)
-    SHORT entry: EMA9 < EMA21 (downtrend) AND RSI > 40 (not extreme oversold)
-    SL/TP: 1.5% / 3.0% (2:1 R:R) — good for futures testing
-    """
-    if len(df) < 21:
-        return None
-    row   = df.iloc[-1]
-    prev  = df.iloc[-2]
-    close = row["close"]
-    ema9  = row.get("ema9",  close)
-    ema21 = row.get("ema21", close)
-    rsi   = row.get("rsi",   50.0)
-    # Trend confirmation: require EMA alignment for at least 2 bars
-    prev_ema9  = prev.get("ema9",  close)
-    prev_ema21 = prev.get("ema21", close)
-
-    uptrend   = ema9 > ema21 and prev_ema9 > prev_ema21
-    downtrend = ema9 < ema21 and prev_ema9 < prev_ema21
-
-    if uptrend and rsi < 60:
-        entry = close
-        return entry, round(entry * 0.985, 6), round(entry * 1.030, 6), "long"
-    if downtrend and rsi > 40:
-        entry = close
-        return entry, round(entry * 1.015, 6), round(entry * 0.970, 6), "short"
-    return None
-
-
-def _sig_smc(df: pd.DataFrame) -> Optional[tuple]:
-    """
-    SMC (Smart Money Concepts) Strategy — OB/FVG/BOS model.
-
-    Matches TradingView 'SMC Strategy v2 - OB/FVG/BOS' logic:
-      1. HTF Bias  : EMA50 direction (simulates higher TF trend, fast warmup)
-      2. BOS       : price breaks 20-bar swing high/low (structure break)
-      3. FVG       : 3-candle Fair Value Gap within last 10 bars
-      4. OB        : last opposing candle before the move (Order Block)
-      5. NY Session: 13:00–21:00 UTC
-
-    Entry: OB midpoint (price pulled back to OB zone) OR FVG midpoint
-    SL   : Below swing low (LONG) / above swing high (SHORT), ~1.5%
-    TP   : 2R from entry
-
-    This 3-condition model generates similar trade frequency to TradingView.
-    """
-    if len(df) < 55:          # EMA50 warmup (50 bars minimum)
-        return None
-
-    row   = df.iloc[-1]
-    close = row["close"]
-    ts    = row.get("date", None)
-    n     = len(df)
-
-    # NY session: active 24/7 for crypto (no session filter in backtesting)
-    # Live trading can optionally add session awareness at the UI level
-
-    highs  = df["high"].values
-    lows   = df["low"].values
-    opens  = df["open"].values
-    closes = df["close"].values
-
-    # ── 1. HTF Bias: EMA50 direction ─────────────────────────────────────────
-    ema50       = df["close"].ewm(span=50, adjust=False).mean().iloc[-1]
-    htf_bullish = close > ema50
-    htf_bearish = close < ema50
-
-    # ── 2. Swing levels for SL placement (15-bar) ────────────────────────────
-    lookback   = min(15, n - 2)
-    swing_high = highs[-lookback - 1: -1].max()
-    swing_low  = lows[-lookback - 1: -1].min()
-
-    # ── 3. FVG: search last 30 bars ──────────────────────────────────────────
-    fvg_window  = min(30, n - 1)
-    bull_fvg    = False
-    bear_fvg    = False
-    bull_fvg_mid = None
-    bear_fvg_mid = None
-    for k in range(2, fvg_window + 1):
-        if k >= n:
-            break
-        j = n - k
-        if j >= 2 and highs[j - 2] < lows[j]:
-            bull_fvg = True
-            bull_fvg_mid = (highs[j - 2] + lows[j]) / 2
-            break
-    for k in range(2, fvg_window + 1):
-        if k >= n:
-            break
-        j = n - k
-        if j >= 2 and lows[j - 2] > highs[j]:
-            bear_fvg = True
-            bear_fvg_mid = (lows[j - 2] + highs[j]) / 2
-            break
-
-    # ── 4. OB: last opposing candle in last 40 bars ───────────────────────────
-    bull_ob = bear_ob = None
-    for k in range(2, min(41, n)):
-        j = n - k
-        if bull_ob is None and closes[j] < opens[j]:
-            bull_ob = (lows[j] + highs[j]) / 2
-        if bear_ob is None and closes[j] > opens[j]:
-            bear_ob = (lows[j] + highs[j]) / 2
-        if bull_ob and bear_ob:
-            break
-
-    # OB proximity: price must be AT the OB zone within 0.5%
-    near_bull_ob = (bull_ob is not None and
-                    bull_ob * 0.995 <= close <= bull_ob * 1.005)
-    near_bear_ob = (bear_ob is not None and
-                    bear_ob * 0.995 <= close <= bear_ob * 1.005)
-
-    # FVG proximity: price must be near the FVG midpoint (within 0.8%)
-    bull_fvg_valid = (bull_fvg and bull_fvg_mid is not None and
-                      abs(close - bull_fvg_mid) / bull_fvg_mid < 0.008)
-    bear_fvg_valid = (bear_fvg and bear_fvg_mid is not None and
-                      abs(close - bear_fvg_mid) / bear_fvg_mid < 0.008)
-
-    # ── 5. Entry: EMA50 bias + price AT FVG or OB zone ───────────────────────
-    long_ok  = htf_bullish and (bull_fvg_valid or near_bull_ob)
-    short_ok = htf_bearish and (bear_fvg_valid or near_bear_ob)
-
-    # ── 6. Execute entry ──────────────────────────────────────────────────────
-    if long_ok:
-        entry = bull_fvg_mid if bull_fvg_mid else (bull_ob if bull_ob else close)
-        sl    = round(swing_low * 0.999, 6)
-        risk  = entry - sl
-        if risk <= 0 or risk > entry * 0.08:
-            return None
-        tp    = round(entry + risk * 2, 6)
-        return entry, sl, tp, "long"
-
-    if short_ok:
-        entry = bear_fvg_mid if bear_fvg_mid else (bear_ob if bear_ob else close)
-        sl    = round(swing_high * 1.001, 6)
-        risk  = sl - entry
-        if risk <= 0 or risk > entry * 0.08:
-            return None
-        tp    = round(entry - risk * 2, 6)       # 2R
-        return entry, sl, tp, "short"
-
-    return None
-
-
-_STRATEGY_SIGNALS = {
-    "MissCandleShortStrategy": _sig_miss_candle_short,
-    "MissCandleLongStrategy":  _sig_miss_candle_long,
-    "MacdCrossoverStrategy":   _sig_macd_crossover,
-    "RsiBollingerStrategy":    _sig_rsi_bollinger,
-    "EmaScalpingStrategy":     _sig_ema_scalping,
-    "SimpleTargetStrategy":    _sig_simple_target,
-    "BidirectionalStrategy":   _sig_bidirectional,
-    "SMCStrategy":             _sig_smc,
-}
-
-
-def _get_signal_fn(name: str):
-    if name in _STRATEGY_SIGNALS:
-        return _STRATEGY_SIGNALS[name]
-    n = name.lower()
-    for k, fn in _STRATEGY_SIGNALS.items():
-        if k.lower() in n or n in k.lower():
-            return fn
-    if "miss" in n and "short" in n:    return _sig_miss_candle_short
-    if "miss" in n:                     return _sig_miss_candle_long
-    if "macd" in n:                     return _sig_macd_crossover
-    if "rsi" in n or "boll" in n:       return _sig_rsi_bollinger
-    if "bidir" in n or "two" in n:      return _sig_bidirectional
-    if "smc" in n or "smart" in n or "order block" in n or "ob" == n: return _sig_smc
-    if "simple" in n or "target" in n:  return _sig_simple_target
-    return _sig_simple_target   # default fallback
-
-
 # ─────────────────────────── Strategy-runner integration ──────────────────
 #
 # This is the "Phase 2" plumbing — make the LIVE/PAPER engine execute the
@@ -618,6 +307,20 @@ def _get_signal_fn(name: str):
 # or the code raises), we gracefully fall back to the legacy name-matched
 # function so existing built-in strategies keep working.
 
+class StrategyCompileError(RuntimeError):
+    """Raised when the engine can't run the user's strategy code.
+
+    The previous version (pre spot-purge) silently fell back to a fuzzy
+    name-matched legacy signal function when the user's `generated_code`
+    failed to compile. That meant bots could run live with a completely
+    different strategy than the user authored — exactly the "silent
+    fallback" bug the PDF §1 was written to eliminate.
+
+    After the spot purge there's only one truth: strategy_runner must be
+    able to evaluate the code. If it can't, the bot refuses to start and
+    surfaces the compile error in the API response + action_log."""
+
+
 def build_strategy_signal_fn(
     *,
     strategy_id:   int | None,
@@ -632,9 +335,15 @@ def build_strategy_signal_fn(
     Returns a callable with shape signal_fn(df, i) -> None | tuple, where the
     tuple is (entry, sl, tp, direction) or (entry, sl, tp, tp2, direction).
 
-    On failure to compile/execute the user's code, returns a legacy adapter
-    around _get_signal_fn(name) so the engine keeps trading rather than
-    silently going dead.
+    Fail-fast: raises StrategyCompileError when:
+      • strategy_id is None or no DB row found, OR
+      • the row's generated_code is empty / null, OR
+      • strategy_runner.evaluate_strategy raises any exception.
+
+    There is NO legacy fallback. The fuzzy name-matched signal dict
+    (_STRATEGY_SIGNALS) and _get_signal_fn helper were removed alongside
+    the spot trading stack — every bot must run its own strategy code,
+    period.
 
     Diagnostics (helpful for debugging "why isn't my strategy firing"):
       • df.attrs["strategy_class"] — class name that ran
@@ -643,63 +352,57 @@ def build_strategy_signal_fn(
       • df.attrs["class_take_profit_pct"] — class-declared TP (if any)
     Attached to the returned signal_fn as `.diagnostics` dict.
     """
-    diagnostics: dict[str, object] = {"path": "legacy", "strategy_name": strategy_name}
+    if strategy_id is None:
+        raise StrategyCompileError(
+            f"Strategy '{strategy_name}' has no strategy_id — engine refuses to "
+            "start without a DB-resolvable strategy (no more legacy name-matched "
+            "fallback)."
+        )
 
-    # ── Try the strategy_runner path first (compile + execute) ───────────
-    if strategy_id is not None:
-        try:
-            from backend.models import SessionLocal
-            from backend.models.strategy import Strategy
-            from backend.services.strategy_runner import (
-                evaluate_strategy, make_signal_fn_from_df,
-            )
-            from sqlalchemy import select as _select
+    from backend.models import SessionLocal
+    from backend.models.strategy import Strategy
+    from backend.services.strategy_runner import (
+        evaluate_strategy, make_signal_fn_from_df,
+    )
+    from sqlalchemy import select as _select
 
-            with SessionLocal() as db:
-                strat = db.execute(
-                    _select(Strategy).where(Strategy.id == strategy_id)
-                ).scalar_one_or_none()
+    with SessionLocal() as db:
+        strat = db.execute(
+            _select(Strategy).where(Strategy.id == strategy_id)
+        ).scalar_one_or_none()
 
-            if strat and strat.generated_code:
-                df_with_signals = evaluate_strategy(strat.generated_code, df)
-                sig_fn = make_signal_fn_from_df(
-                    df_with_signals, leverage, stoploss_pct, take_profit_pct,
-                )
-                diagnostics.update({
-                    "path":             "strategy_runner",
-                    "strategy_class":   df_with_signals.attrs.get("strategy_class"),
-                    "signal_columns":   df_with_signals.attrs.get("signal_columns", []),
-                    "class_sl_pct":     df_with_signals.attrs.get("class_stoploss_pct"),
-                    "class_tp_pct":     df_with_signals.attrs.get("class_take_profit_pct"),
-                })
-                sig_fn.diagnostics = diagnostics  # type: ignore[attr-defined]
-                return sig_fn
-        except Exception as e:
-            # User's code failed to compile/execute. Log loud (this is
-            # important — a silently broken strategy is the bug we just
-            # finished fixing) but keep the engine alive.
-            log.warning(
-                "build_strategy_signal_fn: strategy_id=%s name=%s failed via strategy_runner: %s — falling back to legacy name-matched signal",
-                strategy_id, strategy_name, e,
-            )
-            diagnostics["error"] = str(e)
+    if strat is None:
+        raise StrategyCompileError(
+            f"Strategy id={strategy_id} not found in DB — refusing to start engine."
+        )
+    if not strat.generated_code or not strat.generated_code.strip():
+        raise StrategyCompileError(
+            f"Strategy '{strat.name}' (id={strategy_id}) has no generated_code. "
+            "Run /api/strategy/{id}/regenerate or re-upload."
+        )
 
-    # ── Legacy adapter: wrap the old _get_signal_fn(name) into (df, i) shape ──
-    legacy = _get_signal_fn(strategy_name)
+    try:
+        df_with_signals = evaluate_strategy(strat.generated_code, df)
+    except Exception as e:
+        # Re-raise as StrategyCompileError so the caller can show a clean
+        # message and refuse to open trades.
+        raise StrategyCompileError(
+            f"Strategy '{strat.name}' (id={strategy_id}) compile failed: {e}"
+        ) from e
 
-    def _legacy_adapter(df_, i):
-        # Legacy signal_fns inspect the latest closed bar themselves and
-        # ignore the index argument. We just pass df_ through.
-        try:
-            return legacy(df_)
-        except Exception as e:
-            log.warning(
-                "legacy signal fn %s raised: %s", strategy_name, e,
-            )
-            return None
-
-    _legacy_adapter.diagnostics = diagnostics  # type: ignore[attr-defined]
-    return _legacy_adapter
+    sig_fn = make_signal_fn_from_df(
+        df_with_signals, leverage, stoploss_pct, take_profit_pct,
+    )
+    sig_fn.diagnostics = {  # type: ignore[attr-defined]
+        "path":           "strategy_runner",
+        "strategy_id":    strategy_id,
+        "strategy_name":  strategy_name,
+        "strategy_class": df_with_signals.attrs.get("strategy_class"),
+        "signal_columns": df_with_signals.attrs.get("signal_columns", []),
+        "class_sl_pct":   df_with_signals.attrs.get("class_stoploss_pct"),
+        "class_tp_pct":   df_with_signals.attrs.get("class_take_profit_pct"),
+    }
+    return sig_fn
 
 
 # ─────────────────────────── position ─────────────────────────────────────
@@ -852,93 +555,12 @@ class NativeTradingEngine:
                 "pid": None,   # no subprocess
             }
 
-    def start_paper(
-        self,
-        strategy_name: str,
-        pairs: list[str],
-        timeframe: str = "15m",
-        stoploss: float = -0.03,
-        wallet: float = 1000.0,
-        max_open_trades: int = 3,
-        max_position_pct: float = 5.0,
-        trailing_stop_pct: float = 0.0,
-        take_profit_pct: float = 0.0,
-        **_kwargs,
-    ) -> dict:
-        # Clean stop before (re)starting — prevents "already running" deadlock
-        self._stop_evt.set()
-        if self._thread is not None:
-            self._thread.join(timeout=3)
-            self._thread = None
-        self._stop_evt.clear()
-        self._strategy     = strategy_name
-        self._strategy_id  = _kwargs.get("strategy_id", None)
-        self._pairs        = pairs
-        self._timeframe    = timeframe
-        self._stoploss     = stoploss
-        self._take_profit  = take_profit_pct / 100.0 if take_profit_pct else 0.015
-        self._wallet       = wallet
-        self._mode         = "paper"
-        self._max_open     = max_open_trades
-        self._risk_pct     = max_position_pct / 100.0
-        self.balance       = wallet
-        self.positions     = {}
-        self.closed_trades = []
-        self.ticks = self.errors = 0
-        self._stop_evt.clear()
-        self._thread = threading.Thread(
-            target=self._run_loop, daemon=True, name=f"engine-{self.user_id}"
-        )
-        self._thread.start()
-        self.started_at = datetime.now(timezone.utc)
-        return {
-            "started": True, "mode": "paper", "pid": None,
-            "strategy": strategy_name, "user_id": self.user_id,
-            "engine": "native_python",
-        }
-
-    def start_live(
-        self,
-        strategy_name: str,
-        pairs: list[str],
-        timeframe: str,
-        stoploss: float,
-        kucoin_key: str,
-        kucoin_secret: str,
-        kucoin_passphrase: str,
-        wallet: float = 1000.0,
-        max_open_trades: int = 3,
-        max_position_pct: float = 5.0,
-        **_kwargs,
-    ) -> dict:
-        if self.is_running:
-            return {"error": "Engine already running. Stop it first."}
-        self._strategy  = strategy_name
-        self._pairs     = pairs
-        self._timeframe = timeframe
-        self._stoploss  = stoploss
-        self._wallet    = wallet
-        self._mode      = "live"
-        self._max_open  = max_open_trades
-        self._risk_pct  = max_position_pct / 100.0
-        self._api_key   = kucoin_key
-        self._api_sec   = kucoin_secret
-        self._api_pass  = kucoin_passphrase
-        self.balance    = wallet
-        self.positions  = {}
-        self.closed_trades = []
-        self.ticks = self.errors = 0
-        self._stop_evt.clear()
-        self._thread = threading.Thread(
-            target=self._run_loop, daemon=True, name=f"engine-{self.user_id}"
-        )
-        self._thread.start()
-        self.started_at = datetime.now(timezone.utc)
-        return {
-            "started": True, "mode": "live", "pid": None,
-            "strategy": strategy_name, "user_id": self.user_id,
-            "engine": "native_python",
-        }
+    # ── Spot-trading methods deleted in the spot purge ──────────────
+    #
+    # All spot start/run/tick methods (start_paper, start_live,
+    # _run_loop, _tick_continuous, _tick, _process_pair,
+    # _place_live_entry, _place_live_exit, manual_entry) were removed.
+    # FuturesEngine subclass implements the futures-only equivalents.
 
     def stop(self) -> dict:
         if not self.is_running:
@@ -948,402 +570,6 @@ class NativeTradingEngine:
         mode = self._mode
         return {"stopped": True, "mode": mode, "user_id": self.user_id}
 
-    def get_trades(self) -> list[dict]:
-        with self._lock:
-            result = []
-            for t in self.closed_trades:
-                result.append({
-                    "pair":        t.pair,
-                    "direction":   t.direction,
-                    "open_rate":   round(t.entry, 6),
-                    "close_rate":  round(t.exit_price or t.entry, 6),
-                    "profit_pct":  round(t.pnl_pct, 3),
-                    "profit_abs":  round(t.pnl_abs, 4),
-                    "open_date":   str(t.opened_at),
-                    "close_date":  str(t.closed_at),
-                    "exit_reason": t.exit_reason,
-                    "stake":       round(t.size, 2),
-                })
-            return result
-
-    def get_open_positions(self) -> list[dict]:
-        with self._lock:
-            out = []
-            for p in self.positions.values():
-                # Include futures-specific fields if this is a FuturesPosition
-                liq = getattr(p, "liquidation_price", None)
-                lev = getattr(p, "leverage", 1)
-                out.append({
-                    "pair":              p.pair,
-                    "direction":         p.direction,
-                    "entry":             round(p.entry, 6),
-                    "sl":                round(p.effective_sl, 6),
-                    "tp":                round(p.tp, 6),
-                    "stake":             round(p.size, 2),
-                    "opened_at":         str(p.opened_at),
-                    "leverage":          lev,
-                    "liquidation_price": round(liq, 6) if liq else None,
-                })
-            return out
-
-    def manual_entry(self, pair: str, direction: str = "long",
-                     stake_override: float = 0) -> dict:
-        """Immediately enter a paper position at the current market price.
-
-        Used by the 'Buy Now / Sell Now' manual trade buttons on the UI.
-        Fetches the current price from KuCoin, computes SL/TP from the
-        configured stoploss (3%), then records the position exactly as the
-        automated loop would.
-        """
-        try:
-            symbol = pair.replace("/", "-")
-            data = _kucoin_get(f"/api/v1/market/orderbook/level1", {"symbol": symbol})
-            if str(data.get("code")) != "200000":
-                return {"error": f"KuCoin price error: {data.get('msg')}"}
-            price = float(data["data"]["price"])
-        except Exception as e:
-            return {"error": f"Could not fetch price for {pair}: {e}"}
-
-        stake = stake_override or self.balance * self._risk_pct
-        if stake <= 0 or stake > self.balance:
-            return {"error": "Insufficient balance"}
-
-        sl_dist = price * abs(self._stoploss)   # e.g. 3% of price
-        if direction == "long":
-            sl = price - sl_dist
-            tp = price + sl_dist * 3             # 1:3 R:R
-        else:
-            sl = price + sl_dist
-            tp = price - sl_dist * 3
-
-        with self._lock:
-            if pair in self.positions:
-                return {"error": f"Already have an open position in {pair}"}
-            pos = Position(
-                pair=pair, direction=direction,
-                entry=price, sl=sl, tp=tp, size=stake,
-                opened_at=datetime.now(timezone.utc),
-            )
-            pos.db_id = _persist_open_trade(self.user_id, pos, self._mode, self._strategy_id)
-            self.positions[pair] = pos
-            self.balance -= stake
-
-        return {
-            "entered": True,
-            "pair": pair,
-            "direction": direction,
-            "entry": round(price, 6),
-            "sl": round(sl, 6),
-            "tp": round(tp, 6),
-            "stake": round(stake, 2),
-            "mode": self._mode,
-        }
-
-    # ── internal loop ───────────────────────────────────────────────────
-
-    def _run_loop(self):
-        """Adaptive trading loop.
-
-        Two speeds:
-          • FAST (5 s)  — when positions are open: catches TP/SL the moment
-                          price crosses the level, no waiting for next candle.
-          • SLOW (60 s) — when flat: scans for entry signals.  Candle signals
-                          are deduplicated so the same candle never fires twice.
-
-        Rate-limit note: KuCoin free tier allows ~30 req/s per IP.
-        At 5 s per pair-tick we use ~1 req/pair/tick — well within limits.
-        """
-        signal_fn = _get_signal_fn(self._strategy)
-        log.info("[%s] engine started — strategy=%s pairs=%s mode=%s",
-                 self.user_id, self._strategy, self._pairs, self._mode)
-
-        seen_signal:      dict[str, bool]  = {}   # pair → acted on current signal
-        last_signal_ts:   dict[str, float] = {}   # pair → epoch of last signal check
-        SIGNAL_INTERVAL = 60.0                    # seconds between signal scans
-
-        while not self._stop_evt.is_set():
-            try:
-                now_ts = time.time()
-                # Run a full tick (TP/SL + optional signal scan)
-                self._tick_continuous(
-                    signal_fn, seen_signal,
-                    last_signal_ts=last_signal_ts,
-                    signal_interval=SIGNAL_INTERVAL,
-                )
-                # Update last signal check time for each pair
-                for pair in self._pairs:
-                    last_signal_ts.setdefault(pair, 0.0)
-                    if (now_ts - last_signal_ts[pair]) >= SIGNAL_INTERVAL:
-                        last_signal_ts[pair] = now_ts
-
-            except Exception as exc:
-                with self._lock:
-                    self.errors += 1
-                    self.last_action = f"error: {exc}"
-                log.warning("[%s] engine error: %s", self.user_id, exc)
-                self._stop_evt.wait(min(60, 5 * self.errors))
-                continue
-
-            # Adaptive sleep:
-            #  • 5 s  when positions are open → instant TP/SL response
-            #  • 60 s when flat              → just scanning for signals
-            with self._lock:
-                has_open = bool(self.positions)
-            self._stop_evt.wait(5 if has_open else 60)
-
-        log.info("[%s] engine stopped", self.user_id)
-
-    def _get_live_price(self, pair: str) -> Optional[float]:
-        """Fetch the current ticker price from KuCoin (no candle needed)."""
-        try:
-            symbol = pair.replace("/", "-")
-            data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": symbol})
-            if str(data.get("code")) == "200000":
-                price = float(data["data"]["price"])
-                self._last_prices[pair] = price   # cache for status / unrealized P&L
-                return price
-        except Exception:
-            pass
-        return self._last_prices.get(pair)  # return stale price rather than None
-
-    def _tick_continuous(self, signal_fn, seen_signal: dict,
-                         last_signal_ts: dict | None = None,
-                         signal_interval: float = 60.0):
-        """One adaptive tick — always checks TP/SL, scans entry signals when due.
-
-        Args:
-            signal_fn:       Strategy signal function.
-            seen_signal:     Per-pair flag — True while current signal is active.
-            last_signal_ts:  Per-pair epoch of last signal scan (None = always scan).
-            signal_interval: Minimum seconds between signal scans (default 60 s).
-        """
-        import time as _time
-        now_epoch = _time.time()
-
-        for pair in self._pairs:
-            if self._stop_evt.is_set():
-                return
-
-            # ── 1. Fetch live price (always — needed for TP/SL) ────────
-            live_price = self._get_live_price(pair)
-            if live_price is None:
-                continue
-
-            now = datetime.now(timezone.utc)
-
-            with self._lock:
-                self.ticks += 1
-
-                # ── 2. Manage ALL open positions for this pair ──────────
-                pair_positions = [
-                    (k, p) for k, p in self.positions.items() if p.pair == pair
-                ]
-                for trade_key, pos in pair_positions:
-                    pos.update_trail(live_price)
-                    exit_info = pos.check_exit(live_price, live_price)
-                    if exit_info:
-                        exit_price, reason = exit_info
-                        pos.close(exit_price, reason, now)
-                        self.balance += pos.pnl_abs
-                        self.closed_trades.append(pos)
-                        del self.positions[trade_key]
-                        seen_signal[pair] = False   # allow re-entry
-                        self.last_action = (
-                            f"CLOSED {pair} {pos.direction} @ {exit_price:.4f} "
-                            f"({reason}) P&L={pos.pnl_abs:+.2f} USDT"
-                        )
-                        log.info("[%s] %s", self.user_id, self.last_action)
-                        _persist_closed_trade(
-                            self.user_id, pos, self._mode,
-                            self._strategy_id, pos.db_id,
-                        )
-                        if self._mode == "live":
-                            self._place_live_exit(pair, pos, exit_price)
-
-                # ── 3. Guard: skip signal scan if at position limits ────
-                if len(self.positions) >= self._max_open:
-                    continue
-                existing_for_pair = sum(
-                    1 for p in self.positions.values() if p.pair == pair
-                )
-                if existing_for_pair >= getattr(self, '_max_per_pair', 2):
-                    continue
-
-            # ── 4. Signal scan — only when interval has elapsed ─────────
-            if last_signal_ts is not None:
-                elapsed = now_epoch - last_signal_ts.get(pair, 0.0)
-                if elapsed < signal_interval:
-                    continue   # too soon — skip candle fetch this tick
-
-            try:
-                candles = _fetch_candles(pair.replace("/", "-"), self._timeframe)
-            except Exception as e:
-                log.warning("[%s] candle fetch %s: %s", self.user_id, pair, e)
-                continue
-
-            if not candles:
-                continue
-
-            df = _build_df(candles)
-            if df.empty:
-                continue
-
-            sig = signal_fn(df)
-            if sig is None:
-                seen_signal[pair] = False
-                continue
-
-            # Signal fired — enter at LIVE price (not candle close)
-            entry_strategy, sl_strategy, tp_strategy, direction = sig
-
-            # Use live price as entry for immediate fill
-            entry = live_price
-            # Keep strategy-derived SL/TP distances, shift to live price
-            sl_dist = abs(entry_strategy - sl_strategy)
-            tp_dist = abs(tp_strategy - entry_strategy)
-            if direction == "long":
-                sl = entry - sl_dist
-                tp = entry + tp_dist
-            else:
-                sl = entry + sl_dist
-                tp = entry - tp_dist
-
-            risk_pct = sl_dist / entry if entry > 0 else 0
-            if risk_pct > abs(self._stoploss) * 2:
-                continue
-
-            with self._lock:
-                stake = self.balance * self._risk_pct
-                if stake < 1.0 or stake > self.balance:
-                    continue
-                # Unique trade key: pair + timestamp (allows multiple per pair)
-                trade_key = f"{pair}#{int(now.timestamp())}"
-                pos = Position(
-                    pair=pair, direction=direction,
-                    entry=entry, sl=sl, tp=tp, size=stake,
-                    opened_at=now,
-                    trade_id=trade_key,
-                )
-                pos.db_id = _persist_open_trade(self.user_id, pos, self._mode, self._strategy_id)
-                self.positions[trade_key] = pos
-                self.balance -= stake
-                seen_signal[pair] = True
-                self.last_action = (
-                    f"OPENED {direction} {pair} @ {entry:.4f} "
-                    f"SL={sl:.4f} TP={tp:.4f} stake={stake:.2f}"
-                )
-                log.info("[%s] %s", self.user_id, self.last_action)
-                if self._mode == "live":
-                    self._place_live_entry(pair, pos)
-
-    # ── legacy tick kept for compatibility ─────────────────────────────
-    def _tick(self, signal_fn, seen_ts: dict, tf_secs: int):
-        """Unused — kept for backwards compat. Bot now uses _tick_continuous."""
-        pass
-
-    def _process_pair(self, pair: str, df: pd.DataFrame, signal_fn):
-        """Unused — logic moved into _tick_continuous."""
-        row = df.iloc[-1]
-        hi, lo = row["high"], row["low"]
-        ts_dt  = row["date"]
-
-        if pair in self.positions:
-            pos = self.positions[pair]
-            pos.update_trail(row["close"])
-            exit_info = pos.check_exit(hi, lo)
-            if exit_info:
-                exit_price, reason = exit_info
-                pos.close(exit_price, reason, ts_dt)
-                self.balance += pos.pnl_abs
-                self.closed_trades.append(pos)
-                del self.positions[pair]
-                self.last_action = (
-                    f"closed {pair} {pos.direction} @ {exit_price:.4f} "
-                    f"({reason}) P&L={pos.pnl_abs:+.2f}"
-                )
-                log.info("[%s] %s", self.user_id, self.last_action)
-                _persist_closed_trade(self.user_id, pos, self._mode, self._strategy_id, pos.db_id)
-                if self._mode == "live":
-                    self._place_live_exit(pair, pos, exit_price)
-            return
-
-        if len(self.positions) >= self._max_open:
-            return
-
-        sig = signal_fn(df)
-        if sig is None:
-            return
-
-        entry, sl, tp, direction = sig
-        risk_pct = abs(entry - sl) / entry
-        if risk_pct > abs(self._stoploss) * 2:
-            return
-
-        stake = self.balance * self._risk_pct
-        if stake < 1.0 or stake > self.balance:
-            return
-
-        pos = Position(
-            pair=pair, direction=direction,
-            entry=entry, sl=sl, tp=tp, size=stake,
-            opened_at=ts_dt,
-        )
-        pos.db_id = _persist_open_trade(self.user_id, pos, self._mode, self._strategy_id)
-        self.positions[pair] = pos
-        self.balance -= stake
-        self.last_action = (
-            f"opened {direction} {pair} @ {entry:.4f} "
-            f"SL={sl:.4f} TP={tp:.4f} stake={stake:.2f}"
-        )
-        log.info("[%s] %s", self.user_id, self.last_action)
-        if self._mode == "live":
-            self._place_live_entry(pair, pos)
-
-    # ── live order execution ─────────────────────────────────────────────
-
-    def _place_live_entry(self, pair: str, pos: Position):
-        """Place a real market order on KuCoin."""
-        try:
-            symbol = pair.replace("/", "-")
-            side   = "buy" if pos.direction == "long" else "sell"
-            body   = {
-                "clientOid": f"at-{int(time.time()*1000)}",
-                "side":       side,
-                "symbol":     symbol,
-                "type":       "market",
-                "funds":      str(round(pos.size, 4)),
-            }
-            resp = _kucoin_post_signed(
-                "/api/v1/orders", body,
-                self._api_key, self._api_sec, self._api_pass
-            )
-            log.info("[%s] live ENTRY order: %s", self.user_id, resp)
-        except Exception as e:
-            log.error("[%s] live entry order failed: %s", self.user_id, e)
-
-    def _place_live_exit(self, pair: str, pos: Position, price: float):
-        """Place a closing market order on KuCoin."""
-        try:
-            symbol = pair.replace("/", "-")
-            side   = "sell" if pos.direction == "long" else "buy"
-            # Get current holdings for this pair
-            resp = _kucoin_post_signed(
-                "/api/v1/orders",
-                {
-                    "clientOid": f"at-exit-{int(time.time()*1000)}",
-                    "side":       side,
-                    "symbol":     symbol,
-                    "type":       "market",
-                    "funds":      str(round(pos.size, 4)),
-                },
-                self._api_key, self._api_sec, self._api_pass
-            )
-            log.info("[%s] live EXIT order: %s", self.user_id, resp)
-        except Exception as e:
-            log.error("[%s] live exit order failed: %s", self.user_id, e)
-
-
-# ─────────────────────────── registry ─────────────────────────────────────
 
 class NativeTradingRegistry:
     """Process-wide registry of per-user NativeTradingEngine instances.

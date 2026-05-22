@@ -1,162 +1,134 @@
-import httpx
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+"""
+/api/market/* — public market-data endpoints (no KuCoin credentials needed).
 
-from backend.models import get_db, Config
-from backend.utils.encryption import decrypt, DecryptError
-from backend.utils.clerk_auth import get_user_id
-from backend.services.kucoin_client import KuCoinClient
-from backend.services import kucoin_indicators
+Slimmed down after the spot purge — provides ONLY what the futures terminal
+and futures backtest UI need:
 
+    GET /api/market/pairs                — list of tradable USDT-margined pairs
+    GET /api/market/price/{pair}         — current mark/last price
+    GET /api/market/ohlcv/{pair}         — candlestick array for charts
+
+The legacy spot endpoints (/api/market/candles, /api/market/signals) and
+all opportunity-scanner / TradingView signal-monitor endpoints were
+removed alongside the spot trading stack.
+"""
+from __future__ import annotations
+
+import json
+import urllib.parse
+import urllib.request
+import urllib.error
+import logging
+from datetime import datetime, timezone
+
+from fastapi import APIRouter
+from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+
+log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/market", tags=["market"])
 
+KUCOIN_FUTURES_BASE = "https://api-futures.kucoin.com"
+KUCOIN_SPOT_BASE    = "https://api.kucoin.com"   # used ONLY for the pair-list discovery endpoint
 
-def _get_kucoin_client(db: Session, user_id: str) -> KuCoinClient:
-    config = db.execute(
-        select(Config).where(Config.user_id == user_id).limit(1)
-    ).scalar_one_or_none()
-    if not config or not config.kucoin_key_enc:
-        raise ValueError("KuCoin not configured")
-    try:
-        return KuCoinClient(
-            api_key=decrypt(config.kucoin_key_enc, user_id),
-            api_secret=decrypt(config.kucoin_secret_enc, user_id),
-            passphrase=decrypt(config.kucoin_passphrase_enc, user_id),
-        )
-    except DecryptError:
-        raise ValueError(
-            "Your API credentials could not be decrypted. "
-            "Please go to Setup and re-enter your KuCoin API keys."
-        )
+# KuCoin Futures kline granularity is in MINUTES (not seconds — fixed in commit f6003ff).
+TF_MINUTES = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "8h": 480, "12h": 720,
+    "1d": 1440, "1w": 10080,
+}
+
+
+def _kc_get(path: str, base: str = KUCOIN_FUTURES_BASE, timeout: int = 8) -> dict:
+    """Authless GET wrapped through the rotating webshare proxy."""
+    req = urllib.request.Request(f"{base}{path}", method="GET")
+    with _proxy_urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
 
 
 @router.get("/pairs")
-async def get_pairs(
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_user_id),
-):
-    """Return all tradeable KuCoin USDT pairs using the public API (no credentials needed)."""
-    try:
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.get("https://api.kucoin.com/api/v2/symbols")
-            data = resp.json()
-        if str(data.get("code")) == "200000":
-            usdt_pairs = sorted([
-                f"{s['baseCurrency']}/{s['quoteCurrency']}"
-                for s in data.get("data", [])
-                if s.get("quoteCurrency") == "USDT" and s.get("enableTrading")
-            ])
-            return {"pairs": usdt_pairs}
-    except Exception:
-        pass
+async def list_pairs():
+    """Return the list of USDT-margined perp contracts the user can trade.
 
-    # Fallback: use authenticated KuCoin client if public API fails
+    Display format is BTC/USDT (slash) — the UI converts to BTCUSDTM at
+    order-placement time via normalize_futures_symbol().
+    """
     try:
-        kucoin = _get_kucoin_client(db, user_id)
-        symbols = await kucoin.get_symbols()
-        usdt_pairs = [s for s in symbols if s.endswith("/USDT")]
-        return {"pairs": sorted(usdt_pairs)}
-    except ValueError as e:
-        return {"pairs": [], "error": str(e)}
+        data = _kc_get("/api/v1/contracts/active")
+        if str(data.get("code")) != "200000":
+            return {"pairs": ["BTC/USDT", "ETH/USDT", "SOL/USDT"], "source": "fallback"}
+        contracts = data.get("data") or []
+        pairs: list[str] = []
+        for c in contracts:
+            symbol = c.get("symbol", "")
+            # KuCoin Futures uses {BASE}USDTM, except for BTC which is XBTUSDTM.
+            if symbol.endswith("USDTM"):
+                base = symbol[:-5].replace("XBT", "BTC")
+                pairs.append(f"{base}/USDT")
+        # Stable ordering — BTC/ETH first, alphabetical after.
+        priority = ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+        out = [p for p in priority if p in pairs]
+        out += sorted(p for p in pairs if p not in priority)
+        return {"pairs": out, "count": len(out), "source": "kucoin_futures"}
+    except Exception as e:
+        log.warning("market.pairs fallback: %s", e)
+        return {"pairs": ["BTC/USDT", "ETH/USDT", "SOL/USDT"], "source": "fallback", "error": str(e)}
 
 
 @router.get("/price/{pair:path}")
-async def get_price(
-    pair: str,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_user_id),
-):
+async def get_price(pair: str):
+    """Current mark/last price for `pair` (e.g. BTC/USDT)."""
+    sym = pair.replace("/", "")
+    if not sym.endswith("USDTM"):
+        sym = sym.replace("USDT", "USDTM").replace("BTCUSDTM", "XBTUSDTM")
     try:
-        client = _get_kucoin_client(db, user_id)
-        ticker = await client.get_ticker(pair)
+        data = _kc_get(f"/api/v1/ticker?symbol={sym}")
+        if str(data.get("code")) != "200000":
+            return {"pair": pair, "error": data.get("msg", "no_data")}
+        d = data.get("data") or {}
+        # KuCoin returns price as string; convert and round.
         return {
-            "pair": pair,
-            "price": float(ticker.get("price", 0)),
-            "bestBid": float(ticker.get("bestBid", 0)),
-            "bestAsk": float(ticker.get("bestAsk", 0)),
+            "pair":      pair,
+            "price":     str(float(d.get("price", 0) or 0)),
+            "best_bid":  float(d.get("bestBidPrice", 0) or 0),
+            "best_ask":  float(d.get("bestAskPrice", 0) or 0),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }
     except Exception as e:
         return {"pair": pair, "error": str(e)}
 
 
-@router.get("/candles/{pair:path}")
-async def get_candles(
-    pair: str,
-    kline_type: str = "15min",
-    start: int = None,
-    end: int = None,
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_user_id),
-):
-    try:
-        client = _get_kucoin_client(db, user_id)
-        candles = await client.get_candles(pair, kline_type, start, end)
-        return {"pair": pair, "candles": candles}
-    except Exception as e:
-        return {"pair": pair, "candles": [], "error": str(e)}
-
-
 @router.get("/ohlcv/{pair:path}")
-async def get_ohlcv_public(pair: str, timeframe: str = "15m", limit: int = 120):
-    """Public candlestick endpoint — no KuCoin credentials needed.
-    Returns [{time, open, high, low, close, volume}] for lightweight-charts.
-    Uses _fetch_klines which returns a DataFrame with unix-second 'time' column."""
+async def get_ohlcv(pair: str, timeframe: str = "15m", limit: int = 120):
+    """Candlestick array suitable for lightweight-charts. Pulls from KuCoin
+    Futures' /api/v1/kline/query endpoint. Returns [{time, open, high, low,
+    close, volume}, ...] sorted oldest → newest."""
+    sym = pair.replace("/", "")
+    if not sym.endswith("USDTM"):
+        sym = sym.replace("USDT", "USDTM").replace("BTCUSDTM", "XBTUSDTM")
+    gran = TF_MINUTES.get(timeframe, 15)
     try:
-        from backend.services.kucoin_indicators import _fetch_klines
-        # _fetch_klines accepts the display pair format e.g. "BTC/USDT"
-        df = _fetch_klines(pair, timeframe)
-        if df is None or df.empty:
-            return {"pair": pair, "candles": [], "error": "no_data"}
-        # Trim to requested limit (already sorted oldest→newest)
-        if limit and len(df) > limit:
-            df = df.tail(limit).reset_index(drop=True)
-        candles = [
-            {
-                "time":   int(row["time"]),             # unix seconds — already correct
-                "open":   round(float(row["open"]),  2),
-                "high":   round(float(row["high"]),  2),
-                "low":    round(float(row["low"]),   2),
-                "close":  round(float(row["close"]), 2),
-                "volume": round(float(row.get("volume", 0)), 4),
-            }
-            for _, row in df.iterrows()
-        ]
-        return {"pair": pair, "candles": candles}
+        # Request approx `limit` bars worth of history.
+        now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+        from_ms = now_ms - (limit + 5) * gran * 60_000
+        path = f"/api/v1/kline/query?symbol={sym}&granularity={gran}&from={from_ms}&to={now_ms}"
+        data = _kc_get(path)
+        if str(data.get("code")) != "200000":
+            return {"pair": pair, "candles": [], "error": data.get("msg", "no_data")}
+        rows = data.get("data") or []
+        candles: list[dict] = []
+        for r in rows[-limit:]:
+            # KuCoin Futures kline shape: [timestamp_ms, open, high, low, close, volume]
+            if len(r) < 6:
+                continue
+            candles.append({
+                "time":   int(r[0]) // 1000,
+                "open":   round(float(r[1]), 4),
+                "high":   round(float(r[2]), 4),
+                "low":    round(float(r[3]), 4),
+                "close":  round(float(r[4]), 4),
+                "volume": round(float(r[5]), 4),
+            })
+        candles.sort(key=lambda c: c["time"])
+        return {"pair": pair, "timeframe": timeframe, "candles": candles, "count": len(candles)}
     except Exception as e:
         return {"pair": pair, "candles": [], "error": str(e)}
-
-
-@router.get("/signals/{pair:path}")
-async def get_pair_signals(pair: str, interval: str = "15m"):
-    """KuCoin klines + local TA. No external TA service."""
-    payload = kucoin_indicators.fetch(pair, interval)
-    if not payload:
-        return {"symbol": pair, "interval": interval, "error": "no_data"}
-
-    raw_ind = payload.get("indicators") or {}
-    # Normalise keys to snake_case so the frontend StrategySignalMonitor
-    # can read them regardless of TradingView-style naming.
-    normalised = {
-        "rsi":         raw_ind.get("RSI"),
-        "macd":        raw_ind.get("MACD.macd"),
-        "macd_signal": raw_ind.get("MACD.signal"),
-        "bb_upper":    raw_ind.get("BB.upper"),
-        "bb_lower":    raw_ind.get("BB.lower"),
-        "ema_20":      raw_ind.get("EMA20"),
-        "sma_50":      raw_ind.get("SMA50"),
-        "adx":         raw_ind.get("ADX"),
-        "close":       raw_ind.get("close"),
-    }
-    # Also keep original keys for backwards compat with other consumers
-    normalised.update(raw_ind)
-
-    return {
-        "symbol": pair,
-        "interval": interval,
-        "summary": payload.get("summary"),
-        "indicators": normalised,
-        "oscillators": payload.get("oscillators"),
-        "moving_averages": payload.get("moving_averages"),
-        "source": payload.get("source", "kucoin_klines"),
-    }

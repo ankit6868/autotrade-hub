@@ -25,9 +25,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .native_trading_engine import (
-    NativeTradingEngine, Position, _STRATEGY_SIGNALS,
-    _persist_open_trade, _persist_closed_trade, _get_signal_fn,
-    build_strategy_signal_fn,
+    NativeTradingEngine, Position,
+    _persist_open_trade, _persist_closed_trade,
+    build_strategy_signal_fn, StrategyCompileError,
     _fetch_candles, _build_df, KUCOIN_BASE, TF_KUCOIN,
 )
 from . import risk_engine
@@ -672,18 +672,10 @@ class FuturesEngine(NativeTradingEngine):
                                               self._strategy_id, pos.db_id)
                         if self._mode == "live":
                             self._place_live_exit(pair, pos, exit_price)
-                        # ── Notify copy followers of close ────────────────
-                        try:
-                            from backend.services.copy_trading import copy_trading_service
-                            copy_trading_service.update_signal_result(
-                                master_id=self.user_id,
-                                pair=pair,
-                                exit_price=exit_price,
-                                pnl_pct=pos.pnl_pct,
-                                reason=reason,
-                            )
-                        except Exception:
-                            pass
+                        # Copy-trading broadcast removed in spot purge —
+                        # futures bots no longer publish signals to a
+                        # copy-trading service. The futures terminal is
+                        # single-user from the trading-pipeline perspective.
 
                 # Wind-down: no new entries, auto-stop when all positions closed
                 if self._winding_down:
@@ -737,14 +729,28 @@ class FuturesEngine(NativeTradingEngine):
             # We rebuild every signal scan because the dataframe changes
             # (new closed candle). evaluate_strategy is fast (<200ms for
             # 200 candles), so doing this per-scan is fine.
-            user_signal_fn = build_strategy_signal_fn(
-                strategy_id     = self._strategy_id,
-                strategy_name   = self._strategy,
-                df              = df,
-                leverage        = self._leverage,
-                stoploss_pct    = abs(self._stoploss) * 100.0,
-                take_profit_pct = self._take_profit * 100.0,
-            )
+            #
+            # No legacy fallback after the spot purge: if the strategy fails
+            # to compile we LOG LOUDLY and SKIP this tick — better to halt
+            # than silently run the wrong signal. The engine's start-time
+            # compile check (in start_futures) already vetted the code, so
+            # a runtime compile failure here is exceptional (e.g. a NaN-in-
+            # rolling-window crash on a particular candle batch).
+            try:
+                user_signal_fn = build_strategy_signal_fn(
+                    strategy_id     = self._strategy_id,
+                    strategy_name   = self._strategy,
+                    df              = df,
+                    leverage        = self._leverage,
+                    stoploss_pct    = abs(self._stoploss) * 100.0,
+                    take_profit_pct = self._take_profit * 100.0,
+                )
+            except StrategyCompileError as e:
+                self.last_action = f"STRATEGY COMPILE FAILED: {e}"
+                self._log_action("strategy_compile_failed_tick",
+                    self.last_action, pair=pair, error=str(e))
+                log.warning("[%s] %s", self.user_id, self.last_action)
+                continue
 
             # Latest bar index — strategy_runner's signal_fn uses edge
             # detection (compares enter_long[i] vs enter_long[i-1]) so
@@ -1030,24 +1036,7 @@ class FuturesEngine(NativeTradingEngine):
                 if self._mode == "live":
                     self._place_live_entry(pair, pos)
 
-                # ── Broadcast to copy-trading followers ─────────────────
-                try:
-                    from backend.services.copy_trading import copy_trading_service
-                    copy_trading_service.broadcast(
-                        master_id=self.user_id,
-                        signal_type="entry",
-                        pair=pair,
-                        direction=direction,
-                        entry_price=entry,
-                        sl_price=sl,
-                        tp_price=tp,
-                        leverage=self._leverage,
-                        market_type="futures",
-                        stake_pct=self._risk_pct * 100,
-                        db_signal_id=pos.db_id,
-                    )
-                except Exception as _cte:
-                    log.debug("[%s] copy-broadcast skipped: %s", self.user_id, _cte)
+                # Copy-trading broadcast removed in spot purge.
 
     # ── Live order placement via KuCoin Futures API ─────────────────────
 

@@ -251,6 +251,28 @@ async def _upload_strategy_impl(
     with open(user_dir / filename, "w") as f:
         f.write(code)
 
+    # ── Phase 5: auto-validate + cache StrategyTemplate JSON ────────────
+    # Without this, fresh strategies show "0/100 - blocked" in the UI
+    # until someone hits /preview. Running the validator inline here costs
+    # ~200ms (one strategy_runner compile against a dummy df) and gives
+    # the user immediate feedback on confidence + missing fields.
+    try:
+        from backend.services.strategy_validator import validate_for_live
+        ok, template, _reason = validate_for_live(
+            strategy_name       = strategy.name,
+            strategy_id         = strategy.id,
+            generated_code      = code,
+            execution_timeframe = code_timeframe,
+        )
+        strategy.compiled_template = template.to_dict()
+        strategy.confidence_score  = template.confidence_score
+        strategy.live_permission   = template.live_permission
+        db.commit()
+    except Exception as _vexc:
+        # Non-fatal — strategy still saved, but compiled_template stays
+        # null and the UI will lazily populate via /preview on first view.
+        pass
+
     return {
         "id": strategy.id,
         "code": code,
@@ -258,6 +280,8 @@ async def _upload_strategy_impl(
         "tokens_used": tokens_used,
         "validation": validation,
         "ai_validation": ai_validation,
+        "confidence_score": getattr(strategy, "confidence_score", 0),
+        "live_permission":  getattr(strategy, "live_permission", "blocked"),
         "original_text": strategy_text[:500],
     }
 
@@ -689,6 +713,24 @@ async def regenerate_strategy(
     with open(user_dir / f"strategy_{strategy_id}.py", "w") as f:
         f.write(new_code)
 
+    # Re-validate so the cached compiled_template + confidence_score
+    # reflect the new code immediately. Prior to this the user had to
+    # hit /preview before the live guardrail saw an updated score.
+    try:
+        from backend.services.strategy_validator import validate_for_live
+        ok, template, _ = validate_for_live(
+            strategy_name       = strategy.name,
+            strategy_id         = strategy.id,
+            generated_code      = new_code,
+            execution_timeframe = strategy.timeframe or "15m",
+        )
+        strategy.compiled_template = template.to_dict()
+        strategy.confidence_score  = template.confidence_score
+        strategy.live_permission   = template.live_permission
+        db.commit()
+    except Exception:
+        pass
+
     return {
         "id":         strategy_id,
         "code":       new_code,
@@ -697,6 +739,8 @@ async def regenerate_strategy(
             "passed":  result_p.get("validation_passed", True),
             "missing": result_p.get("validation_missing", []),
         },
+        "confidence_score": getattr(strategy, "confidence_score", 0),
+        "live_permission":  getattr(strategy, "live_permission", "blocked"),
         "stoploss":    strategy.stoploss,
         "take_profit": strategy.take_profit,
         "timeframe":   strategy.timeframe,
@@ -727,6 +771,22 @@ def update_strategy(
         user_dir.mkdir(parents=True, exist_ok=True)
         with open(user_dir / f"strategy_{strategy_id}.py", "w") as f:
             f.write(req.generated_code)
+
+        # Code changed → re-validate so live guardrail sees fresh score.
+        try:
+            from backend.services.strategy_validator import validate_for_live
+            ok, template, _ = validate_for_live(
+                strategy_name       = strategy.name,
+                strategy_id         = strategy.id,
+                generated_code      = req.generated_code,
+                execution_timeframe = strategy.timeframe or "15m",
+            )
+            strategy.compiled_template = template.to_dict()
+            strategy.confidence_score  = template.confidence_score
+            strategy.live_permission   = template.live_permission
+            db.commit()
+        except Exception:
+            pass
 
     return {"status": "ok", "id": strategy_id}
 

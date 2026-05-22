@@ -5,8 +5,11 @@ import { usePathname } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { SidebarSignOut } from '@/components/AuthShell';
 
+// Futures-only navigation. Spot, autotrade, copy-trading, opportunities,
+// history (spot trade log), and the legacy dashboard were removed in the
+// spot purge — the app is now exclusively a KuCoin Futures terminal +
+// paper/live lead-trading + futures backtest tool.
 const nav = [
-  { href: '/',                   label: 'Dashboard',          icon: '⚡',  section: null },
   { href: '/setup',              label: 'Setup',              icon: '⚙️',  section: null },
   // ── Strategy ──────────────────────────────────────────────────────
   { href: '/strategy/upload',    label: 'Upload Strategy',    icon: '📄',  section: 'STRATEGY' },
@@ -17,9 +20,6 @@ const nav = [
   // (which has the Paper/Live toggle in its top-right corner).
   { href: '/futures-trade',      label: 'Futures Terminal',   icon: '💹',  section: 'FUTURES' },
   { href: '/futures-backtest',   label: 'Futures Backtest',   icon: '🔬',  section: null },
-  // ── Advanced ──────────────────────────────────────────────────────
-  { href: '/auto-trade',         label: 'Auto-Trade',         icon: '🤖',  section: 'ADVANCED' },
-  { href: '/history',            label: 'History',            icon: '📈',  section: null },
 ];
 
 // Persist desktop sidebar state across page navigations so the user's
@@ -250,9 +250,23 @@ export default function Sidebar() {
           <SidebarSignOut />
           <button
             onClick={async () => {
-              if (confirm('EMERGENCY STOP: This will halt all trading immediately. Continue?')) {
+              if (confirm('EMERGENCY STOP: This will halt all futures trading immediately. Continue?')) {
                 try {
-                  await fetch('/api/trade/emergency-stop', { method: 'POST' });
+                  // Stop every running futures bot in both paper and live modes.
+                  const data = await fetch('/api/futures/bots?mode=live')
+                    .then(r => r.ok ? r.json() : { bots: [] }).catch(() => ({ bots: [] }));
+                  const live  = (data?.bots || []).filter((b: any) => b.is_running);
+                  for (const b of live) {
+                    try { await fetch(`/api/futures/bots/${b.id}?force=true`, { method: 'DELETE' }); } catch {/* ignore */}
+                  }
+                  const paperData = await fetch('/api/futures/bots?mode=paper')
+                    .then(r => r.ok ? r.json() : { bots: [] }).catch(() => ({ bots: [] }));
+                  for (const b of (paperData?.bots || []).filter((b: any) => b.is_running)) {
+                    try { await fetch(`/api/futures/bots/${b.id}?force=true`, { method: 'DELETE' }); } catch {/* ignore */}
+                  }
+                  // Cancel-all pending orders too.
+                  try { await fetch('/api/futures/orders/all?mode=live', { method: 'DELETE' }); } catch {/* ignore */}
+                  try { await fetch('/api/futures/orders/all?mode=paper', { method: 'DELETE' }); } catch {/* ignore */}
                 } finally {
                   window.location.reload();
                 }

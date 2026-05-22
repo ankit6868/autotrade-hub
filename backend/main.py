@@ -23,13 +23,13 @@ from starlette.middleware.base import BaseHTTPMiddleware  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
 from backend.models import init_db, SessionLocal, Config  # noqa: E402
-from backend.routers import auth, strategy, backtest, trading, market, analysis, autotrade, webhook  # noqa: E402
+# AutoTrade Hub is FUTURES-ONLY now. The spot / autotrade / multi-strategy /
+# webhook / copy-trading-router stack was removed in commit "spot purge"
+# (PDF §1 — single-purpose engine) — only the futures terminal, paper +
+# live lead-trading, and futures backtest remain.
+from backend.routers import auth, strategy, market  # noqa: E402
 from backend.routers import futures as futures_router  # noqa: E402
-from backend.routers import copy_trading as copy_router  # noqa: E402
-from backend.routers import multi_strategy as multi_router  # noqa: E402
 from backend.routers import paper_scalp as paper_scalp_router  # noqa: E402
-from backend.services.freqtrade_manager import freqtrade_mgr  # noqa: E402
-from backend.services.autotrade_engine import autotrade_engine  # noqa: E402
 from backend.utils.clerk_auth import (  # noqa: E402
     ANONYMOUS_USER_ID,
     CLERK_AUDIENCE,
@@ -936,64 +936,14 @@ async def _background_startup():
     except Exception as e:
         log.error("seed strategies failed: %s", e)
 
-    # ── Auto-resume all bot engines ───────────────────────────────────────────
-    try:
-        from backend.services.native_trading_engine import native_engine_registry
-        with SessionLocal() as db:
-            rows = db.execute(select(Config)).scalars().all()
-        for cfg in rows:
-            if not cfg.user_id:
-                continue
-            # Auto-trade engine
-            if cfg.auto_trade_enabled:
-                try:
-                    autotrade_engine.for_user(cfg.user_id).start()
-                except Exception:
-                    pass
-            # Paper / live SPOT bot only — skip futures modes entirely
-            # (futures auto-resume would need futures_engine_registry, handled separately)
-            if cfg.bot_running and cfg.bot_strategy_name and not (cfg.bot_mode or "").startswith("futures"):
-                try:
-                    pairs = [p.strip() for p in (cfg.bot_pairs or "BTC/USDT").split(",") if p.strip()]
-                    eng = native_engine_registry.for_user(cfg.user_id)
-                    if cfg.bot_mode == "live":
-                        from backend.utils.encryption import decrypt, DecryptError
-                        try:
-                            kk = decrypt(cfg.kucoin_key_enc or "", cfg.user_id)
-                            ks = decrypt(cfg.kucoin_secret_enc or "", cfg.user_id)
-                            kp = decrypt(cfg.kucoin_passphrase_enc or "", cfg.user_id)
-                            eng.start_live(
-                                strategy_name=cfg.bot_strategy_name, pairs=pairs,
-                                timeframe=cfg.bot_timeframe or "15m",
-                                stoploss=cfg.bot_stoploss or -0.03,
-                                kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
-                                wallet=cfg.bot_wallet or 1000.0,
-                            )
-                        except DecryptError:
-                            pass
-                    else:
-                        eng.start_paper(
-                            strategy_name=cfg.bot_strategy_name, pairs=pairs,
-                            timeframe=cfg.bot_timeframe or "15m",
-                            stoploss=cfg.bot_stoploss or -0.03,
-                            wallet=cfg.bot_wallet or 1000.0,
-                        )
-                except Exception:
-                    pass
-    except Exception as e:
-        log.error("engine auto-resume failed: %s", e)
-
-    # ── Resume multi-strategy instances ───────────────────────────────────────
-    try:
-        from backend.services.multi_strategy import multi_strategy_manager
-        with SessionLocal() as db:
-            resumed = multi_strategy_manager.resume_all(db)
-            if resumed:
-                log.info("Resumed %d multi-strategy instances", resumed)
-    except Exception as e:
-        log.error("multi-strategy resume failed: %s", e)
-
-    log.info("Background startup complete.")
+    # ── Auto-resume futures bots ───────────────────────────────────────
+    # Each persisted StrategyInstance row gets its engine restarted via
+    # GET /api/futures/bots' built-in resume path (the bot list endpoint
+    # restarts any DB-running but engine-dead bots on first call). No
+    # explicit resume here — keeps startup lean. The futures bot DB rows
+    # carry their own ARM + cooldown + DD config so the engine spins back
+    # up identically to before the restart.
+    log.info("Background startup complete. (futures-only — no spot stack)")
 
 
 @asynccontextmanager
@@ -1002,12 +952,15 @@ async def lifespan(app: FastAPI):
     # so the Railway healthcheck passes in <3 seconds instead of ~40 seconds.
     asyncio.create_task(_background_startup())
     yield
+    # Stop all futures bot engines on shutdown so KuCoin gets a clean
+    # disconnect instead of phantom orders timing out.
     try:
-        autotrade_engine.stop_all()
-    except Exception:
-        pass
-    try:
-        freqtrade_mgr.stop_all()
+        from backend.services.futures_engine import futures_engine_registry
+        for _, eng in futures_engine_registry.all_running():
+            try:
+                eng.stop()
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -1082,15 +1035,8 @@ app.add_middleware(
 # --- Routers ---------------------------------------------------------------
 app.include_router(auth.router)
 app.include_router(strategy.router)
-app.include_router(backtest.router)
-app.include_router(trading.router)
-app.include_router(market.router)
-app.include_router(analysis.router)
-app.include_router(autotrade.router)
-app.include_router(webhook.router)
+app.include_router(market.router)        # market data (price/pairs/orderbook) — shared by chart + futures
 app.include_router(futures_router.router)
-app.include_router(copy_router.router)
-app.include_router(multi_router.router)
 app.include_router(paper_scalp_router.router)
 
 
@@ -1114,9 +1060,15 @@ async def health():
         proxy = proxy_status()
     except Exception:
         proxy = {"count": 0, "active": None}
+    # Count active futures bot engines instead of the old freqtrade mgr.
+    try:
+        from backend.services.futures_engine import futures_engine_registry
+        active = len(futures_engine_registry.all_running())
+    except Exception:
+        active = 0
     return {
         "status": "healthy",
-        "active_users": freqtrade_mgr.active_users(),
+        "active_users": active,
         "kucoin_proxy": proxy,
         "timestamp": datetime.utcnow().isoformat(),
     }
@@ -1189,9 +1141,18 @@ async def websocket_trades(ws: WebSocket, token: str | None = None):
         while True:
             data = await ws.receive_text()
             if data == "ping":
+                # Respond with the user's primary futures engine status
+                # so the dashboard ping-pong watchdog keeps showing live
+                # health without hitting any deleted spot endpoints.
+                try:
+                    from backend.services.futures_engine import futures_engine_registry
+                    eng = futures_engine_registry.for_user(user_id)
+                    bot_status = eng.status if eng else {"is_running": False}
+                except Exception:
+                    bot_status = {"is_running": False}
                 await ws.send_json({
                     "type": "pong",
-                    "bot": freqtrade_mgr.for_user(user_id).status,
+                    "bot": bot_status,
                     "timestamp": datetime.utcnow().isoformat(),
                 })
     except WebSocketDisconnect:

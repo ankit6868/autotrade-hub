@@ -679,6 +679,66 @@ def start_futures(
         if strat:
             strategy_name = strat.name
 
+    # ── Live Guardrail (PDF §9) — mirrors POST /api/futures/bots ──────
+    # Before this commit, /api/futures/start was a back-door that bypassed
+    # the confidence/conflict checks the bot panel ran. Closing the hole.
+    if mode == "live" and strat:
+        try:
+            from backend.services.strategy_validator import validate_for_live
+            live_ok, template, reason = validate_for_live(
+                strategy_name       = strategy_name,
+                strategy_id         = strategy_id,
+                generated_code      = strat.generated_code or "",
+                execution_timeframe = timeframe,
+            )
+            # Backtest-pass requirement (PDF §9 row 4): live trading is
+            # only allowed when a futures backtest has been run for
+            # (strategy, this pair, this TF) within the last 30 days.
+            from backend.models.trade import FuturesBacktest
+            from sqlalchemy import desc as _desc
+            primary_pair = (pairs or ["BTC/USDT"])[0]
+            recent_bt = db.execute(
+                select(FuturesBacktest)
+                .where(
+                    FuturesBacktest.user_id == user_id,
+                    FuturesBacktest.strategy_id == strategy_id,
+                    FuturesBacktest.pair == primary_pair,
+                    FuturesBacktest.timeframe == timeframe,
+                )
+                .order_by(_desc(FuturesBacktest.created_at))
+                .limit(1)
+            ).scalar_one_or_none()
+            has_recent_backtest = bool(
+                recent_bt and recent_bt.created_at and
+                (datetime.utcnow() - recent_bt.created_at).days <= 30
+            )
+
+            if not live_ok or not has_recent_backtest:
+                bt_msg = (
+                    "Run a backtest for this strategy/pair/timeframe in the "
+                    "last 30 days before going live."
+                ) if not has_recent_backtest else ""
+                return {
+                    "error": (reason or "Live guardrail blocked") + (" | " + bt_msg if bt_msg else ""),
+                    "blocked_reason":    "live_guardrail",
+                    "confidence_score":  template.confidence_score,
+                    "live_permission":   template.live_permission,
+                    "missing_fields":    template.missing_fields,
+                    "conflicts":         template.conflicts,
+                    "has_recent_backtest": has_recent_backtest,
+                    "resolver_notes":    template.resolver_notes,
+                }
+            # Cache the validation result on the Strategy row.
+            try:
+                strat.compiled_template = template.to_dict()
+                strat.confidence_score  = template.confidence_score
+                strat.live_permission   = template.live_permission
+                db.commit()
+            except Exception:
+                pass
+        except Exception as guard_exc:
+            log.warning("Live guardrail validator raised: %s — allowing live start", guard_exc)
+
     eng = futures_engine_registry.for_user(user_id)
 
     kk = ks = kp = ""
@@ -3351,6 +3411,7 @@ def create_futures_bot(
     if mode == "live" and strat:
         try:
             from backend.services.strategy_validator import validate_for_live
+            from backend.models.trade import FuturesBacktest
             live_ok, template, reason = validate_for_live(
                 strategy_name       = strategy_name,
                 strategy_id         = strategy_id,
@@ -3367,30 +3428,59 @@ def create_futures_bot(
                 db.commit()
             except Exception:
                 pass
-            if not live_ok:
-                # Hard block. Return a structured error the UI can render
-                # nicely (it includes the resolver notes + missing fields
-                # so the user knows exactly what to fix).
+
+            # ── PDF §9 row 4: backtest-pass requirement ────────────────
+            # Live trading is only allowed when a futures backtest has
+            # been completed for (strategy, primary pair, timeframe) in
+            # the last 30 days. This prevents users from going live with
+            # a strategy that has never been tested on real data.
+            primary_pair = (pairs or ["BTC/USDT"])[0]
+            recent_bt = db.execute(
+                select(FuturesBacktest)
+                .where(
+                    FuturesBacktest.user_id == user_id,
+                    FuturesBacktest.strategy_id == strategy_id,
+                    FuturesBacktest.pair == primary_pair,
+                    FuturesBacktest.timeframe == timeframe,
+                )
+                .order_by(desc(FuturesBacktest.created_at))
+                .limit(1)
+            ).scalar_one_or_none()
+            has_recent_backtest = bool(
+                recent_bt and recent_bt.created_at and
+                (datetime.utcnow() - recent_bt.created_at).days <= 30
+            )
+
+            if not live_ok or not has_recent_backtest:
+                block_reason = reason or "Live guardrail blocked"
+                if not has_recent_backtest:
+                    block_reason += (
+                        " | No backtest pass on record for this "
+                        f"(strategy, {primary_pair}, {timeframe}) in the last 30 days. "
+                        "Run a backtest first."
+                    )
                 log_event(db, user_id, "futures.create_bot.blocked_live", request, payload={
-                    "strategy": strategy_name, "reason": reason,
+                    "strategy": strategy_name, "reason": block_reason,
                     "confidence_score": template.confidence_score,
                     "live_permission":  template.live_permission,
                     "missing_fields":   template.missing_fields,
                     "conflicts":        template.conflicts,
+                    "has_recent_backtest": has_recent_backtest,
                 })
                 return {
-                    "error":             reason,
+                    "error":             block_reason,
                     "blocked_reason":    "live_guardrail",
                     "confidence_score":  template.confidence_score,
                     "live_permission":   template.live_permission,
                     "missing_fields":    template.missing_fields,
                     "inferred_fields":   template.inferred_fields,
                     "conflicts":         template.conflicts,
+                    "has_recent_backtest": has_recent_backtest,
                     "resolver_notes":    template.resolver_notes,
                     "suggestion": (
                         "Run a backtest first, then paper-trade for a few days. "
-                        "Live trading is blocked until confidence ≥ 85 and all "
-                        "critical fields are present."
+                        "Live trading is blocked until confidence ≥ 85 AND a "
+                        "backtest exists for this strategy/pair/timeframe."
                     ),
                 }
         except Exception as guard_exc:

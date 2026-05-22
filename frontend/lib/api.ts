@@ -296,92 +296,15 @@ export const api = {
       request<any>(`/api/strategy/${id}/regenerate`, { method: 'POST', body: JSON.stringify({}) }),
   },
 
-  backtest: {
-    run: (data: Record<string, unknown>) =>
-      request<any>('/api/backtest/run', { method: 'POST', body: JSON.stringify(data) }),
-    results: (id: number) => request<any>(`/api/backtest/results/${id}`),
-  },
-
-  trade: {
-    start: (data: Record<string, unknown>) =>
-      request<any>('/api/trade/start', { method: 'POST', body: JSON.stringify(data) }),
-    stop: () => request<any>('/api/trade/stop', { method: 'POST' }),
-    status: () => request<any>('/api/trade/status'),
-    open: (mode?: 'paper' | 'live') =>
-      request<{ trades: any[] }>(`/api/trade/open${mode ? `?mode=${mode}` : ''}`),
-    history: (params?: Record<string, string>) => {
-      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
-      return request<{ trades: any[] }>(`/api/trade/history${qs}`);
-    },
-    forceClose: (id: string | number) => request<any>(`/api/trade/force-close/${id}`, { method: 'POST' }),
-    balance: () => request<any>('/api/trade/balance'),
-    emergencyStop: () => request<any>('/api/trade/emergency-stop', { method: 'POST' }),
-    manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stake = 0) =>
-      request<any>('/api/trade/manual-entry', {
-        method: 'POST',
-        body: JSON.stringify({ pair, direction, stake }),
-      }),
-  },
-
+  // Futures-only market data — `candles` and `signals` were removed
+  // alongside the spot stack (only used by the deleted SignalsPanel).
   market: {
     pairs: () => request<{ pairs: string[] }>('/api/market/pairs'),
     price: (pair: string) => request<any>(`/api/market/price/${pair}`),
-    candles: (pair: string, type?: string) =>
-      request<{ candles: any[] }>(`/api/market/candles/${pair}?kline_type=${type || '15min'}`),
     ohlcv: (pair: string, timeframe?: string, limit?: number) =>
       request<{ pair: string; candles: Array<{time:number;open:number;high:number;low:number;close:number;volume:number}> }>(
         `/api/market/ohlcv/${pair}?timeframe=${timeframe || '15m'}&limit=${limit || 120}`
       ),
-    signals: (pair: string, interval?: string) =>
-      request<any>(`/api/market/signals/${pair}?interval=${interval || '15m'}`),
-  },
-
-  analysis: {
-    universe: () => request<{
-      default_pairs: string[];
-      strategies: { name: string; label: string; one_liner: string; ideal_timeframes: string[] }[];
-    }>('/api/analysis/universe'),
-    opportunities: (params?: { timeframe?: string; top_n?: number; min_score?: number; pairs?: string; strategies?: string }) => {
-      const qs = params ? '?' + new URLSearchParams(params as Record<string, string>).toString() : '';
-      return request<{
-        timeframe: string;
-        scanned_pairs: number;
-        failed_pairs: string[];
-        stale_pairs: string[];
-        strategies_considered: string[];
-        opportunities: any[];
-        tv_status: {
-          cache_entries: number;
-          fresh_entries: number;
-          stale_entries: number;
-          cooldown_remaining_s: number;
-        };
-      }>(`/api/analysis/opportunities${qs}`);
-    },
-    analyze: (pair: string, timeframe = '15m') =>
-      request<any>(`/api/analysis/analyze/${pair}?timeframe=${timeframe}`),
-    topVolume: (n = 50) => request<{
-      pairs: { pair: string; volume_usd: number; change_pct: number; price: number }[];
-    }>(`/api/analysis/top-volume?n=${n}`),
-    portfolio: () => request<any>('/api/analysis/portfolio'),
-    riskMonitor: () => request<any>('/api/analysis/risk-monitor'),
-  },
-
-  webhook: {
-    generateSecret: () => request<any>('/api/webhook/generate-secret', { method: 'POST' }),
-    secretStatus: () => request<any>('/api/webhook/secret'),
-    logs: (limit = 50) => request<any>(`/api/webhook/logs?limit=${limit}`),
-  },
-
-  autotrade: {
-    status: () => request<any>('/api/autotrade/status'),
-    start: () => request<any>('/api/autotrade/start', { method: 'POST' }),
-    stop: () => request<any>('/api/autotrade/stop', { method: 'POST' }),
-    settings: {
-      get: () => request<any>('/api/autotrade/settings'),
-      put: (data: Record<string, unknown>) =>
-        request<any>('/api/autotrade/settings', { method: 'PUT', body: JSON.stringify(data) }),
-    },
   },
 
   futures: {
@@ -482,31 +405,6 @@ export const api = {
       performance: (botId: number) => request<any>(`/api/futures/bots/${botId}/performance`),
     },
   },
-
-  copy: {
-    becomeMaster: (strategy_id?: number) =>
-      request<any>('/api/copy/become-master', { method: 'POST', body: JSON.stringify({ strategy_id }) }),
-    mySignals: (limit = 50) => request<any>(`/api/copy/my-signals?limit=${limit}`),
-    myFollowers: () => request<any>('/api/copy/my-followers'),
-    subscribe: (data: Record<string, unknown>) =>
-      request<any>('/api/copy/subscribe', { method: 'POST', body: JSON.stringify(data) }),
-    unsubscribe: (masterId: string) =>
-      request<any>(`/api/copy/unsubscribe/${masterId}`, { method: 'DELETE' }),
-    mySubscriptions: () => request<any>('/api/copy/my-subscriptions'),
-    feed: (limit = 50) => request<any>(`/api/copy/feed?limit=${limit}`),
-  },
-
-  multiStrategy: {
-    list: () => request<any>('/api/strategies/instances'),
-    create: (data: Record<string, unknown>) =>
-      request<any>('/api/strategies/instances', { method: 'POST', body: JSON.stringify(data) }),
-    stop: (id: number) =>
-      request<any>(`/api/strategies/instances/${id}`, { method: 'DELETE' }),
-    status: () => request<any>('/api/strategies/instances/status'),
-  },
-
-  bulkBacktest: (data: Record<string, unknown>) =>
-    request<any>('/api/backtest/bulk', { method: 'POST', body: JSON.stringify(data) }),
 
   health: () => request<any>('/api/health'),
 };
