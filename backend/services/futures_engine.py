@@ -27,8 +27,10 @@ from typing import Optional
 from .native_trading_engine import (
     NativeTradingEngine, Position, _STRATEGY_SIGNALS,
     _persist_open_trade, _persist_closed_trade, _get_signal_fn,
+    build_strategy_signal_fn,
     _fetch_candles, _build_df, KUCOIN_BASE, TF_KUCOIN,
 )
+from . import risk_engine
 
 log = logging.getLogger("futures_engine")
 
@@ -195,6 +197,55 @@ class FuturesEngine(NativeTradingEngine):
         self._stop_evt.clear()
         self.started_at = datetime.now(timezone.utc)
 
+        # ── Phase 2 sanity check: verify the strategy code compiles before
+        # we start the engine thread, so the user gets immediate feedback in
+        # the action log if their strategy is broken. Without this, a broken
+        # strategy silently falls back to a name-matched built-in and the
+        # bot looks like it's working — exactly the hidden bug we're fixing.
+        if strategy_id is not None:
+            try:
+                from backend.models import SessionLocal
+                from backend.models.strategy import Strategy
+                from backend.services.strategy_runner import evaluate_strategy
+                from sqlalchemy import select as _select
+                import pandas as _pd
+                with SessionLocal() as _db:
+                    _strat = _db.execute(
+                        _select(Strategy).where(Strategy.id == strategy_id)
+                    ).scalar_one_or_none()
+                if _strat and _strat.generated_code:
+                    # Compile against a tiny dummy dataframe to surface
+                    # syntax/import errors WITHOUT needing real candles.
+                    _dummy = _pd.DataFrame({
+                        "date":  _pd.date_range("2024-01-01", periods=300, freq="15min", tz="UTC"),
+                        "open":  [100.0] * 300, "high": [101.0] * 300,
+                        "low":   [99.0]  * 300, "close": [100.5] * 300,
+                        "vol":   [1000.0] * 300,
+                    })
+                    _result = evaluate_strategy(_strat.generated_code, _dummy)
+                    self._log_action(
+                        "strategy_compiled",
+                        f"Strategy '{_result.attrs.get('strategy_class', strategy_name)}' compiled OK on engine start",
+                        strategy_class=_result.attrs.get("strategy_class"),
+                        signal_columns=_result.attrs.get("signal_columns", []),
+                    )
+                    log.info(
+                        "[%s] strategy %s compiled OK (class=%s, signals=%s)",
+                        self.user_id, strategy_name,
+                        _result.attrs.get("strategy_class"),
+                        _result.attrs.get("signal_columns", []),
+                    )
+            except Exception as _compile_exc:
+                self._log_action(
+                    "strategy_compile_failed",
+                    f"Strategy '{strategy_name}' failed to compile: {_compile_exc} — bot will use the legacy name-matched fallback. Edit the strategy code in Strategy Editor to fix.",
+                    error=str(_compile_exc),
+                )
+                log.warning(
+                    "[%s] strategy %s failed to compile on start: %s — will fall back at signal time",
+                    self.user_id, strategy_name, _compile_exc,
+                )
+
         import threading
         self._thread = threading.Thread(
             target=self._run_loop, daemon=True,
@@ -213,7 +264,30 @@ class FuturesEngine(NativeTradingEngine):
     def _tick_continuous(self, signal_fn, seen_signal: dict,
                          last_signal_ts: dict | None = None,
                          signal_interval: float = 60.0):
-        """Futures tick: liquidation + TP/SL every 5s, signals every 60s."""
+        """Futures tick: liquidation + TP/SL every 5s, signals every 60s.
+
+        Phase 2 changes:
+          • The `signal_fn` argument passed in by the base class is IGNORED —
+            we build a per-pair signal_fn from the user's strategy code via
+            build_strategy_signal_fn (same path the backtester uses). This
+            replaces the old fuzzy-name-matched fallback chain that quietly
+            ran the wrong strategy code for anything outside the 8 hardcoded
+            built-ins.
+          • Signal-edge detection: stored in seen_signal[pair] = direction
+            of last fired signal. A new signal only fires when the bar's
+            edge changes (None → long, None → short, long → short, short → long).
+          • Stop-and-reverse: when an opposite-direction signal fires while
+            a position is open on the same pair, we close the old position
+            and open the new one in the next tick. Matches the user's
+            preference picked in the earlier architecture review.
+
+        Phase 4 change:
+          • After we have (entry, strategy_sl, strategy_tp, direction) from
+            the strategy, we pass it through risk_engine.compute_tp_sl which
+            applies timeframe-aware ATR multipliers if the strategy didn't
+            provide structural levels, and enforces a min-RR check. Rejected
+            signals are logged with reason but do NOT open a position.
+        """
         import time as _time
         now_epoch = _time.time()
 
@@ -248,7 +322,8 @@ class FuturesEngine(NativeTradingEngine):
                             self.balance += pos.pnl_abs
                             self.closed_trades.append(pos)
                             del self.positions[trade_key]
-                            seen_signal[pair] = False
+                            # Reset to None (Phase 2 edge detection stores direction).
+                            seen_signal[pair] = None
                             self.last_action = (
                                 f"LIQUIDATED {pair} @ {live_price:.4f} "
                                 f"liq={pos.liquidation_price:.4f} P&L={pos.pnl_abs:+.2f}"
@@ -270,7 +345,8 @@ class FuturesEngine(NativeTradingEngine):
                         self.balance += pos.pnl_abs
                         self.closed_trades.append(pos)
                         del self.positions[trade_key]
-                        seen_signal[pair] = False
+                        # Reset to None (Phase 2 edge detection stores direction).
+                        seen_signal[pair] = None
                         self.last_action = (
                             f"CLOSED {pair} @ {exit_price:.4f} ({reason}) "
                             f"P&L={pos.pnl_abs:+.2f} lev={getattr(pos,'leverage',1)}x"
@@ -305,14 +381,27 @@ class FuturesEngine(NativeTradingEngine):
                         self._stop_evt.set()
                     continue
 
-                # Position limit guards
+                # Position limit guards.
+                #
+                # NOTE on stop-and-reverse: we deliberately DON'T skip the
+                # signal scan just because a position exists on this pair.
+                # If we did, an opposite-side signal could never be detected
+                # → the bot would be stuck long forever once it opened a
+                # long, even when the strategy flipped bearish. The new
+                # logic only blocks the per-pair guard for SAME-direction
+                # repeats; opposite signals fall through to stop-and-reverse
+                # in the signal-scan block below.
                 if len(self.positions) >= self._max_open:
-                    continue
-                existing_for_pair = sum(
-                    1 for p in self.positions.values() if p.pair == pair
-                )
-                if existing_for_pair >= getattr(self, '_max_per_pair', 2):
-                    continue
+                    # Global max-open across all pairs still applies — if
+                    # we're at the cap and the pair has no existing position,
+                    # we genuinely can't add a new one even on a flip.
+                    existing_for_pair = sum(
+                        1 for p in self.positions.values() if p.pair == pair
+                    )
+                    if existing_for_pair == 0:
+                        continue
+                    # else: there's already a position on this pair, fall
+                    # through so a flip can stop-and-reverse it in place.
 
             # ── Signal scan — only when interval has elapsed ────────────
             if last_signal_ts is not None:
@@ -332,21 +421,122 @@ class FuturesEngine(NativeTradingEngine):
             if df.empty:
                 continue
 
-            sig = signal_fn(df)
+            # ── Phase 2: build signal_fn from user's strategy code ──────────
+            # We rebuild every signal scan because the dataframe changes
+            # (new closed candle). evaluate_strategy is fast (<200ms for
+            # 200 candles), so doing this per-scan is fine.
+            user_signal_fn = build_strategy_signal_fn(
+                strategy_id     = self._strategy_id,
+                strategy_name   = self._strategy,
+                df              = df,
+                leverage        = self._leverage,
+                stoploss_pct    = abs(self._stoploss) * 100.0,
+                take_profit_pct = self._take_profit * 100.0,
+            )
+
+            # Latest bar index — strategy_runner's signal_fn uses edge
+            # detection (compares enter_long[i] vs enter_long[i-1]) so
+            # we get TradingView-parity "fire on the bar where the
+            # condition transitions from False → True" behaviour.
+            last_idx = len(df) - 1
+            try:
+                sig = user_signal_fn(df, last_idx)
+            except TypeError:
+                # Legacy signal_fn that takes only df, no i (defensive).
+                try:
+                    sig = user_signal_fn(df)
+                except Exception:
+                    sig = None
+            except Exception as e:
+                log.warning("[%s] signal_fn raised for %s: %s",
+                            self.user_id, pair, e)
+                sig = None
+
             if sig is None:
+                # No signal this bar — clear the edge-tracking flag so the
+                # NEXT distinct signal (after a flat bar) fires cleanly.
+                seen_signal[pair] = None
+                continue
+
+            # Unpack 4-tuple or 5-tuple (5-tuple = ARM with TP2).
+            tp2_s: float | None = None
+            if len(sig) == 5:
+                entry_s, sl_s, tp_s, tp2_s, direction = sig
+            else:
+                entry_s, sl_s, tp_s, direction = sig
+
+            # ── Edge detection + stop-and-reverse ─────────────────────────
+            # seen_signal[pair] now holds the DIRECTION of the last fired
+            # signal (None | 'long' | 'short'). Skip if the same direction
+            # already fired and we still hold the position.
+            prev_dir = seen_signal.get(pair)
+            if prev_dir == direction:
+                # Same-direction repeat — don't fire again until the signal
+                # flips or the position closes (the close path resets to None).
                 continue
 
             self.signal_count += 1
-            entry_s, sl_s, tp_s, direction = sig
+
+            # If we hold an opposite-direction position on this pair AND
+            # the user picked "1 per pair + stop-and-reverse", close the
+            # old position now so the new one can open below.
+            with self._lock:
+                opposite_keys = [
+                    k for k, p in self.positions.items()
+                    if p.pair == pair and p.direction != direction
+                ]
+            for trade_key in opposite_keys:
+                with self._lock:
+                    old_pos = self.positions.get(trade_key)
+                    if old_pos is None:
+                        continue
+                    exit_price = live_price
+                    old_pos.close(exit_price, "stop_and_reverse", now)
+                    self.balance += old_pos.pnl_abs
+                    self.closed_trades.append(old_pos)
+                    del self.positions[trade_key]
+                    self.last_action = (
+                        f"REVERSED {pair} {old_pos.direction} @ {exit_price:.4f} "
+                        f"(opposite signal) P&L={old_pos.pnl_abs:+.2f}"
+                    )
+                    self._log_action("stop_and_reverse", self.last_action,
+                        pair=pair, price=exit_price, pnl=old_pos.pnl_abs,
+                        old_direction=old_pos.direction, new_direction=direction)
+                    log.info("[%s] %s", self.user_id, self.last_action)
+                    _persist_closed_trade(self.user_id, old_pos, self._mode,
+                                          self._strategy_id, old_pos.db_id)
+                    if self._mode == "live":
+                        self._place_live_exit(pair, old_pos, exit_price)
+
             entry = live_price
-            sl_dist = abs(entry_s - sl_s)
-            tp_dist = abs(tp_s - entry_s)
-            if direction == "long":
-                sl = entry - sl_dist
-                tp = entry + tp_dist
-            else:
-                sl = entry + sl_dist
-                tp = entry - tp_dist
+
+            # ── Phase 4: timeframe-aware risk plan ──────────────────────────
+            # Pass the strategy's structural SL/TP through risk_engine,
+            # which (a) honours them if they validate, (b) falls back to
+            # ATR×per-TF-multiplier defaults if not, and (c) enforces a
+            # min-RR gate per the spec.
+            plan = risk_engine.compute_tp_sl(
+                entry        = entry,
+                direction    = direction,
+                df           = df,
+                timeframe    = self._timeframe,
+                strategy_sl  = sl_s,
+                strategy_tp  = tp_s,
+                strategy_tp2 = tp2_s,
+            )
+
+            if not plan.valid:
+                # Log loudly so the UI's "last_action" surfaces it. Don't
+                # update seen_signal so the next bar gets a fresh chance.
+                rejection = risk_engine.format_plan_for_log(plan, pair=pair)
+                self.last_action = rejection
+                self._log_action("signal_rejected", rejection,
+                    pair=pair, direction=direction, reason=plan.rejected_reason,
+                    timeframe=self._timeframe, atr=plan.atr)
+                log.info("[%s] %s", self.user_id, rejection)
+                continue
+
+            sl, tp = plan.sl, plan.tp
 
             with self._lock:
                 stake = self.balance * self._risk_pct
@@ -367,15 +557,22 @@ class FuturesEngine(NativeTradingEngine):
                 )
                 self.positions[trade_key] = pos
                 self.balance -= stake
-                seen_signal[pair] = True
+                # Track the DIRECTION (not just bool) so edge detection on
+                # the next signal scan knows whether this is a same-side
+                # repeat or a genuine flip.
+                seen_signal[pair] = direction
                 self.last_action = (
                     f"OPENED futures {direction} {pair} @ {entry:.4f} "
-                    f"{self._leverage}x liq={pos.liquidation_price:.4f}"
+                    f"{self._leverage}x liq={pos.liquidation_price:.4f} "
+                    f"SL={sl:.4f} TP={tp:.4f} RR={plan.rr:.2f} [{plan.source}/{self._timeframe}]"
                 )
                 self._log_action("opened", self.last_action,
                     pair=pair, price=entry, direction=direction,
                     leverage=self._leverage, sl=sl, tp=tp,
-                    liquidation=pos.liquidation_price, stake=stake)
+                    liquidation=pos.liquidation_price, stake=stake,
+                    rr=plan.rr, atr=plan.atr, risk_source=plan.source,
+                    timeframe=self._timeframe,
+                    diagnostics=getattr(user_signal_fn, "diagnostics", None))
                 log.info("[%s] %s", self.user_id, self.last_action)
                 if self._mode == "live":
                     self._place_live_entry(pair, pos)

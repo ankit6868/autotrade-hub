@@ -601,6 +601,107 @@ def _get_signal_fn(name: str):
     return _sig_simple_target   # default fallback
 
 
+# ─────────────────────────── Strategy-runner integration ──────────────────
+#
+# This is the "Phase 2" plumbing — make the LIVE/PAPER engine execute the
+# user's own strategy code, the same way the futures backtester does.
+#
+# Before this: the live engine called _get_signal_fn(strategy_name) which
+# fuzzy-matched the name to one of 8 hardcoded signal functions, or fell
+# back to _sig_simple_target. BestPracticesV1 / SMCStrategyTV / any
+# AI-uploaded strategy never actually ran their populate_* methods in
+# paper or live — only the backtester did.
+#
+# After this: we compile the strategy class via strategy_runner.evaluate_strategy
+# (the SAME pipeline the backtester uses) and build a signal_fn from the
+# resulting dataframe. If compilation fails (e.g. strategy has no generated_code,
+# or the code raises), we gracefully fall back to the legacy name-matched
+# function so existing built-in strategies keep working.
+
+def build_strategy_signal_fn(
+    *,
+    strategy_id:   int | None,
+    strategy_name: str,
+    df,                                # pd.DataFrame (avoid top-level import)
+    leverage:      int,
+    stoploss_pct:  float,              # positive % e.g. 3.0 for 3%
+    take_profit_pct: float,
+):
+    """Compile the user's strategy code into a per-bar signal_fn(df, i).
+
+    Returns a callable with shape signal_fn(df, i) -> None | tuple, where the
+    tuple is (entry, sl, tp, direction) or (entry, sl, tp, tp2, direction).
+
+    On failure to compile/execute the user's code, returns a legacy adapter
+    around _get_signal_fn(name) so the engine keeps trading rather than
+    silently going dead.
+
+    Diagnostics (helpful for debugging "why isn't my strategy firing"):
+      • df.attrs["strategy_class"] — class name that ran
+      • df.attrs["signal_columns"] — which columns the strategy populated
+      • df.attrs["class_stoploss_pct"] — class-declared SL (if any)
+      • df.attrs["class_take_profit_pct"] — class-declared TP (if any)
+    Attached to the returned signal_fn as `.diagnostics` dict.
+    """
+    diagnostics: dict[str, object] = {"path": "legacy", "strategy_name": strategy_name}
+
+    # ── Try the strategy_runner path first (compile + execute) ───────────
+    if strategy_id is not None:
+        try:
+            from backend.models import SessionLocal
+            from backend.models.strategy import Strategy
+            from backend.services.strategy_runner import (
+                evaluate_strategy, make_signal_fn_from_df,
+            )
+            from sqlalchemy import select as _select
+
+            with SessionLocal() as db:
+                strat = db.execute(
+                    _select(Strategy).where(Strategy.id == strategy_id)
+                ).scalar_one_or_none()
+
+            if strat and strat.generated_code:
+                df_with_signals = evaluate_strategy(strat.generated_code, df)
+                sig_fn = make_signal_fn_from_df(
+                    df_with_signals, leverage, stoploss_pct, take_profit_pct,
+                )
+                diagnostics.update({
+                    "path":             "strategy_runner",
+                    "strategy_class":   df_with_signals.attrs.get("strategy_class"),
+                    "signal_columns":   df_with_signals.attrs.get("signal_columns", []),
+                    "class_sl_pct":     df_with_signals.attrs.get("class_stoploss_pct"),
+                    "class_tp_pct":     df_with_signals.attrs.get("class_take_profit_pct"),
+                })
+                sig_fn.diagnostics = diagnostics  # type: ignore[attr-defined]
+                return sig_fn
+        except Exception as e:
+            # User's code failed to compile/execute. Log loud (this is
+            # important — a silently broken strategy is the bug we just
+            # finished fixing) but keep the engine alive.
+            log.warning(
+                "build_strategy_signal_fn: strategy_id=%s name=%s failed via strategy_runner: %s — falling back to legacy name-matched signal",
+                strategy_id, strategy_name, e,
+            )
+            diagnostics["error"] = str(e)
+
+    # ── Legacy adapter: wrap the old _get_signal_fn(name) into (df, i) shape ──
+    legacy = _get_signal_fn(strategy_name)
+
+    def _legacy_adapter(df_, i):
+        # Legacy signal_fns inspect the latest closed bar themselves and
+        # ignore the index argument. We just pass df_ through.
+        try:
+            return legacy(df_)
+        except Exception as e:
+            log.warning(
+                "legacy signal fn %s raised: %s", strategy_name, e,
+            )
+            return None
+
+    _legacy_adapter.diagnostics = diagnostics  # type: ignore[attr-defined]
+    return _legacy_adapter
+
+
 # ─────────────────────────── position ─────────────────────────────────────
 
 @dataclass
