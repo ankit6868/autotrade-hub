@@ -3308,6 +3308,7 @@ def create_futures_bot(
     arm_be_buffer_pct = float(req.get("arm_be_buffer_pct", 1.0))
     arm_trail_to_tp1  = bool(req.get("arm_trail_to_tp1", True))
 
+    strat = None
     if strategy_id:
         from backend.models.strategy import Strategy
         from sqlalchemy import or_
@@ -3319,6 +3320,69 @@ def create_futures_bot(
         ).scalar_one_or_none()
         if strat:
             strategy_name = strat.name
+
+    # ── Phase 5d — Live Guardrail (PDF §9) ────────────────────────────
+    # Block live trading unless:
+    #   • Strategy compiled successfully (validator can read its code)
+    #   • Confidence score ≥ 85
+    #   • No critical missing fields (direction / entry_trigger / TF)
+    #   • No detected logic conflicts (RSI direction reversed, etc.)
+    # Paper mode bypasses the guard so users can safely experiment with
+    # incomplete strategies before promoting to live.
+    if mode == "live" and strat:
+        try:
+            from backend.services.strategy_validator import validate_for_live
+            live_ok, template, reason = validate_for_live(
+                strategy_name       = strategy_name,
+                strategy_id         = strategy_id,
+                generated_code      = strat.generated_code or "",
+                execution_timeframe = timeframe,
+            )
+            # Cache the validation result on the Strategy row so subsequent
+            # checks don't re-run the validator. Updated every time the
+            # user re-validates explicitly (POST /strategy/validate).
+            try:
+                strat.compiled_template = template.to_dict()
+                strat.confidence_score  = template.confidence_score
+                strat.live_permission   = template.live_permission
+                db.commit()
+            except Exception:
+                pass
+            if not live_ok:
+                # Hard block. Return a structured error the UI can render
+                # nicely (it includes the resolver notes + missing fields
+                # so the user knows exactly what to fix).
+                log_event(db, user_id, "futures.create_bot.blocked_live", request, payload={
+                    "strategy": strategy_name, "reason": reason,
+                    "confidence_score": template.confidence_score,
+                    "live_permission":  template.live_permission,
+                    "missing_fields":   template.missing_fields,
+                    "conflicts":        template.conflicts,
+                })
+                return {
+                    "error":             reason,
+                    "blocked_reason":    "live_guardrail",
+                    "confidence_score":  template.confidence_score,
+                    "live_permission":   template.live_permission,
+                    "missing_fields":    template.missing_fields,
+                    "inferred_fields":   template.inferred_fields,
+                    "conflicts":         template.conflicts,
+                    "resolver_notes":    template.resolver_notes,
+                    "suggestion": (
+                        "Run a backtest first, then paper-trade for a few days. "
+                        "Live trading is blocked until confidence ≥ 85 and all "
+                        "critical fields are present."
+                    ),
+                }
+        except Exception as guard_exc:
+            # Don't fail closed if validator itself errors — that would lock
+            # out every live bot if a release breaks the validator. Log
+            # loudly and continue. (The strategy_compile check on engine
+            # start will still catch broken strategies.)
+            log.warning(
+                "[%s] Live guardrail validator raised: %s — allowing live start "
+                "but flagging for manual review", user_id, guard_exc,
+            )
 
     # ── Deduplication: stop any existing running bot for same strategy+pair+mode ──
     pairs_csv = ",".join(sorted(p.strip() for p in pairs))

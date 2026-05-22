@@ -452,6 +452,11 @@ export const api = {
     getLeverage: (symbol: string) => request<any>(`/api/futures/leverage/${symbol}`),
     setTpSl: (data: { pair: string; tp_price?: number; sl_price?: number }) =>
       request<any>('/api/futures/position/tp-sl', { method: 'POST', body: JSON.stringify(data) }),
+    // Phase 5e — decoded strategy preview (rules + risk + confidence)
+    // Used by the bot Create flow to render the "Strategy understood: X/100"
+    // panel BEFORE the user picks Live.
+    strategyPreview: (strategyId: number, timeframe: string) =>
+      request<any>(`/api/strategy/${strategyId}/preview?timeframe=${encodeURIComponent(timeframe)}`),
     // Phase 6 — partial close (e.g. book 50% then leave remainder)
     partialClose: (data: { pair: string; mode: 'paper' | 'live'; close_pct: number }) =>
       request<any>('/api/futures/position/partial-close', { method: 'POST', body: JSON.stringify(data) }),

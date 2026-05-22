@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
+import StrategyPreview from './StrategyPreview';
 
 interface Props {
   pair: string;
@@ -533,6 +534,17 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   const [armBeMode,      setArmBeMode]      = useState<'leverage' | 'manual_pct' | 'entry'>('leverage');
   const [armBeBufferPct, setArmBeBufferPct] = useState(1.0);
   const [armTrailToTp1,  setArmTrailToTp1]  = useState(true);
+
+  // ── Phase 5e: Strategy preview state ─────────────────────────────────────
+  // Tracked here so we can disable the Create button in LIVE mode when the
+  // strategy isn't live_eligible (matches the backend's hard guardrail in
+  // POST /api/futures/bots so we fail fast in the UI).
+  const [livePermission, setLivePermission] = useState<string>('blocked');
+  const [confidenceScore, setConfidenceScore] = useState<number>(0);
+  const [liveAllowed, setLiveAllowed] = useState<boolean>(false);
+  // Selected execution timeframe — for now we hardcode 15m but expose
+  // here so the preview re-runs when the parent passes it down.
+  const [executionTimeframe, setExecutionTimeframe] = useState<string>('15m');
   const [backtestData, setBacktestData] = useState<number[]>([]);
   const [backtestError, setBacktestError] = useState('');
   const [currentPrice, setCurrentPrice] = useState(0);
@@ -748,6 +760,26 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
 
         {viewTab === 'create' && !success && (
           <div className="px-3 py-3 space-y-4">
+            {/* ── Phase 5e — Decoded Strategy Preview ────────────────────
+                Shows the engine's interpretation of the strategy: decoded
+                rules grouped by role (bias filter / entry trigger / etc.),
+                risk plan, trade limits, confidence score, and missing /
+                inferred fields. When mode=live AND live_permission is not
+                'live_eligible', the Create button below is auto-disabled
+                so the user can't bypass the hard backend guardrail. */}
+            {(bot.id || strategies.find(s => s.name === bot.name)?.id) && (
+              <StrategyPreview
+                strategyId={bot.id || (strategies.find(s => s.name === bot.name)?.id ?? null)}
+                timeframe={executionTimeframe}
+                mode={mode}
+                onPermissionChange={(perm, score, ok) => {
+                  setLivePermission(perm);
+                  setConfidenceScore(score);
+                  setLiveAllowed(ok);
+                }}
+              />
+            )}
+
             {/* Backtest chart */}
             <div>
               <div className="flex items-center gap-1 mb-2">
@@ -1034,15 +1066,30 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         )}
       </div>
 
-      {/* Create button */}
+      {/* Create button — Phase 5e: in LIVE mode, disabled when the
+          backend guardrail would reject it anyway (live_permission ≠
+          'live_eligible'). Paper mode bypasses the guard so users can
+          experiment freely with incomplete strategies. */}
       {viewTab === 'create' && !success && (
         <div className="px-3 py-3 border-t border-white/[0.06]">
+          {mode === 'live' && !liveAllowed && livePermission !== 'blocked' && (
+            <div className="text-[10px] text-red-300 bg-red-500/5 border border-red-500/20 rounded px-2 py-1.5 mb-2 leading-snug">
+              🛑 Live trading blocked by guardrail — confidence {confidenceScore}/100,
+              permission <span className="font-mono">{livePermission}</span>. Use Paper mode
+              or refine the strategy until confidence reaches 85.
+            </div>
+          )}
           <button
             onClick={createBot}
-            disabled={submitting}
-            className="w-full py-3 rounded-lg bg-emerald-500 text-white text-sm font-bold hover:bg-emerald-400 disabled:opacity-50 transition-colors"
+            disabled={submitting || (mode === 'live' && !liveAllowed)}
+            className="w-full py-3 rounded-lg bg-emerald-500 text-white text-sm font-bold hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            title={mode === 'live' && !liveAllowed
+              ? `Live blocked: confidence ${confidenceScore}/100, permission ${livePermission}`
+              : ''}
           >
-            {submitting ? 'Creating...' : `Create ${mode === 'live' ? '(Live — Lead Trading)' : '(Paper)'}`}
+            {submitting
+              ? 'Creating...'
+              : `Create ${mode === 'live' ? '(Live — Lead Trading)' : '(Paper)'}`}
           </button>
         </div>
       )}

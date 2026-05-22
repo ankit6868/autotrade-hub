@@ -24,5 +24,15 @@ class Strategy(Base):
     allow_copy_trading = Column(Boolean, default=False, server_default='false', nullable=True)
     default_leverage   = Column(Integer, default=1,     server_default='1',     nullable=True)
     take_profit        = Column(Float,   default=0.015, server_default='0.015', nullable=True)  # e.g. 0.015 = 1.5%
+    # ── Phase 5 — Structured strategy template (PDF §8) ─────────────────
+    # JSON of the decoded + resolved StrategyTemplate (rules with roles,
+    # risk plan, confidence score, missing/inferred fields, conflicts).
+    # Populated by strategy_validator.validate_and_score after upload and
+    # refreshed when the user edits the code. The bot create endpoint reads
+    # this to enforce the live guardrail (block live unless confidence ≥ 85
+    # and no critical missing fields).
+    compiled_template       = Column(JSON, nullable=True)
+    confidence_score        = Column(Integer, default=0)
+    live_permission         = Column(Text,    default="blocked")   # live_eligible | demo_only | backtest_only | blocked
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

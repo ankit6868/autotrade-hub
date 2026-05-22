@@ -331,6 +331,92 @@ def validate_strategy_by_id(
     }
 
 
+@router.get("/{strategy_id}/preview")
+def preview_strategy_template(
+    strategy_id: int,
+    timeframe: str = "15m",
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Phase 5e — return the decoded StrategyTemplate for the UI to render
+    before the user creates a bot.
+
+    Includes:
+      • conditions[] with role/source/indicator/timeframe
+      • risk plan (sl_type, tp_type, RR, risk_per_trade_pct)
+      • trade_limits (max_trades_per_day, cooldown_candles)
+      • confidence_score (0-100)
+      • live_permission (live_eligible / demo_only / backtest_only / blocked)
+      • missing_fields, inferred_fields, conflicts, resolver_notes
+
+    The bot Create flow reads this to show "Strategy understood: X/100"
+    with a green check or red block icon depending on `live_permission`.
+    Re-runs the validator against the strategy's current code so edits in
+    the strategy editor reflect immediately.
+    """
+    from sqlalchemy import or_
+    from backend.services.strategy_validator import validate_and_score
+    from backend.services.strategy_runner import evaluate_strategy
+    import pandas as pd
+
+    strategy = db.execute(
+        select(Strategy).where(
+            Strategy.id == strategy_id,
+            or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa: E712
+        )
+    ).scalar_one_or_none()
+    if not strategy:
+        return {"error": "Strategy not found"}
+
+    code = strategy.generated_code or ""
+    compiled_df = None
+    try:
+        # Tiny dummy series — enough to surface compile + signal_columns.
+        dummy = pd.DataFrame({
+            "date":  pd.date_range("2024-01-01", periods=400, freq="15min", tz="UTC"),
+            "open":  [100.0 + i * 0.01 for i in range(400)],
+            "high":  [101.0 + i * 0.01 for i in range(400)],
+            "low":   [ 99.0 + i * 0.01 for i in range(400)],
+            "close": [100.5 + i * 0.01 for i in range(400)],
+            "vol":   [1000.0] * 400,
+        })
+        compiled_df = evaluate_strategy(code, dummy)
+    except Exception as e:
+        # Compile failed — return a blocked template with the error.
+        from backend.services.strategy_template import StrategyTemplate
+        tpl = StrategyTemplate(
+            strategy_name       = strategy.name,
+            strategy_id         = strategy.id,
+            description         = strategy.description or "",
+            execution_timeframe = timeframe,
+            confidence_score    = 0,
+            live_permission     = "blocked",
+            missing_fields      = ["entry_trigger"],
+            resolver_notes      = [f"Strategy failed to compile: {e}"],
+        )
+        return tpl.to_dict()
+
+    template = validate_and_score(
+        strategy_name       = strategy.name,
+        strategy_id         = strategy.id,
+        generated_code      = code,
+        description         = strategy.description or "",
+        execution_timeframe = timeframe,
+        compiled_df         = compiled_df,
+        strategy_class      = None,
+    )
+    # Cache on the strategy row so the live guardrail has a quick path.
+    try:
+        strategy.compiled_template = template.to_dict()
+        strategy.confidence_score  = template.confidence_score
+        strategy.live_permission   = template.live_permission
+        db.commit()
+    except Exception:
+        pass
+
+    return template.to_dict()
+
+
 @router.post("/parse")
 @limiter.limit(AI_LIMIT)
 async def reparse_strategy(
