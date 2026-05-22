@@ -50,3 +50,6 @@ desktop.ini
 # IDE
 .vscode/
 .idea/
+
+# Claude Code ephemeral worktrees (don't commit, ever)
+.claude/worktrees/
