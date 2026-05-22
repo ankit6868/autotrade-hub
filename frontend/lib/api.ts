@@ -452,6 +452,17 @@ export const api = {
     getLeverage: (symbol: string) => request<any>(`/api/futures/leverage/${symbol}`),
     setTpSl: (data: { pair: string; tp_price?: number; sl_price?: number }) =>
       request<any>('/api/futures/position/tp-sl', { method: 'POST', body: JSON.stringify(data) }),
+    // Phase 6 — partial close (e.g. book 50% then leave remainder)
+    partialClose: (data: { pair: string; mode: 'paper' | 'live'; close_pct: number }) =>
+      request<any>('/api/futures/position/partial-close', { method: 'POST', body: JSON.stringify(data) }),
+    // Phase 6 — cancel-all endpoints
+    cancelAllOrders: (params?: { mode?: 'paper' | 'live'; symbol?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.mode)   q.set('mode', params.mode);
+      if (params?.symbol) q.set('symbol', params.symbol);
+      const qs = q.toString();
+      return request<any>(`/api/futures/orders/all${qs ? `?${qs}` : ''}`, { method: 'DELETE' });
+    },
     leadTradingStatus: () => request<any>('/api/futures/lead-trading-status'),
     bots: {
       list: (mode?: 'paper' | 'live') =>

@@ -397,6 +397,23 @@ def run_futures_backtest(
                                         # signal is skipped (counted as no-fill). This is
                                         # the single largest scalping cost-saving lever —
                                         # at VIP3 it cuts entry fees by 3x vs taker.
+    # ── Phase 4b: timeframe-aware risk engine ─────────────────────────
+    use_risk_engine: bool = False,      # When True, every signal's SL/TP is routed through
+                                        # backend.services.risk_engine.compute_tp_sl which:
+                                        #   • Honours strategy-provided structural SL/TP if
+                                        #     direction-valid AND RR meets the per-TF min RR
+                                        #   • Otherwise computes ATR-based SL/TP using the
+                                        #     per-TF multiplier table (1m scalp / 5m fast /
+                                        #     15m intraday / 30m large / 1h swing / 4h position)
+                                        #   • Rejects signals where RR < per-TF min RR
+                                        #     (e.g. SMC pivot too close to price on 1m)
+                                        #   • Rejects signals where ATR-based stop > 8% of entry
+                                        #     (crash-spike noise)
+                                        # Backtester counts and reports rejected signals in
+                                        # `signal_dispositions.risk_engine_rejected`.
+                                        # Default OFF for backward compatibility with previous
+                                        # tuning runs — turn ON for production parity with
+                                        # the live bot engine (which uses risk_engine always).
 ) -> dict:
     """
     Run a leveraged futures backtest matching TradingView's methodology:
@@ -698,6 +715,8 @@ def run_futures_backtest(
         trades_opened_short = 0
         skipped_no_margin   = 0   # signal fired but free margin < threshold
         skipped_maker_nofill = 0  # maker-only mode: limit not reached by bar range
+        skipped_risk_engine = 0   # Phase 4b: signal rejected by risk_engine (RR too low, ATR cap)
+        risk_engine_rejections = []   # list of (bar_index, reason) for the diagnostic panel
         # Legacy fields kept for response-shape compatibility.
         skipped_in_trade    = 0
         skipped_cooldown    = 0
@@ -874,6 +893,49 @@ def run_futures_backtest(
                     else:
                         sl = entry_price + sl_dist
                         tp = entry_price - tp_dist
+
+                # ── Phase 4b: timeframe-aware risk engine ──────────────────
+                # When enabled, replace the SL/TP decision above with the
+                # risk_engine's per-TF ATR plan. This makes backtest output
+                # match the live bot engine's behaviour (which always uses
+                # risk_engine since Phase 4). Rejected signals are counted
+                # so the user can see how many setups risk_engine filtered.
+                if use_risk_engine:
+                    from backend.services import risk_engine
+                    # Build a tiny tail slice for ATR computation. risk_engine
+                    # expects an OHLC df at the same TF as the trade. We use
+                    # the last ~60 bars including this one — enough for an
+                    # ATR(14) with a healthy warmup buffer, cheap to slice.
+                    tail_start = max(0, i - 60)
+                    df_for_atr = df.iloc[tail_start:i + 1]
+                    plan = risk_engine.compute_tp_sl(
+                        entry        = float(entry_price),
+                        direction    = sig_dir,
+                        df           = df_for_atr,
+                        timeframe    = timeframe,
+                        strategy_sl  = float(sig_sl) if (use_signal_sltp and sig_sl is not None) else None,
+                        strategy_tp  = float(sig_tp) if (use_signal_sltp and sig_tp is not None) else None,
+                        strategy_tp2 = float(sig_tp2) if (sig_tp2 is not None) else None,
+                    )
+                    if not plan.valid:
+                        # Track + skip — the signal was generated but the risk
+                        # engine rejected it (RR below min, ATR too high, etc.).
+                        # Mirrors what the live engine does on every signal.
+                        skipped_risk_engine += 1
+                        if len(risk_engine_rejections) < 20:
+                            risk_engine_rejections.append({
+                                "bar_index": i,
+                                "direction": sig_dir,
+                                "reason":    plan.rejected_reason,
+                                "atr":       round(plan.atr, 4),
+                                "timeframe": timeframe,
+                            })
+                        continue
+                    sl = plan.sl
+                    tp = plan.tp
+                    # When risk_engine adopted the strategy's structural
+                    # SL/TP, sig_tp2 may also have been validated — leave
+                    # the ARM block below to do its own midpoint math.
 
                 # ── ARM transformation: treat the strategy's furthest TP
                 # as TP2, compute TP1 as midpoint between entry and TP2.
@@ -1502,6 +1564,13 @@ def run_futures_backtest(
         # user can see the realistic non-fill rate of their setup.
         data_diagnostics[pair]["signals_skipped_maker_nofill"] = skipped_maker_nofill
         data_diagnostics[pair]["maker_only_entry"]             = bool(maker_only_entry)
+        # Phase 4b — risk_engine rejections. Surfaces to the UI so users
+        # can see how many setups risk_engine filtered (RR below per-TF
+        # min, ATR cap exceeded, etc.). Includes the first 20 rejections
+        # with reason text for transparency / debugging.
+        data_diagnostics[pair]["use_risk_engine"]              = bool(use_risk_engine)
+        data_diagnostics[pair]["signals_skipped_risk_engine"]  = skipped_risk_engine
+        data_diagnostics[pair]["risk_engine_rejections"]       = risk_engine_rejections
         data_diagnostics[pair]["vip_tier"]                     = int(max(0, min(12, vip_tier)))
         data_diagnostics[pair]["fee_rates_pct"] = {
             "maker": round(maker_fee_rate * 100, 5),

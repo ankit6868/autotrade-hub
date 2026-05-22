@@ -378,6 +378,13 @@ def run_futures_backtest(
     vip_tier         = max(0, min(12, int(req.get("vip_tier", 0))))
     maker_only_entry = bool(req.get("maker_only_entry", False))
 
+    # ── Phase 4b: timeframe-aware risk engine ──
+    # When True, every signal's SL/TP is routed through risk_engine.compute_tp_sl
+    # so backtest behaviour matches the live engine (which uses risk_engine
+    # always since Phase 4). Default OFF so existing API callers / auto-tune
+    # runs see no change unless they explicitly enable it.
+    use_risk_engine  = bool(req.get("use_risk_engine", False))
+
     # Resolve strategy — pull generated_code so the backtester can actually
     # run the user's authored logic instead of pattern-matching the name to
     # one of the hardcoded built-in signal functions.
@@ -417,6 +424,7 @@ def run_futures_backtest(
         tick_precision    = tick_precision,
         vip_tier          = vip_tier,
         maker_only_entry  = maker_only_entry,
+        use_risk_engine   = use_risk_engine,
     )
 
     if "error" in result:
@@ -2057,6 +2065,252 @@ def cancel_futures_order(
     log_event(db, user_id, "futures.cancel_order", request,
               payload={"order_id": order_id, "kucoin_cancelled": kucoin_cancelled})
     return {**(result or {}), "kucoin_cancelled": kucoin_cancelled, "order_id": order_id}
+
+
+# ── Phase 6 — Cancel-all + partial-close endpoints ──────────────────────
+#
+# The user pointed out the app has single-order cancel but no cancel-all
+# and no partial-close. These three endpoints fill that gap:
+#
+#   DELETE /api/futures/orders/all?mode=paper|live  → cancel every pending
+#       order in that mode (DB rows + KuCoin cancellation for live).
+#   DELETE /api/futures/orders/symbol/{symbol}?mode=...  → cancel everything
+#       on one symbol/pair (used by the per-pair "Cancel All" button).
+#   POST   /api/futures/position/partial-close      → close X% of an open
+#       position via reduce-only market order. Used by the "Book 50% then
+#       cancel rest" workflow the user described.
+#
+# Reuses the existing single-order cancel + KuCoin Lead Trading post path
+# so error semantics are identical to the manual-trading flow.
+
+@router.delete("/orders/all")
+def cancel_all_futures_orders(
+    request: Request,
+    mode: str | None = None,
+    symbol: str | None = None,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Cancel every pending futures order for this user, optionally filtered
+    by `mode` ('paper'|'live') and/or `symbol`.
+
+    Behaviour:
+      • Paper orders: removed from the in-memory engine's pending-orders dict.
+      • Live orders: a KuCoin Lead Trading DELETE is attempted for each;
+        failures are reported per-order without aborting the whole batch.
+      • DB rows: marked cancelled with timestamp.
+
+    Returns a summary `{cancelled: N, failed: [...], kucoin_attempted: N}`.
+    """
+    # Fetch every pending order matching the filters
+    q = select(FuturesOrder).where(
+        FuturesOrder.user_id == user_id,
+        FuturesOrder.status == "pending",
+    )
+    if mode in ("paper", "live"):
+        q = q.where(FuturesOrder.mode == mode)
+    if symbol:
+        # Match KuCoin (BTCUSDTM) and slash (BTC/USDT) variants
+        from sqlalchemy import or_ as _or
+        sym_variants = [symbol, symbol.replace("/", ""), symbol.replace("/", "").replace("USDT", "USDTM")]
+        q = q.where(_or(*[FuturesOrder.symbol == s for s in sym_variants]))
+
+    orders = db.execute(q).scalars().all()
+    if not orders:
+        return {"cancelled": 0, "failed": [], "kucoin_attempted": 0, "message": "No pending orders match the filter"}
+
+    eng = futures_engine_registry.for_user(user_id)
+    now = datetime.utcnow()
+    cancelled = 0
+    failed: list[dict] = []
+    kucoin_attempted = 0
+
+    for o in orders:
+        # 1. Mark DB row cancelled
+        o.status = "cancelled"
+        o.cancelled_at = now
+
+        # 2. Drop from in-memory engine (paper or live's local pending list)
+        try:
+            eng.cancel_pending_order(o.client_oid or f"db-{o.id}")
+        except Exception:
+            pass
+
+        # 3. For LIVE orders that hit KuCoin, attempt the exchange-side cancel
+        # using the same DELETE /api/v1/copy-trade/futures/orders?orderId=X
+        # path the single-order cancel uses (proven working in commit 9e7eb76).
+        if o.mode == "live" and o.exchange_order_id:
+            kucoin_attempted += 1
+            try:
+                from backend.utils.encryption import decrypt
+                cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+                if cfg and eng._api_key:
+                    import urllib.request, json as _json
+                    from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
+                    from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+                    from urllib.parse import urlencode
+                    ts = str(int(_time.time() * 1000))
+                    qs = urlencode({"orderId": o.exchange_order_id})
+                    endpoint = f"/api/v1/copy-trade/futures/orders?{qs}"
+                    headers = _sign_request(
+                        eng._api_sec, eng._api_pass, eng._api_key,
+                        ts, "DELETE", endpoint,
+                    )
+                    url = f"{_base}{endpoint}"
+                    req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
+                    with _proxy_urlopen(req_obj, timeout=15) as resp:
+                        cancel_resp = _json.loads(resp.read().decode())
+                    code = str(cancel_resp.get("code", ""))
+                    if code != "200000":
+                        failed.append({
+                            "order_id": o.id, "exchange_id": o.exchange_order_id,
+                            "error": cancel_resp.get("msg") or f"KuCoin code {code}",
+                        })
+            except Exception as e:
+                failed.append({"order_id": o.id, "exchange_id": o.exchange_order_id, "error": str(e)})
+
+        cancelled += 1
+
+    db.commit()
+    log_event(db, user_id, "futures.cancel_all_orders", request,
+              payload={"mode": mode, "symbol": symbol, "cancelled": cancelled,
+                       "failed": len(failed)})
+    return {
+        "cancelled":        cancelled,
+        "failed":           failed,
+        "kucoin_attempted": kucoin_attempted,
+        "mode":             mode,
+        "symbol":           symbol,
+    }
+
+
+@router.post("/position/partial-close")
+def partial_close_futures_position(
+    req: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Close a configurable percentage of an open futures position.
+
+    Body:
+      {
+        "pair":      "BTC/USDT",       # required
+        "mode":      "paper" | "live", # required
+        "close_pct": 50,               # 1..99 (percentage of position to close)
+      }
+
+    Workflow:
+      1. Locate the open position on the per-user engine (paper) or the
+         per-user/per-bot engine (when bot_id provided).
+      2. PAPER: book partial P&L into engine.balance, reduce position
+         remaining_pct, update closed_trades audit, return the booking.
+      3. LIVE: send a reduce-only market order to KuCoin Lead Trading
+         for close_pct of the position's contract count. Local position
+         is updated to reflect the reduction.
+
+    Used by the bot panel's "Book 50%" button and by ARM TP1 booking
+    (the engine calls this internally too in Phase 3).
+    """
+    pair      = req.get("pair")
+    mode      = req.get("mode", "paper")
+    close_pct = float(req.get("close_pct", 50))
+    if not pair:
+        return {"error": "pair is required"}
+    if not (0.5 <= close_pct <= 99.5):
+        return {"error": "close_pct must be between 0.5 and 99.5"}
+    if mode not in ("paper", "live"):
+        return {"error": "mode must be 'paper' or 'live'"}
+
+    eng = futures_engine_registry.for_user(user_id)
+
+    # Find the open position for this pair.
+    pos = None
+    trade_key = None
+    for k, p in eng.positions.items():
+        if p.pair == pair:
+            pos = p
+            trade_key = k
+            break
+
+    if pos is None:
+        return {"error": f"No open position for {pair} in {mode} mode"}
+
+    if mode != eng._mode:
+        return {"error": f"Position is in {eng._mode} mode, request asked for {mode}"}
+
+    close_fraction = close_pct / 100.0
+    # Use the engine's last-known price as the partial-fill reference.
+    # In live mode this is updated every tick from KuCoin; in paper mode
+    # it tracks the same market data so paper exits match live timing.
+    fill_price = eng._get_live_price(pair) or pos.entry
+    from datetime import timezone as _tz
+    now = datetime.now(_tz.utc)
+
+    # Compute leg P&L (mirror of FuturesPosition.book_partial_at_tp1, but
+    # configurable close_pct instead of pos.tp1_close_pct).
+    leg_margin = pos.size * close_fraction
+    if pos.direction == "long":
+        raw_pct = (fill_price - pos.entry) / pos.entry
+    else:
+        raw_pct = (pos.entry - fill_price) / pos.entry
+    leveraged_pct = raw_pct * getattr(pos, "leverage", 1)
+    leg_pnl = leg_margin * leveraged_pct
+
+    # Update position state (works for both ARM and non-ARM positions).
+    if not hasattr(pos, "partial_pnl_abs"):
+        pos.partial_pnl_abs = 0.0
+    if not hasattr(pos, "partial_exits"):
+        pos.partial_exits = []
+    if not hasattr(pos, "remaining_pct"):
+        pos.remaining_pct = 1.0
+    pos.partial_pnl_abs += leg_pnl
+    pos.remaining_pct   -= close_fraction
+    pos.partial_exits.append({
+        "ts":         now.isoformat(),
+        "price":      round(float(fill_price), 6),
+        "reason":     "manual_partial_close",
+        "close_pct":  round(close_fraction, 4),
+        "pnl_abs":    round(float(leg_pnl), 4),
+    })
+    eng.balance += leg_pnl
+
+    # LIVE: also send the reduce-only market order to KuCoin.
+    if mode == "live":
+        try:
+            eng._place_live_partial_close(pair, pos, close_fraction, fill_price)
+        except Exception as e:
+            log_event(db, user_id, "futures.partial_close.live_failed", request,
+                      payload={"pair": pair, "close_pct": close_pct, "error": str(e)})
+            return {
+                "ok":              False,
+                "error":           f"Local position updated but KuCoin order failed: {e}",
+                "leg_pnl":         round(leg_pnl, 4),
+                "remaining_pct":   round(pos.remaining_pct, 4),
+            }
+
+    # If close_pct = ~100, the position is effectively flat — auto-close it.
+    if pos.remaining_pct <= 0.01:
+        pos.close(fill_price, "manual_full_close", now)
+        eng.closed_trades.append(pos)
+        del eng.positions[trade_key]
+        from backend.services.native_trading_engine import _persist_closed_trade
+        _persist_closed_trade(user_id, pos, mode, eng._strategy_id, pos.db_id)
+
+    log_event(db, user_id, "futures.partial_close", request,
+              payload={"pair": pair, "mode": mode, "close_pct": close_pct,
+                       "leg_pnl": round(leg_pnl, 4),
+                       "remaining_pct": round(pos.remaining_pct, 4)})
+    return {
+        "ok":            True,
+        "pair":          pair,
+        "mode":          mode,
+        "fill_price":    round(float(fill_price), 6),
+        "close_pct":     close_pct,
+        "leg_pnl":       round(leg_pnl, 4),
+        "remaining_pct": round(pos.remaining_pct, 4),
+        "fully_closed":  pos.remaining_pct <= 0.01,
+    }
 
 
 @router.get("/orders")

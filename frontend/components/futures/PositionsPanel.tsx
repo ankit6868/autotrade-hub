@@ -70,6 +70,51 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
     setClosingPair(null);
   }
 
+  // Phase 6 — book a configurable percentage of the position at market.
+  // Used by the per-row dropdown (25/50/75%) on the Positions tab.
+  async function partialClose(pair: string, pct: number) {
+    setClosingPair(pair);
+    try {
+      const res = await api.futures.partialClose({ pair, mode, close_pct: pct });
+      if (res?.error) {
+        alert(res.error);
+      } else {
+        // Quick toast in the action log via re-render
+        console.info(
+          `Partial close ${pair} ${pct}%: leg P&L=${res.leg_pnl}, remaining=${res.remaining_pct}`,
+        );
+      }
+      refreshAll();
+      onRefresh?.();
+    } catch (e) {
+      alert(`Partial close failed: ${e}`);
+    }
+    setClosingPair(null);
+  }
+
+  // Phase 6 — cancel every pending order in the current mode (or for one
+  // symbol). Used by the "Cancel All" button on the Open Orders tab.
+  async function cancelAllOrders(symbol?: string) {
+    const label = symbol ? `cancel ALL pending orders for ${symbol}` : `cancel ALL pending ${mode} orders`;
+    if (!confirm(`Are you sure you want to ${label}?`)) return;
+    try {
+      const res = await api.futures.cancelAllOrders({ mode, symbol });
+      if (res?.error) {
+        alert(res.error);
+      } else {
+        const failedNote = res.failed?.length
+          ? ` (${res.failed.length} KuCoin cancel failures — see console)`
+          : '';
+        console.info('cancelAllOrders result:', res);
+        alert(`Cancelled ${res.cancelled} order(s)${failedNote}`);
+      }
+      refreshAll();
+      onRefresh?.();
+    } catch (e) {
+      alert(`Cancel All failed: ${e}`);
+    }
+  }
+
   async function cancelOrder(orderId: string) {
     try {
       const res = await api.futures.cancelOrder(orderId);
@@ -153,11 +198,17 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
             closingPair={closingPair}
             onClose={closePosition}
             onCloseAll={closeAllPositions}
+            onPartialClose={partialClose}
             onRefresh={refreshAll}
           />
         )}
         {tab === 'open_orders' && (
-          <OrdersTab orders={openOrders} onCancel={cancelOrder} />
+          <OrdersTab
+            orders={openOrders}
+            mode={mode}
+            onCancel={cancelOrder}
+            onCancelAll={cancelAllOrders}
+          />
         )}
         {tab === 'order_history' && (
           <OrderHistoryTab mode={mode} />
@@ -179,9 +230,12 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
   );
 }
 
-function PositionsTab({ positions, closingPair, onClose, onCloseAll, onRefresh }: {
+function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialClose, onRefresh }: {
   positions: any[]; closingPair: string | null;
   onClose: (pair: string) => void; onCloseAll: () => void;
+  // Phase 6: optional partial-close callback. When provided, the
+  // "Close" button gains a dropdown for 25/50/75% partial close.
+  onPartialClose?: (pair: string, pct: number) => void;
   onRefresh?: () => void;
 }) {
   // TP/SL editor state — opens an inline modal for the selected position.
@@ -293,20 +347,45 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onRefresh }
                 </td>
                 <td className="text-right px-2 py-2 text-slate-400">{riskRatio}%</td>
                 <td className="text-center px-2 py-2">
-                  <div className="flex items-center justify-center gap-1">
-                    <button
-                      onClick={() => onClose(p.pair)}
-                      disabled={closingPair === p.pair}
-                      className="px-2 py-1 rounded bg-slate-700 text-slate-300 text-[10px] hover:bg-slate-600 disabled:opacity-50"
-                    >
-                      Close
-                    </button>
+                  <div className="flex items-center justify-center gap-1 flex-wrap">
+                    {/* Phase 6 — partial-close buttons. Quick books at
+                        25/50/75% so the user can lock in a portion of
+                        an in-profit trade without closing everything. */}
+                    {onPartialClose && (
+                      <>
+                        <button
+                          onClick={() => onPartialClose(p.pair, 25)}
+                          disabled={closingPair === p.pair}
+                          className="px-1.5 py-1 rounded bg-emerald-500/10 text-emerald-400 text-[10px] hover:bg-emerald-500/20 disabled:opacity-50"
+                          title="Book 25% of the position at market — keeps 75% open"
+                        >
+                          25%
+                        </button>
+                        <button
+                          onClick={() => onPartialClose(p.pair, 50)}
+                          disabled={closingPair === p.pair}
+                          className="px-1.5 py-1 rounded bg-emerald-500/15 text-emerald-400 text-[10px] hover:bg-emerald-500/25 disabled:opacity-50"
+                          title="Book 50% of the position at market — keeps 50% open"
+                        >
+                          50%
+                        </button>
+                        <button
+                          onClick={() => onPartialClose(p.pair, 75)}
+                          disabled={closingPair === p.pair}
+                          className="px-1.5 py-1 rounded bg-emerald-500/20 text-emerald-400 text-[10px] hover:bg-emerald-500/30 disabled:opacity-50"
+                          title="Book 75% of the position at market — keeps 25% open"
+                        >
+                          75%
+                        </button>
+                      </>
+                    )}
                     <button
                       onClick={() => onClose(p.pair)}
                       disabled={closingPair === p.pair}
                       className="px-2 py-1 rounded bg-red-500/20 text-red-400 text-[10px] hover:bg-red-500/30"
+                      title="Market close 100% of the position"
                     >
-                      Market Close
+                      Close
                     </button>
                   </div>
                 </td>
@@ -732,7 +811,16 @@ function _displayPair(symbol: string | undefined): string {
   return s;
 }
 
-function OrdersTab({ orders, onCancel }: { orders: any[]; onCancel: (id: string) => void }) {
+function OrdersTab({ orders, mode, onCancel, onCancelAll }: {
+  orders: any[];
+  mode?: 'paper' | 'live';
+  onCancel: (id: string) => void;
+  // Phase 6 — optional cancel-all-orders callback. When provided, the
+  // top-right "Cancel All" button is shown; clicking confirms and then
+  // cancels every pending order in the current mode (optionally filtered
+  // to one symbol via the per-row button, also wired below).
+  onCancelAll?: (symbol?: string) => void;
+}) {
   // Split into Basic vs Advanced (TP/SL stop) orders to mirror KuCoin's UX.
   const advanced = orders.filter(o => o.kind === 'stop');
   const basic    = orders.filter(o => o.kind !== 'stop');
@@ -746,19 +834,30 @@ function OrdersTab({ orders, onCancel }: { orders: any[]; onCancel: (id: string)
 
   return (
     <div>
-      <div className="flex gap-2 mb-2 border-b border-white/[0.04]">
-        <button
-          onClick={() => setSubtab('basic')}
-          className={`px-3 py-1.5 text-xs ${subtab === 'basic' ? 'text-white border-b-2 border-emerald-400' : 'text-slate-500'}`}
-        >
-          Basic Orders ({basic.length})
-        </button>
-        <button
-          onClick={() => setSubtab('advanced')}
-          className={`px-3 py-1.5 text-xs ${subtab === 'advanced' ? 'text-white border-b-2 border-emerald-400' : 'text-slate-500'}`}
-        >
-          Advanced Orders ({advanced.length})
-        </button>
+      <div className="flex items-center justify-between gap-2 mb-2 border-b border-white/[0.04]">
+        <div className="flex gap-2">
+          <button
+            onClick={() => setSubtab('basic')}
+            className={`px-3 py-1.5 text-xs ${subtab === 'basic' ? 'text-white border-b-2 border-emerald-400' : 'text-slate-500'}`}
+          >
+            Basic Orders ({basic.length})
+          </button>
+          <button
+            onClick={() => setSubtab('advanced')}
+            className={`px-3 py-1.5 text-xs ${subtab === 'advanced' ? 'text-white border-b-2 border-emerald-400' : 'text-slate-500'}`}
+          >
+            Advanced Orders ({advanced.length})
+          </button>
+        </div>
+        {onCancelAll && orders.length > 1 && (
+          <button
+            onClick={() => onCancelAll(undefined)}
+            className="text-[10px] text-red-400 hover:text-red-300 font-medium pr-2"
+            title={`Cancel every pending ${mode || ''} order shown here`}
+          >
+            Cancel All ({orders.length})
+          </button>
+        )}
       </div>
       {subtab === 'basic'    ? <BasicOrdersTable    orders={basic}    onCancel={onCancel} /> : null}
       {subtab === 'advanced' ? <AdvancedOrdersTable orders={advanced} onCancel={onCancel} /> : null}

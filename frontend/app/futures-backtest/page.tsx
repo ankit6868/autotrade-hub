@@ -143,6 +143,10 @@ function FuturesBacktestInner() {
   // Trades pay maker fees (cheaper) but some signals don't fill if
   // price moves past the limit before the next bar's range crosses it.
   const [makerOnlyEntry,   setMakerOnlyEntry]   = useState(false);
+  // Phase 4b: timeframe-aware risk engine — routes every signal's SL/TP
+  // through risk_engine.compute_tp_sl so backtest matches the live bot
+  // engine's behaviour. Default OFF for backward compat with prior tuning.
+  const [useRiskEngine,    setUseRiskEngine]    = useState(false);
 
   useEffect(() => {
     api.strategy.list().then(d => {
@@ -638,6 +642,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         tick_precision:     tickPrecision,
         vip_tier:           vipTier,
         maker_only_entry:   makerOnlyEntry,
+        use_risk_engine:    useRiskEngine,
       });
       if (data.error) setError(data.error);
       else {
@@ -1303,6 +1308,48 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
               </div>
             </div>
           )}
+        </div>
+
+        {/* ── Phase 4b: Timeframe-aware Risk Engine ─────────────────────
+            When ON, every signal's SL/TP is routed through risk_engine
+            which (a) honours strategy structural levels when valid +
+            RR≥min, (b) otherwise computes ATR-based per-TF SL/TP, and
+            (c) rejects signals that fail the RR or volatility cap. This
+            makes backtest behaviour match the live bot engine, which
+            uses risk_engine on every signal. */}
+        <div className="mb-5 flex items-center gap-3 flex-wrap">
+          <label className="label !mb-0 flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={useRiskEngine}
+              onChange={e => setUseRiskEngine(e.target.checked)}
+              className="accent-emerald-500"
+            />
+            <span>📐 Timeframe-aware Risk Engine</span>
+            <span
+              className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300"
+              title={
+                'When ON: every signal\'s SL/TP runs through risk_engine.compute_tp_sl.\n' +
+                '• Strategy SL/TP honoured if direction-valid and RR ≥ per-TF minimum.\n' +
+                '• Otherwise SL/TP derived from ATR × per-TF multipliers:\n' +
+                '   1m scalp:  SL=0.85×ATR  TP=2.0×ATR  min RR=2.0\n' +
+                '   5m fast:   SL=1.0×ATR   TP=2.3×ATR  min RR=2.0\n' +
+                '   15m intra: SL=1.3×ATR   TP=2.7×ATR  min RR=2.0\n' +
+                '   30m large: SL=1.6×ATR   TP=3.2×ATR  min RR=2.0\n' +
+                '   1h swing:  SL=2.0×ATR   TP=4.0×ATR  min RR=2.0\n' +
+                '   4h pos:    SL=2.5×ATR   TP=5.0×ATR  min RR=2.0\n' +
+                '• Rejects signals where stop > 8% of entry (crash-vol cap).\n' +
+                'Backtest output matches the live bot engine when ON.'
+              }
+            >
+              {useRiskEngine ? 'ATR × per-TF + RR gate' : 'strategy / slider SL-TP'}
+            </span>
+          </label>
+          <span className="text-[11px] text-slate-400 leading-snug max-w-lg">
+            {useRiskEngine
+              ? <>SL/TP scales with <b className="text-emerald-300">{timeframe}</b>. Rejections (RR &lt; 2.0, ATR cap) appear in diagnostics.</>
+              : <>Legacy: strategy structural OR slider %. Live bot uses risk_engine always — turn ON for parity.</>}
+          </span>
         </div>
 
         {/* ── Tick-level SL/TP precision ─────────────────────────────────
