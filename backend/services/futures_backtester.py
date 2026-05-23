@@ -557,11 +557,22 @@ def run_futures_backtest(
                 )
                 # MTF analyzer: pass the current pair + tf so HTF context
                 # is available to populate_indicators. historical_anchor_ts
-                # caps HTF candles to the strategy's "now" so we don't
-                # leak future data into the backtest.
+                # caps HTF candles to the backtest's window end so we
+                # don't fetch HTF bars from periods AFTER the backtest
+                # window (correctness + avoids over-fetching).
+                #
+                # The earlier code commented this intent but never passed
+                # the anchor — mtf_analyzer was fetching HTF candles all
+                # the way to "now" (which on long-running deployments
+                # could be years past the backtest period). For most
+                # strategies merge_asof's `direction=backward` already
+                # prevented LTF rows from seeing future HTF bars, but
+                # explicitly anchoring is belt-and-suspenders correct
+                # AND it cuts down REST traffic for old-period backtests.
                 df = evaluate_strategy(
                     generated_code, df,
                     pair=pair, execution_tf=timeframe,
+                    historical_anchor_ts=fetch_end_ts,
                 )
                 # If the user's strategy class declares its OWN stoploss /
                 # minimal_roi, prefer those over slider values BY DEFAULT —
