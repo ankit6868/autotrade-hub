@@ -1507,12 +1507,27 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
         </div>
       </div>
 
-      {/* Config row */}
-      <div className="flex items-center gap-3 px-3 py-1.5 border-b border-white/[0.06] text-[10px] text-slate-400">
+      {/* Config row — shows the bot's CURRENT runtime config so the user
+          can verify at a glance what settings the bot was created with.
+          Was missing timeframe + ARM status previously, which made it
+          impossible to confirm whether the bot was actually on the TF /
+          ARM combo the user picked at Create time. */}
+      <div className="flex items-center flex-wrap gap-x-3 gap-y-1 px-3 py-1.5 border-b border-white/[0.06] text-[10px] text-slate-400">
         <span>{data.pairs}</span>
+        {data.timeframe && (
+          <span className="text-sky-300" title="Execution timeframe — drives entry trigger cadence and MTF role assignment">
+            TF: {data.timeframe}
+          </span>
+        )}
         <span>{data.leverage}x</span>
         <span>Risk: {data.risk_pct || 5}%</span>
         <span className={data.mode === 'live' ? 'text-emerald-400' : 'text-indigo-400'}>{data.mode}</span>
+        {data.arm_enabled && (
+          <span className="text-purple-300"
+                title={`ARM: TP1 ${data.arm_tp1_close_pct}% close, BE mode=${data.arm_be_mode}, trail-to-TP1=${data.arm_trail_to_tp1 ? 'on' : 'off'}`}>
+            ARM (TP1 {data.arm_tp1_close_pct}%)
+          </span>
+        )}
       </div>
 
       {/* Tab selector */}

@@ -3948,6 +3948,21 @@ def futures_bot_performance(
         "pairs": instance.pairs,
         "leverage": instance.leverage,
         "risk_pct": instance.risk_pct,
+        # ── Configured-at-create-time fields surfaced to the UI ────────
+        # Previously the running-bot panel showed leverage + mode + pairs
+        # but NOT the timeframe or ARM config the user picked when they
+        # clicked "Create (Paper)". This made it impossible to verify
+        # at a glance whether the running bot was actually on the TF /
+        # ARM setup the user intended. Surface all of it now so the UI
+        # can render a "currently configured" summary.
+        "timeframe":          instance.timeframe,
+        "stoploss":           instance.stoploss,
+        "takeprofit":         instance.takeprofit,
+        "arm_enabled":        getattr(instance, "arm_enabled", False),
+        "arm_tp1_close_pct":  getattr(instance, "arm_tp1_close_pct", 50.0),
+        "arm_be_mode":        getattr(instance, "arm_be_mode", "leverage"),
+        "arm_be_buffer_pct":  getattr(instance, "arm_be_buffer_pct", 1.0),
+        "arm_trail_to_tp1":   getattr(instance, "arm_trail_to_tp1", True),
         "signal_criteria": signal_criteria,
         "trades": [
             {
