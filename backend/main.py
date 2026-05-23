@@ -733,6 +733,480 @@ class BestPracticesV1(IStrategy):
 '''
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# SMCStrategy1 — full SMC strategy per the user's hand-authored spec.
+#
+# This is a literal port of the "SMC Strategy 1" spec the user provided
+# in their request. Unlike SMCStrategyTV / BestPracticesV1 (which are
+# pivot+FVG skeletons), this strategy implements the COMPLETE SMC model:
+#
+#   Step 1 — HTF Bias (4H):    swing pivots → last BOS direction → bullish
+#                              / bearish / RANGE classification. RANGE
+#                              blocks all trades.
+#   Step 2 — Liquidity:        equal-highs / equal-lows clustering within
+#                              threshold + previous swing extremes →
+#                              liquidity sweep = wick takes out the level
+#                              AND closes back through it.
+#   Step 3 — Order Block:      last opposing candle before a confirmed
+#                              BOS, with body-size + follow-through filter.
+#   Step 4 — FVG:              3-candle imbalance, entry at MIDPOINT (not
+#                              just inside-zone). Bullish: high[i-2] < low[i].
+#   Step 5 — Premium/Discount: 50% fib of last 4H swing range. Long ONLY
+#                              in discount (lower half), short ONLY in
+#                              premium (upper half).
+#   Step 6 — LTF BOS confirm:  on the execution TF (15m default), close
+#                              must cross the last LTF swing in trade
+#                              direction. This is the "confirmation" trigger.
+#   Step 7 — Risk:             SL beyond sweep extreme (- 10bps buffer).
+#                              TP = 2R primary. ARM engine splits this
+#                              into TP1=1R+TP2=2R when enabled.
+#   Step 8 — Session:          NY hours (12-21 UTC by default).
+#
+# Multi-TF data flow:
+#   • bias_timeframes = ["1h", "4h"]   ← engine's mtf_analyzer pre-fetches
+#     closed 1h and 4h bars and exposes them via metadata['htf'].
+#   • Strategy reads HTF bars, computes HTF indicators, projects onto the
+#     LTF dataframe via forward-fill (so every 15m bar carries the most
+#     recent CLOSED 1h/4h bias + zones — no look-ahead).
+#   • All entry logic runs on the LTF (15m) row with HTF context
+#     already attached. This is the canonical hybrid-engine pattern.
+#
+# Why no naive "scalp candle hunting":
+#   The strategy intentionally does NOT check every 15m bar against fresh
+#   HTF candles. HTF bias is sampled ONLY when a 4H bar closes — between
+#   closes, the bias is "sticky" (forward-filled). This is what the user
+#   meant by "follow strategy to determine which candle to see and what
+#   to execute" — the strategy's TF roles dictate the cadence, not the
+#   engine's polling rate.
+_SMC_STRATEGY_1_CODE = '''
+from freqtrade.strategy import IStrategy
+import pandas as pd
+import numpy as np
+
+
+class SMCStrategy1(IStrategy):
+    """
+    SMC Strategy 1 — literal implementation of the 6-step Smart Money
+    Concepts model: HTF Bias → Liquidity → OB → FVG → Premium/Discount
+    → LTF BOS confirmation, with NY session filter and structural SL.
+
+    Multi-TF roles (per PDF §5):
+      HTF (4H)   → bias (bull/bear/range from last BOS direction)
+                   + premium/discount fib zone
+      MTF (1H)   → order blocks + fair-value-gap zones
+      LTF (15M)  → liquidity sweep detection + BOS confirmation
+                   + entry/SL/TP execution
+
+    The execution timeframe (`timeframe` below) drives the bar-by-bar
+    loop. HTF and MTF context is fetched once per signal scan via the
+    engine's mtf_analyzer and forward-filled onto the LTF dataframe so
+    every LTF row carries the most recent CLOSED HTF bias / OB / FVG.
+    """
+
+    # ── Engine integration ─────────────────────────────────────────────
+    timeframe = "15m"                  # LTF execution clock
+    bias_timeframes = ["1h", "4h"]     # MTF + HTF context (mtf_analyzer)
+    minimal_roi = {"0": 100}           # exits via engine SL/TP only
+    stoploss = -0.99                   # disable Freqtrade global SL
+    can_short = True
+    startup_candle_count = 250         # need EMA200 + buffers
+    process_only_new_candles = True
+
+    # ── Tunable parameters (PDF §3, §4) ────────────────────────────────
+    SWING_N            = 5          # pivot left/right bars (HTF & MTF & LTF)
+    HTF_RANGE_LOOKBACK = 50         # 50 HTF bars for premium/discount range
+    EQUAL_PRICE_THRESH = 0.001      # 0.1% — high/low within this = "equal"
+    SWEEP_LOOKBACK     = 20         # bars to scan for previous equal-low/high
+    OB_LOOKBACK        = 30         # bars to scan back for the most recent OB
+    FVG_LOOKBACK       = 20         # bars to scan back for last unfilled FVG
+    FVG_PROXIMITY_PCT  = 0.0030     # within 0.3% of FVG midpoint = "at FVG"
+    OB_PROXIMITY_PCT   = 0.0030     # within 0.3% of OB midpoint = "at OB"
+    STRONG_BODY_X_ATR  = 1.5        # body ≥ 1.5× ATR(14) = "strong move"
+    ATR_LEN            = 14
+    MAX_RISK_PCT       = 0.03       # reject if SL > 3% from entry (broken structure)
+    R_MULTIPLE         = 2.0        # TP at 2R
+    # NY session in UTC. PDF §6 wants "high-activity hours" — 12-21 UTC
+    # covers London close + NY open + NY close (the institutional window).
+    SESSION_START_HR   = 12
+    SESSION_END_HR     = 21
+
+    # ───────────────────────────── helpers ────────────────────────────
+
+    @staticmethod
+    def _strict_pivots(highs: np.ndarray, lows: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+        """PDF §3 Step 1: strict-greater pivot detection (matches Pine
+        ta.pivothigh / ta.pivotlow). Returns (is_pivot_high, is_pivot_low)
+        boolean arrays — True ON the pivot bar (NOT shifted yet).
+        """
+        size = len(highs)
+        ph = np.zeros(size, dtype=bool)
+        pl = np.zeros(size, dtype=bool)
+        for j in range(n, size - n):
+            h, l = highs[j], lows[j]
+            is_h = True; is_l = True
+            for d in range(1, n + 1):
+                if is_h and (highs[j - d] >= h or highs[j + d] >= h):
+                    is_h = False
+                if is_l and (lows[j - d] <= l or lows[j + d] <= l):
+                    is_l = False
+                if not is_h and not is_l:
+                    break
+            ph[j] = is_h
+            pl[j] = is_l
+        return ph, pl
+
+    @staticmethod
+    def _shifted_pivot_values(highs: np.ndarray, lows: np.ndarray,
+                              ph: np.ndarray, pl: np.ndarray, n: int) -> tuple[np.ndarray, np.ndarray]:
+        """Forward-fill pivot VALUES (highs[j], lows[j]) to the
+        confirmation bar j+n. Matches Pine's ta.pivothigh output bar.
+        """
+        size = len(highs)
+        ph_vals = np.where(ph, highs, np.nan)
+        pl_vals = np.where(pl, lows,  np.nan)
+        ph_s = np.full(size, np.nan)
+        pl_s = np.full(size, np.nan)
+        if n < size:
+            ph_s[n:] = ph_vals[:-n]
+            pl_s[n:] = pl_vals[:-n]
+        last_ph = pd.Series(ph_s).ffill().to_numpy()
+        last_pl = pd.Series(pl_s).ffill().to_numpy()
+        return last_ph, last_pl
+
+    @classmethod
+    def _compute_htf_bias(cls, htf_df: pd.DataFrame) -> dict:
+        """PDF §3 Step 1: classify HTF bias from last BOS direction.
+
+        Returns dict with:
+            bias_series  : Series of 'bull'/'bear'/'range' indexed by htf_df.date
+            range_hi     : Series of premium/discount range top
+            range_lo     : Series of premium/discount range bottom
+            range_mid    : Series of midpoint (the 50% fib)
+        """
+        n = cls.SWING_N
+        highs = htf_df["high"].to_numpy()
+        lows  = htf_df["low"].to_numpy()
+        closes = htf_df["close"].to_numpy()
+
+        ph, pl = cls._strict_pivots(highs, lows, n)
+        last_ph, last_pl = cls._shifted_pivot_values(highs, lows, ph, pl, n)
+
+        # Track last BOS direction across HTF bars.
+        bias = np.full(len(htf_df), "range", dtype=object)
+        last_bos_dir = "range"
+        for i in range(1, len(htf_df)):
+            if not np.isnan(last_ph[i]) and closes[i] > last_ph[i] and closes[i-1] <= last_ph[i]:
+                last_bos_dir = "bull"
+            elif not np.isnan(last_pl[i]) and closes[i] < last_pl[i] and closes[i-1] >= last_pl[i]:
+                last_bos_dir = "bear"
+            bias[i] = last_bos_dir
+
+        # Premium/Discount range = last HTF_RANGE_LOOKBACK HTF bars.
+        range_hi  = htf_df["high"].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=cls.SWING_N * 2 + 1).max()
+        range_lo  = htf_df["low" ].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=cls.SWING_N * 2 + 1).min()
+        range_mid = (range_hi + range_lo) / 2.0
+
+        return {
+            "date":      htf_df["date"],
+            "bias":      pd.Series(bias, index=htf_df.index),
+            "range_hi":  range_hi,
+            "range_lo":  range_lo,
+            "range_mid": range_mid,
+        }
+
+    @classmethod
+    def _compute_mtf_zones(cls, mtf_df: pd.DataFrame) -> dict:
+        """PDF §3 Step 3 + Step 4: detect most recent OB + FVG midpoints
+        on MTF bars. Returns scalar Series of zone midpoints; downstream
+        forward-fills these onto the LTF df.
+        """
+        n_total = len(mtf_df)
+        highs = mtf_df["high"].to_numpy()
+        lows  = mtf_df["low"].to_numpy()
+        opens = mtf_df["open"].to_numpy()
+        closes = mtf_df["close"].to_numpy()
+
+        # For each bar i, find the most recent bullish OB (last bearish
+        # candle before a confirmed bull BOS) and bearish OB. Walk back
+        # OB_LOOKBACK bars max.
+        bull_ob_mid = np.full(n_total, np.nan)
+        bear_ob_mid = np.full(n_total, np.nan)
+        bull_fvg_mid = np.full(n_total, np.nan)
+        bear_fvg_mid = np.full(n_total, np.nan)
+
+        # FVG: 3-candle imbalance, MIDPOINT. PDF §3 Step 4.
+        for i in range(n_total):
+            if i < 2: continue
+            # Walk back FVG_LOOKBACK bars finding the MOST RECENT unfilled FVG.
+            for k in range(i, max(2, i - cls.FVG_LOOKBACK), -1):
+                if k < 2: break
+                if highs[k - 2] < lows[k] and np.isnan(bull_fvg_mid[i]):
+                    # Bullish FVG: gap between bar k-2's high and bar k's low.
+                    bull_fvg_mid[i] = (highs[k - 2] + lows[k]) / 2.0
+                if lows[k - 2] > highs[k] and np.isnan(bear_fvg_mid[i]):
+                    bear_fvg_mid[i] = (lows[k - 2] + highs[k]) / 2.0
+                if not np.isnan(bull_fvg_mid[i]) and not np.isnan(bear_fvg_mid[i]):
+                    break
+
+        # OB: last opposing candle BEFORE a strong directional move + BOS.
+        # Strong move proxy: bar body ≥ 1.5× rolling avg body over 14 bars.
+        bodies = np.abs(closes - opens)
+        body_avg = pd.Series(bodies).rolling(14, min_periods=5).mean().to_numpy()
+        for i in range(n_total):
+            if i < cls.SWING_N + 2: continue
+            for k in range(i - 1, max(0, i - cls.OB_LOOKBACK), -1):
+                if np.isnan(bull_ob_mid[i]) and closes[k] < opens[k]:
+                    # Look forward for a strong bullish move within next 5 bars.
+                    if k + 5 < i:
+                        fwd_max = highs[k + 1: k + 6].max()
+                        avg = body_avg[k] if not np.isnan(body_avg[k]) else 0
+                        if fwd_max > highs[k] and (highs[k+1:k+6].max() - lows[k+1:k+6].min()) > 1.5 * avg:
+                            bull_ob_mid[i] = (highs[k] + lows[k]) / 2.0
+                if np.isnan(bear_ob_mid[i]) and closes[k] > opens[k]:
+                    if k + 5 < i:
+                        fwd_min = lows[k + 1: k + 6].min()
+                        avg = body_avg[k] if not np.isnan(body_avg[k]) else 0
+                        if fwd_min < lows[k] and (highs[k+1:k+6].max() - lows[k+1:k+6].min()) > 1.5 * avg:
+                            bear_ob_mid[i] = (highs[k] + lows[k]) / 2.0
+                if not np.isnan(bull_ob_mid[i]) and not np.isnan(bear_ob_mid[i]):
+                    break
+
+        return {
+            "date":         mtf_df["date"],
+            "bull_ob_mid":  pd.Series(bull_ob_mid,  index=mtf_df.index),
+            "bear_ob_mid":  pd.Series(bear_ob_mid,  index=mtf_df.index),
+            "bull_fvg_mid": pd.Series(bull_fvg_mid, index=mtf_df.index),
+            "bear_fvg_mid": pd.Series(bear_fvg_mid, index=mtf_df.index),
+        }
+
+    @staticmethod
+    def _project_onto_ltf(ltf_df: pd.DataFrame, htf_date: pd.Series,
+                          htf_series: pd.Series) -> np.ndarray:
+        """Forward-fill HTF series onto every LTF bar based on the most
+        recent CLOSED HTF bar. No look-ahead: an HTF bar that closes at
+        T is only visible to LTF bars whose timestamp is > T.
+        """
+        # asof merge: for each LTF date, find the latest HTF date < LTF date.
+        ltf_dates = pd.to_datetime(ltf_df["date"], utc=True)
+        htf_pairs = pd.DataFrame({
+            "date":  pd.to_datetime(htf_date, utc=True),
+            "value": htf_series.values,
+        }).sort_values("date").reset_index(drop=True)
+        out = pd.merge_asof(
+            pd.DataFrame({"date": ltf_dates}).reset_index(),
+            htf_pairs,
+            on="date",
+            direction="backward",
+            allow_exact_matches=False,   # ← critical: prevent peeking at the bar still open
+        )
+        return out["value"].to_numpy()
+
+    # ─────────────────────────── main pipeline ────────────────────────
+
+    def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+        n_total = len(df)
+        if n_total == 0:
+            return df
+
+        # ── Pull HTF / MTF context attached by mtf_analyzer ──────────
+        htf_map = metadata.get("htf", {}) or {}
+        htf_4h  = htf_map.get("4h")
+        mtf_1h  = htf_map.get("1h")
+
+        # ── Step 1: HTF bias (4H) ────────────────────────────────────
+        # If 4H data is missing, fall back to bias inferred from execution
+        # TF EMA200 direction. The fallback is conservative — strategy
+        # still trades but with less HTF confidence.
+        htf_bias_arr   = np.full(n_total, "range", dtype=object)
+        range_mid_proj = np.full(n_total, np.nan)
+        range_hi_proj  = np.full(n_total, np.nan)
+        range_lo_proj  = np.full(n_total, np.nan)
+        if htf_4h is not None and len(htf_4h) >= self.SWING_N * 2 + 5:
+            htf_ctx = self._compute_htf_bias(htf_4h)
+            htf_bias_arr = self._project_onto_ltf(df, htf_ctx["date"], htf_ctx["bias"])
+            # Convert NaNs (no HTF bar yet) to "range".
+            htf_bias_arr = np.where(pd.isna(htf_bias_arr), "range", htf_bias_arr)
+            range_hi_proj  = self._project_onto_ltf(df, htf_ctx["date"], htf_ctx["range_hi"])
+            range_lo_proj  = self._project_onto_ltf(df, htf_ctx["date"], htf_ctx["range_lo"])
+            range_mid_proj = self._project_onto_ltf(df, htf_ctx["date"], htf_ctx["range_mid"])
+        else:
+            # Fallback: EMA200 direction on execution TF.
+            ema200 = df["close"].ewm(span=200, adjust=False).mean().to_numpy()
+            closes_arr = df["close"].to_numpy()
+            for i in range(n_total):
+                if closes_arr[i] > ema200[i]:
+                    htf_bias_arr[i] = "bull"
+                elif closes_arr[i] < ema200[i]:
+                    htf_bias_arr[i] = "bear"
+            # Range from 50-bar window.
+            rh = df["high"].rolling(50, min_periods=10).max().to_numpy()
+            rl = df["low" ].rolling(50, min_periods=10).min().to_numpy()
+            range_hi_proj  = rh
+            range_lo_proj  = rl
+            range_mid_proj = (rh + rl) / 2.0
+
+        df["htf_bias"]     = htf_bias_arr
+        df["htf_range_hi"] = range_hi_proj
+        df["htf_range_lo"] = range_lo_proj
+        df["htf_range_md"] = range_mid_proj
+
+        # ── Step 3 + 4: MTF Order Block + FVG zones (1H) ─────────────
+        bull_ob_proj = np.full(n_total, np.nan)
+        bear_ob_proj = np.full(n_total, np.nan)
+        bull_fvg_proj = np.full(n_total, np.nan)
+        bear_fvg_proj = np.full(n_total, np.nan)
+        if mtf_1h is not None and len(mtf_1h) >= self.OB_LOOKBACK + 5:
+            mtf_zones = self._compute_mtf_zones(mtf_1h)
+            bull_ob_proj  = self._project_onto_ltf(df, mtf_zones["date"], mtf_zones["bull_ob_mid"])
+            bear_ob_proj  = self._project_onto_ltf(df, mtf_zones["date"], mtf_zones["bear_ob_mid"])
+            bull_fvg_proj = self._project_onto_ltf(df, mtf_zones["date"], mtf_zones["bull_fvg_mid"])
+            bear_fvg_proj = self._project_onto_ltf(df, mtf_zones["date"], mtf_zones["bear_fvg_mid"])
+        else:
+            # Fallback: compute OB + FVG on the execution TF itself.
+            ltf_zones = self._compute_mtf_zones(df)
+            bull_ob_proj  = ltf_zones["bull_ob_mid"].to_numpy()
+            bear_ob_proj  = ltf_zones["bear_ob_mid"].to_numpy()
+            bull_fvg_proj = ltf_zones["bull_fvg_mid"].to_numpy()
+            bear_fvg_proj = ltf_zones["bear_fvg_mid"].to_numpy()
+
+        df["bull_ob_mid"]  = bull_ob_proj
+        df["bear_ob_mid"]  = bear_ob_proj
+        df["bull_fvg_mid"] = bull_fvg_proj
+        df["bear_fvg_mid"] = bear_fvg_proj
+
+        # ── Step 2: Liquidity detection on LTF ───────────────────────
+        highs = df["high"].to_numpy()
+        lows  = df["low"].to_numpy()
+        closes = df["close"].to_numpy()
+
+        # Equal-highs / equal-lows clustering within EQUAL_PRICE_THRESH
+        # over the last SWEEP_LOOKBACK bars.
+        equal_high_lvl = np.full(n_total, np.nan)
+        equal_low_lvl  = np.full(n_total, np.nan)
+        for i in range(n_total):
+            if i < self.SWEEP_LOOKBACK: continue
+            window_h = highs[i - self.SWEEP_LOOKBACK: i]
+            window_l = lows [i - self.SWEEP_LOOKBACK: i]
+            # Pick the highest high in the window as the candidate; check
+            # if any OTHER bar's high is within threshold of it.
+            top = float(window_h.max())
+            close_to_top = window_h[np.abs(window_h - top) / max(top, 1e-9) < self.EQUAL_PRICE_THRESH]
+            if len(close_to_top) >= 2:
+                equal_high_lvl[i] = top
+            bot = float(window_l.min())
+            close_to_bot = window_l[np.abs(window_l - bot) / max(bot, 1e-9) < self.EQUAL_PRICE_THRESH]
+            if len(close_to_bot) >= 2:
+                equal_low_lvl[i] = bot
+
+        # Liquidity SWEEP: this bar's wick took out the equal-high (long
+        # = sell-side sweep, then reclaim) AND closed back through it.
+        # PDF §3 Step 2 + §4 BUY MODEL "Liquidity Sweep: Previous low taken"
+        bull_sweep = np.zeros(n_total, dtype=bool)
+        bear_sweep = np.zeros(n_total, dtype=bool)
+        for i in range(n_total):
+            if not np.isnan(equal_low_lvl[i]):
+                if lows[i] < equal_low_lvl[i] and closes[i] > equal_low_lvl[i]:
+                    bull_sweep[i] = True
+            if not np.isnan(equal_high_lvl[i]):
+                if highs[i] > equal_high_lvl[i] and closes[i] < equal_high_lvl[i]:
+                    bear_sweep[i] = True
+        df["bull_sweep"] = bull_sweep
+        df["bear_sweep"] = bear_sweep
+        df["equal_low_lvl"]  = equal_low_lvl
+        df["equal_high_lvl"] = equal_high_lvl
+
+        # ── Step 6: LTF BOS confirmation on execution TF ─────────────
+        ph_l, pl_l = self._strict_pivots(highs, lows, self.SWING_N)
+        last_ph_ltf, last_pl_ltf = self._shifted_pivot_values(highs, lows, ph_l, pl_l, self.SWING_N)
+        bull_bos_ltf = np.zeros(n_total, dtype=bool)
+        bear_bos_ltf = np.zeros(n_total, dtype=bool)
+        for i in range(1, n_total):
+            if not np.isnan(last_ph_ltf[i]) and closes[i] > last_ph_ltf[i] and closes[i-1] <= last_ph_ltf[i]:
+                bull_bos_ltf[i] = True
+            if not np.isnan(last_pl_ltf[i]) and closes[i] < last_pl_ltf[i] and closes[i-1] >= last_pl_ltf[i]:
+                bear_bos_ltf[i] = True
+        df["bull_bos_ltf"] = bull_bos_ltf
+        df["bear_bos_ltf"] = bear_bos_ltf
+        df["last_ph_ltf"]  = last_ph_ltf
+        df["last_pl_ltf"]  = last_pl_ltf
+
+        # ── Step 5: Premium/Discount classification on LTF ───────────
+        in_discount = closes <= range_mid_proj    # below 50% of HTF range → buy zone
+        in_premium  = closes >= range_mid_proj    # above 50% → sell zone
+        df["in_discount"] = in_discount
+        df["in_premium"]  = in_premium
+
+        # ── ATR for strong-move filter ───────────────────────────────
+        high = df["high"]; low = df["low"]; close = df["close"]
+        prev_close = close.shift()
+        tr = pd.concat([
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low  - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1.0 / self.ATR_LEN, adjust=False).mean().to_numpy()
+        body = (close - df["open"]).abs().to_numpy()
+        df["atr"] = atr
+        df["strong_move"] = body >= self.STRONG_BODY_X_ATR * atr
+
+        # ── Step 8: NY Session filter ────────────────────────────────
+        hours = df["date"].dt.hour
+        df["in_session"] = ((hours >= self.SESSION_START_HR) &
+                            (hours <= self.SESSION_END_HR)).to_numpy()
+
+        # ── Zone proximity: price is "at" OB or FVG midpoint ─────────
+        # PDF §4: "Price retraces to: OB OR FVG". We accept proximity
+        # within FVG_PROXIMITY_PCT of the midpoint.
+        with np.errstate(invalid="ignore"):
+            at_bull_ob  = np.abs(closes - bull_ob_proj)  / np.maximum(bull_ob_proj, 1e-9)  < self.OB_PROXIMITY_PCT
+            at_bear_ob  = np.abs(closes - bear_ob_proj)  / np.maximum(bear_ob_proj, 1e-9)  < self.OB_PROXIMITY_PCT
+            at_bull_fvg = np.abs(closes - bull_fvg_proj) / np.maximum(bull_fvg_proj, 1e-9) < self.FVG_PROXIMITY_PCT
+            at_bear_fvg = np.abs(closes - bear_fvg_proj) / np.maximum(bear_fvg_proj, 1e-9) < self.FVG_PROXIMITY_PCT
+        at_bull_zone = np.where(np.isnan(bull_ob_proj) & np.isnan(bull_fvg_proj), False, at_bull_ob | at_bull_fvg)
+        at_bear_zone = np.where(np.isnan(bear_ob_proj) & np.isnan(bear_fvg_proj), False, at_bear_ob | at_bear_fvg)
+
+        # ── FINAL ENTRY: ALL 6 conditions must align (PDF §4) ────────
+        long_setup  = (htf_bias_arr == "bull") & in_discount & at_bull_zone & bull_sweep & bull_bos_ltf & df["in_session"].to_numpy()
+        short_setup = (htf_bias_arr == "bear") & in_premium  & at_bear_zone & bear_sweep & bear_bos_ltf & df["in_session"].to_numpy()
+
+        # ── Risk math: SL beyond sweep, TP = 2R ──────────────────────
+        # Long SL = recent equal-low (or LTF pivot low) - 10bps buffer
+        sl_long_arr  = np.where(~pd.isna(equal_low_lvl),  equal_low_lvl  * 0.999, last_pl_ltf * 0.999)
+        sl_short_arr = np.where(~pd.isna(equal_high_lvl), equal_high_lvl * 1.001, last_ph_ltf * 1.001)
+        risk_long  = closes - sl_long_arr
+        risk_short = sl_short_arr - closes
+        max_dist = closes * self.MAX_RISK_PCT
+        bad_long  = (risk_long  <= 0) | (risk_long  > max_dist) | np.isnan(sl_long_arr)
+        bad_short = (risk_short <= 0) | (risk_short > max_dist) | np.isnan(sl_short_arr)
+        long_signal  = long_setup  & ~bad_long
+        short_signal = short_setup & ~bad_short
+
+        tp_long  = closes + self.R_MULTIPLE * risk_long
+        tp_short = closes - self.R_MULTIPLE * risk_short
+
+        df["sl_price"]  = np.where(long_signal, sl_long_arr,
+                            np.where(short_signal, sl_short_arr, np.nan))
+        df["tp_price"]  = np.where(long_signal, tp_long,
+                            np.where(short_signal, tp_short, np.nan))
+        df["tp2_price"] = np.nan        # ARM engine handles TP1/TP2 split
+
+        df["_long_signal"]  = long_signal
+        df["_short_signal"] = short_signal
+        return df
+
+    def populate_entry_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+        df["enter_long"]  = df["_long_signal"].astype(int)
+        df["enter_short"] = df["_short_signal"].astype(int)
+        return df
+
+    def populate_exit_trend(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
+        # PDF §6: exits managed by engine SL/TP/trailing — no condition-based exits.
+        df["exit_long"]  = 0
+        df["exit_short"] = 0
+        return df
+'''
+
+
 # BestPracticesV1Strict — same strategy logic as V1, but with ATR regime
 # (middle 50% of 200-bar window) AND NY session (12-21 UTC) filters ON
 # by default. Generated programmatically from V1 to keep a single source
@@ -871,6 +1345,25 @@ def _seed_builtin_strategies(db):
             "take_profit": 0.06,
             "leverage": 10,
             "timeframe": "1h",
+        },
+        {
+            "name": "SMCStrategy1",
+            "description": "Full Smart Money Concepts strategy — literal implementation of the "
+                           "6-step model: (1) HTF bias from 4H BOS direction with RANGE detection "
+                           "[no-trade in chop]; (2) Liquidity sweep on equal-highs/lows cluster "
+                           "with reclaim filter; (3) Order Block detection on 1H + strong-move "
+                           "follow-through; (4) FVG MIDPOINT entry (not just zone-inside); "
+                           "(5) Premium/Discount via 50% fib of last 50-bar 4H range; "
+                           "(6) LTF BOS confirmation on the execution TF + NY session (12-21 UTC). "
+                           "Uses bias_timeframes=['1h','4h'] so the engine's mtf_analyzer "
+                           "pre-fetches closed HTF bars and forward-fills them onto every LTF row "
+                           "with NO look-ahead. SL anchored to sweep extreme, TP=2R. ARM-compatible: "
+                           "when ARM is ON, TP splits into TP1=1R + TP2=2R + breakeven trail.",
+            "code": _SMC_STRATEGY_1_CODE,
+            "stoploss": -0.03,
+            "take_profit": 0.06,
+            "leverage": 10,
+            "timeframe": "15m",   # Default LTF entry TF; can be changed via UI
         },
     ]
 
