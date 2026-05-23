@@ -655,7 +655,7 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        strategy_id: stratId, pairs: [pair], timeframe: '15m',
+        strategy_id: stratId, pairs: [pair], timeframe: executionTimeframe,
         timerange: '20240901-20241201', leverage, starting_balance: 1000,
       }),
       signal: controller.signal,
@@ -670,7 +670,7 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
       .catch(() => { clearTimeout(timer); });
 
     return () => { cancelled = true; controller.abort(); };
-  }, [bot, pair, leverage, strategies, currentPrice]);
+  }, [bot, pair, leverage, strategies, currentPrice, executionTimeframe]);
 
   async function createBot() {
     setSubmitting(true);
@@ -682,6 +682,12 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         strategy_name: bot.name,
         mode,
         pairs: [pair],
+        // Execution timeframe selected by the user. Per the hybrid-engine
+        // spec (PDF §5), this drives the entry trigger TF + risk TF and
+        // upgrades the original strategy TF to a bias/setup filter when
+        // appropriate. Backend reads this on bot create and passes it to
+        // the strategy runner + MTF analyzer.
+        timeframe: executionTimeframe,
         leverage,
         wallet: parseFloat(investment) || 1000,
         stoploss: stoploss ? -(parseFloat(stoploss) / 100) : -0.03,
@@ -859,6 +865,46 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                 }}
               />
             )}
+
+            {/* Execution Timeframe — drives Strategy Preview, backtest sample,
+                live signal cadence, and (per hybrid-engine spec §5) which TF
+                acts as the bias filter vs the entry trigger. Selecting 1m
+                makes the bot a scalper, 1h makes it a swing bot, etc. The
+                strategy itself stays the same — only the execution clock and
+                the MTF role assignments change. */}
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-bold text-white">Execution timeframe</span>
+                <span className="text-xs font-bold text-emerald-400">{executionTimeframe}</span>
+              </div>
+              <div className="flex gap-1.5">
+                {['1m', '5m', '15m', '1h', '4h'].map(tf => (
+                  <button
+                    key={tf}
+                    onClick={() => setExecutionTimeframe(tf)}
+                    title={
+                      tf === '1m' ? 'Scalp mode — entry trigger every minute'
+                      : tf === '5m' ? 'Scalp / fast intraday — entry every 5 min'
+                      : tf === '15m' ? 'Intraday — entry every 15 min'
+                      : tf === '1h' ? 'Swing — entry every hour'
+                      : 'Position trading — entry every 4 hours'
+                    }
+                    className={`flex-1 py-1.5 rounded text-[11px] font-medium transition-colors ${
+                      executionTimeframe === tf
+                        ? 'bg-sky-500 text-white'
+                        : 'bg-[#1e222d] text-slate-400 hover:text-white border border-white/[0.06]'
+                    }`}
+                  >
+                    {tf}
+                  </button>
+                ))}
+              </div>
+              {tfWarning && (
+                <div className="mt-1 text-[10px] text-amber-300 leading-snug">
+                  ⚠️ {tfWarning}
+                </div>
+              )}
+            </div>
 
             {/* Backtest chart */}
             <div>

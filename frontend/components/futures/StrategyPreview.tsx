@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 
 /**
@@ -95,6 +95,16 @@ export default function StrategyPreview({ strategyId, timeframe, mode, onPermiss
   const [loading, setLoading] = useState(false);
   const [error,   setError]   = useState<string | null>(null);
 
+  // Hold the callback in a ref so it stays referentially stable across
+  // renders. Parents commonly pass an inline arrow function
+  // (`onPermissionChange={(...)=>{...}}`) — putting that in the fetch
+  // effect's deps caused the fetch to re-run on EVERY parent render,
+  // which flashed "Compiling strategy…" intermittently in BotPanel.
+  // The actual fetch now only re-runs when strategyId or timeframe
+  // changes, which is what we actually want.
+  const onPermissionChangeRef = useRef(onPermissionChange);
+  useEffect(() => { onPermissionChangeRef.current = onPermissionChange; }, [onPermissionChange]);
+
   useEffect(() => {
     if (!strategyId) return;
     setLoading(true); setError(null);
@@ -107,7 +117,7 @@ export default function StrategyPreview({ strategyId, timeframe, mode, onPermiss
           setTpl(null);
         } else {
           setTpl(data as Template);
-          onPermissionChange?.(
+          onPermissionChangeRef.current?.(
             data.live_permission,
             data.confidence_score,
             data.live_permission === 'live_eligible' && data.confidence_score >= 85,
@@ -117,7 +127,7 @@ export default function StrategyPreview({ strategyId, timeframe, mode, onPermiss
       .catch((e: any) => { if (!cancelled) setError(String(e?.message || e)); })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [strategyId, timeframe, onPermissionChange]);
+  }, [strategyId, timeframe]);
 
   if (!strategyId)  return null;
   if (loading)      return <div className="p-3 text-[10px] text-slate-500">Compiling strategy…</div>;
