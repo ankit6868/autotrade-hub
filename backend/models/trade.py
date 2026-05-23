@@ -112,6 +112,16 @@ class StrategyInstance(Base):
     arm_be_mode       = Column(Text,    default="leverage")
     arm_be_buffer_pct = Column(Float,   default=1.0)
     arm_trail_to_tp1  = Column(Boolean, default=True)
+    # ── Per-bot strategy overrides (added 2026-05-24) ──────────────────
+    # Surface the user's UI choices for session window + equal-price
+    # threshold so auto-resume restarts bots with the same settings the
+    # user picked. Without these columns, a backend restart would silently
+    # reset a "24/7 session" bot back to NY hours (12-21 UTC). Read by
+    # the engine via _strategy_overrides dict; passed to strategies via
+    # metadata['overrides'] in evaluate_strategy.
+    session_start_hr_utc = Column(Integer, default=12)
+    session_end_hr_utc   = Column(Integer, default=21)
+    equal_price_thresh   = Column(Float,   default=0.001)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

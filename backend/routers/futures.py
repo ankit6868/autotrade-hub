@@ -3445,6 +3445,13 @@ def list_futures_bots(
                 arm_be_buffer_pct = float(getattr(i, "arm_be_buffer_pct", 1.0) or 1.0),
                 arm_trail_to_tp1  = bool(getattr(i, "arm_trail_to_tp1", True)
                                           if i.arm_trail_to_tp1 is not None else True),
+                # Restore per-bot strategy overrides (session window + equal-
+                # price threshold). Without this, auto-resume would silently
+                # revert a "24/7 session" bot back to NY hours (12-21 UTC)
+                # after backend restart.
+                session_start_hr_utc = int(getattr(i, "session_start_hr_utc", 12) or 12),
+                session_end_hr_utc   = int(getattr(i, "session_end_hr_utc",   21) or 21),
+                equal_price_thresh   = float(getattr(i, "equal_price_thresh", 0.001) or 0.001),
             )
             log.info("Auto-resumed bot %s for user %s (ARM=%s)",
                      i.engine_key, user_id, getattr(i, "arm_enabled", False))
@@ -3732,6 +3739,10 @@ def create_futures_bot(
         arm_be_mode       = arm_be_mode,
         arm_be_buffer_pct = arm_be_buffer_pct,
         arm_trail_to_tp1  = arm_trail_to_tp1,
+        # Per-bot strategy overrides (added 2026-05-24) — survive restart
+        session_start_hr_utc = session_start_hr_utc,
+        session_end_hr_utc   = session_end_hr_utc,
+        equal_price_thresh   = equal_price_thresh,
     )
     db.add(instance)
     db.commit()
@@ -3978,6 +3989,10 @@ def futures_bot_performance(
         "arm_be_mode":        getattr(instance, "arm_be_mode", "leverage"),
         "arm_be_buffer_pct":  getattr(instance, "arm_be_buffer_pct", 1.0),
         "arm_trail_to_tp1":   getattr(instance, "arm_trail_to_tp1", True),
+        # Per-bot strategy overrides (added 2026-05-24)
+        "session_start_hr_utc": getattr(instance, "session_start_hr_utc", 12),
+        "session_end_hr_utc":   getattr(instance, "session_end_hr_utc",   21),
+        "equal_price_thresh":   getattr(instance, "equal_price_thresh",   0.001),
         "signal_criteria": signal_criteria,
         "trades": [
             {
