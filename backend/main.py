@@ -1012,6 +1012,16 @@ class SMCStrategy1(IStrategy):
         if n_total == 0:
             return df
 
+        # ── Per-bot overrides (UI-tunable) with class-default fallback ──
+        # The engine injects per-bot config into metadata['overrides'] so
+        # users can tune session window + equal-price threshold per bot
+        # without editing class code. Falls back to class defaults when
+        # nothing is overridden.
+        ov = metadata.get("overrides") or {}
+        session_start_hr = int(ov.get("session_start_hr_utc", self.SESSION_START_HR))
+        session_end_hr   = int(ov.get("session_end_hr_utc",   self.SESSION_END_HR))
+        equal_price_thr  = float(ov.get("equal_price_thresh", self.EQUAL_PRICE_THRESH))
+
         # ── Pull HTF / MTF context attached by mtf_analyzer ──────────
         htf_map = metadata.get("htf", {}) or {}
         htf_4h  = htf_map.get("4h")
@@ -1103,14 +1113,14 @@ class SMCStrategy1(IStrategy):
             # ── Equal highs (look at the K highest values in the window) ──
             sorted_h_desc = np.sort(window_h)[::-1]
             for candidate in sorted_h_desc[:TOP_CANDIDATES]:
-                near = np.abs(window_h - candidate) / max(float(candidate), 1e-9) < self.EQUAL_PRICE_THRESH
+                near = np.abs(window_h - candidate) / max(float(candidate), 1e-9) < equal_price_thr
                 if near.sum() >= 2:
                     equal_high_lvl[i] = float(candidate)
                     break    # pick highest qualifying cluster
             # ── Equal lows (look at the K lowest values in the window) ────
             sorted_l_asc = np.sort(window_l)
             for candidate in sorted_l_asc[:TOP_CANDIDATES]:
-                near = np.abs(window_l - candidate) / max(float(candidate), 1e-9) < self.EQUAL_PRICE_THRESH
+                near = np.abs(window_l - candidate) / max(float(candidate), 1e-9) < equal_price_thr
                 if near.sum() >= 2:
                     equal_low_lvl[i] = float(candidate)
                     break    # pick lowest qualifying cluster
@@ -1191,10 +1201,13 @@ class SMCStrategy1(IStrategy):
         atr = tr.ewm(alpha=1.0 / self.ATR_LEN, adjust=False).mean().to_numpy()
         df["atr"] = atr
 
-        # ── Step 8: NY Session filter ────────────────────────────────
+        # ── Step 8: Session filter (region-tunable via overrides) ────
+        # User picks region in UI ("NY" / "London" / "Tokyo" / "24/7"),
+        # router maps to UTC hour range, engine passes via overrides.
+        # Class default = NY (12-21 UTC) per PDF §6 recommendation.
         hours = df["date"].dt.hour
-        df["in_session"] = ((hours >= self.SESSION_START_HR) &
-                            (hours <= self.SESSION_END_HR)).to_numpy()
+        df["in_session"] = ((hours >= session_start_hr) &
+                            (hours <= session_end_hr)).to_numpy()
 
         # ── Zone proximity: price is "at" OB or FVG midpoint ─────────
         # PDF §4: "Price retraces to: OB OR FVG". We accept proximity

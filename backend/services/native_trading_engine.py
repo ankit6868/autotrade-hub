@@ -331,6 +331,7 @@ def build_strategy_signal_fn(
     take_profit_pct: float,
     pair:          str = "BTC/USDT",   # MTF analyzer: which pair to fetch HTF data for
     execution_tf:  str = "15m",        # MTF analyzer: engine TF (drops bias TFs <= this)
+    overrides:     dict | None = None, # Per-bot strategy overrides (session/threshold/...)
 ):
     """Compile the user's strategy code into a per-bar signal_fn(df, i).
 
@@ -387,6 +388,7 @@ def build_strategy_signal_fn(
         df_with_signals = evaluate_strategy(
             strat.generated_code, df,
             pair=pair, execution_tf=execution_tf,
+            overrides=overrides,
         )
     except Exception as e:
         # Re-raise as StrategyCompileError so the caller can show a clean

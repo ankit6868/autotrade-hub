@@ -565,6 +565,14 @@ class FuturesEngine(NativeTradingEngine):
         max_trades_per_day: int   = 8,
         cooldown_candles:   int   = 3,
         max_daily_dd_pct:   float = 25.0,
+        # Per-bot strategy overrides — surfaced into populate_indicators
+        # via metadata['overrides'] so SMC-family strategies can read
+        # session window + equal-price threshold without editing class
+        # code. Strategies that don't look at metadata['overrides'] are
+        # unaffected (these become dead params).
+        session_start_hr_utc: int   = 12,
+        session_end_hr_utc:   int   = 21,
+        equal_price_thresh:   float = 0.001,
         **_kwargs,
     ) -> dict:
         # Always do a clean stop before (re)starting.
@@ -610,6 +618,14 @@ class FuturesEngine(NativeTradingEngine):
         self._day_trades         = 0
         self._day_start_balance  = float(wallet)
         self._day_dd_tripped     = False
+        # ── Per-bot strategy overrides (session / equal-price) ──────
+        # Stored here so they survive process restarts via DB persist.
+        # Passed to evaluate_strategy via metadata['overrides'].
+        self._strategy_overrides = {
+            "session_start_hr_utc": max(0, min(23, int(session_start_hr_utc))),
+            "session_end_hr_utc":   max(0, min(23, int(session_end_hr_utc))),
+            "equal_price_thresh":   max(0.0001, min(0.05, float(equal_price_thresh))),
+        }
         self.balance       = wallet
         self.positions     = {}
         self.closed_trades = []
@@ -1038,6 +1054,7 @@ class FuturesEngine(NativeTradingEngine):
                     take_profit_pct = self._take_profit * 100.0,
                     pair            = pair,            # MTF analyzer
                     execution_tf    = self._timeframe, # MTF analyzer
+                    overrides       = self._strategy_overrides,
                 )
                 # Successful compile — reset the breaker counter so transient
                 # blips don't accumulate forever.

@@ -540,6 +540,21 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   const [takeprofit, setTakeprofit] = useState('');
   const [drawdownTolerance, setDrawdownTolerance] = useState(50);
   const [maxPositionPct, setMaxPositionPct] = useState(5);
+  // Trade-limits override — user-tunable values that previously could only
+  // be set via API. UI was showing the validator's inferred defaults
+  // (e.g. 4/day for intraday) as if they were hard caps. Now exposed
+  // as overridable inputs; 0 / blank = use strategy default.
+  const [maxTradesPerDay, setMaxTradesPerDay] = useState<number | ''>('');
+  const [cooldownCandles, setCooldownCandles] = useState<number | ''>('');
+  // Region / session preset → maps to UTC hours sent as session_start_hr_utc /
+  // session_end_hr_utc. Lets the user pick "NY", "London", "Tokyo", or "24/7"
+  // instead of having to know the UTC hour ranges. PDF §6 lists NY as the
+  // recommended institutional window for crypto.
+  const [sessionRegion, setSessionRegion] = useState<'ny' | 'london' | 'tokyo' | 'all'>('ny');
+  // Equal-highs / equal-lows clustering threshold — only relevant for SMC
+  // strategies. 0.1% default per PDF §3 Step 2 ("abs(high1 - high2) < threshold").
+  // Tight markets need smaller threshold; volatile markets bigger.
+  const [equalPriceThresh, setEqualPriceThresh] = useState<number | ''>('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showSlModal, setShowSlModal] = useState(false);
   const [showTpModal, setShowTpModal] = useState(false);
@@ -701,6 +716,17 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         arm_be_mode:        armBeMode,
         arm_be_buffer_pct:  armBeBufferPct,
         arm_trail_to_tp1:   armTrailToTp1,
+        // Trade-limits override (when blank, backend uses validator's
+        // mode-based default per PDF §7 safe-defaults table).
+        ...(maxTradesPerDay !== '' ? { max_trades_per_day: maxTradesPerDay } : {}),
+        ...(cooldownCandles !== '' ? { cooldown_candles:   cooldownCandles } : {}),
+        // Session/region preset → UTC hour range. Sent only when not "all".
+        ...(sessionRegion === 'ny'      ? { session_start_hr_utc: 12, session_end_hr_utc: 21 } : {}),
+        ...(sessionRegion === 'london'  ? { session_start_hr_utc:  7, session_end_hr_utc: 16 } : {}),
+        ...(sessionRegion === 'tokyo'   ? { session_start_hr_utc:  0, session_end_hr_utc:  9 } : {}),
+        ...(sessionRegion === 'all'     ? { session_start_hr_utc:  0, session_end_hr_utc: 23 } : {}),
+        // Equal-price threshold (SMC strategies only; ignored by others).
+        ...(equalPriceThresh !== '' ? { equal_price_thresh_pct: equalPriceThresh } : {}),
       });
       if (r?.error) {
         setError(r.error);
@@ -1182,6 +1208,79 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                     >
                       {takeprofit ? `${takeprofit}%` : 'Configure >'}
                     </button>
+                  </div>
+
+                  {/* ── Trade-limits override ──────────────────────────
+                      Previously the validator's mode-based default (e.g.
+                      4/day for 15m intraday) was treated as a hard cap
+                      with no UI override — users couldn't ask for more
+                      or fewer trades than the inferred number. These
+                      inputs let them tune freely; blank = strategy
+                      default per PDF §7 safe-defaults table. */}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-slate-400" title="Max number of trades the bot can open per UTC day. Blank = strategy default (5-10 scalp / 2-5 intraday / 1-3 swing per PDF §7).">
+                      Max trades / day
+                    </span>
+                    <input
+                      type="number" min={1} max={50}
+                      value={maxTradesPerDay}
+                      onChange={e => setMaxTradesPerDay(e.target.value === '' ? '' : Math.max(1, Math.min(50, Number(e.target.value))))}
+                      placeholder="default"
+                      className="w-16 px-2 py-1 text-[11px] bg-[#1e222d] border border-white/[0.08] rounded text-white"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-slate-400" title="Bars to wait after a trade closes before opening another. Blank = strategy default.">
+                      Cooldown (candles)
+                    </span>
+                    <input
+                      type="number" min={0} max={50}
+                      value={cooldownCandles}
+                      onChange={e => setCooldownCandles(e.target.value === '' ? '' : Math.max(0, Math.min(50, Number(e.target.value))))}
+                      placeholder="default"
+                      className="w-16 px-2 py-1 text-[11px] bg-[#1e222d] border border-white/[0.08] rounded text-white"
+                    />
+                  </div>
+
+                  {/* ── Session region selector (PDF §6) ───────────────
+                      Picks the institutional trading window for crypto.
+                      PDF recommends NY for crypto; London + Tokyo
+                      provided for non-USD-pair experiments. "24/7" =
+                      no session filter. Maps to UTC hour ranges. */}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-slate-400" title="Restrict trades to a specific institutional session. NY (12-21 UTC) = PDF §6 default. Pick 24/7 to disable.">
+                      Session
+                    </span>
+                    <select
+                      value={sessionRegion}
+                      onChange={e => setSessionRegion(e.target.value as any)}
+                      className="px-2 py-1 text-[11px] bg-[#1e222d] border border-white/[0.08] rounded text-white"
+                    >
+                      <option value="ny">NY (12-21 UTC)</option>
+                      <option value="london">London (7-16 UTC)</option>
+                      <option value="tokyo">Tokyo (0-9 UTC)</option>
+                      <option value="all">24/7 (no filter)</option>
+                    </select>
+                  </div>
+
+                  {/* ── Equal-price threshold (SMC strategies only) ─────
+                      Only consumed by SMC family strategies (SMCStrategy1
+                      and similar). Other strategies ignore it. */}
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-slate-400" title="Two highs within this % of each other count as 'equal' (liquidity cluster). PDF §3 Step 2. SMC strategies only. Default 0.1%.">
+                      Equal-price threshold
+                    </span>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number" min={0.01} max={5} step={0.01}
+                        value={equalPriceThresh}
+                        onChange={e => setEqualPriceThresh(e.target.value === '' ? '' : Math.max(0.01, Math.min(5, Number(e.target.value))))}
+                        placeholder="0.10"
+                        className="w-16 px-2 py-1 text-[11px] bg-[#1e222d] border border-white/[0.08] rounded text-white"
+                      />
+                      <span className="text-[10px] text-slate-500">%</span>
+                    </div>
                   </div>
                 </div>
               )}

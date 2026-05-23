@@ -3544,6 +3544,15 @@ def create_futures_bot(
     cooldown_candles   = max(0, min(50, int(req.get("cooldown_candles", 3))))
     max_daily_dd_pct   = max(5.0, min(80.0, float(req.get("max_daily_dd_pct", 25.0))))
 
+    # ── Session window + equal-price threshold (PDF §3, §6) ─────────
+    # When the user picks a region in the UI we receive the UTC hour
+    # range; SMCStrategy1 reads these via class attributes after the
+    # engine wires them in. Falls back to defaults (NY session, 0.1%
+    # threshold) when not provided.
+    session_start_hr_utc  = max(0, min(23, int(req.get("session_start_hr_utc", 12))))
+    session_end_hr_utc    = max(0, min(23, int(req.get("session_end_hr_utc", 21))))
+    equal_price_thresh    = max(0.0001, min(0.05, float(req.get("equal_price_thresh_pct", 0.1)) / 100.0))
+
     strat = None
     if strategy_id:
         from backend.models.strategy import Strategy
@@ -3758,6 +3767,9 @@ def create_futures_bot(
         max_trades_per_day = max_trades_per_day,
         cooldown_candles   = cooldown_candles,
         max_daily_dd_pct   = max_daily_dd_pct,
+        session_start_hr_utc = session_start_hr_utc,
+        session_end_hr_utc   = session_end_hr_utc,
+        equal_price_thresh   = equal_price_thresh,
     )
 
     log_event(db, user_id, "futures.create_bot", request, payload={

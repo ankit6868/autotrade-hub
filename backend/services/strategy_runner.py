@@ -326,6 +326,7 @@ def evaluate_strategy(
     pair: str = "BTC/USDT",
     execution_tf: str = "15m",
     historical_anchor_ts: int | None = None,
+    overrides: dict | None = None,
 ) -> pd.DataFrame:
     """Run the user's IStrategy code against `df` and return a copy with
     signal columns added: enter_long, enter_short, exit_long, exit_short.
@@ -409,6 +410,12 @@ def evaluate_strategy(
     if "vol" in work.columns and "volume" not in work.columns:
         work["volume"] = work["vol"]
     metadata = {"pair": pair, "execution_tf": execution_tf}
+    # Per-bot overrides (session window, equal-price threshold, etc.) get
+    # surfaced to populate_indicators via metadata so strategies can read
+    # them with a class-default fallback. Strategies that don't look at
+    # metadata['overrides'] are unaffected.
+    if overrides:
+        metadata["overrides"] = dict(overrides)
 
     # ── Multi-TF Analyzer (PDF §5) ────────────────────────────────────
     # Opt-in: strategies that declare `bias_timeframes = ["1h","4h"]`
