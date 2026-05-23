@@ -3,6 +3,7 @@
 import { useState } from 'react';
 import { api } from '@/lib/api';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
+import RiskConfigPanel from '@/components/futures/RiskConfigPanel';
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -311,6 +312,13 @@ export default function SetupPage() {
           </div>
         </div>
       )}
+
+      {/* NICE-4 — Per-Timeframe Risk Config (FR-04). Always visible at the
+          bottom of the Setup page so power users can tune scalp / swing
+          multipliers without going through the wizard. */}
+      <div className="card">
+        <RiskConfigPanel />
+      </div>
     </div>
   );
 }

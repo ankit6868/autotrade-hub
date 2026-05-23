@@ -398,6 +398,7 @@ def run_futures_backtest(
                                         # the single largest scalping cost-saving lever —
                                         # at VIP3 it cuts entry fees by 3x vs taker.
     # ── Phase 4b: timeframe-aware risk engine ─────────────────────────
+    risk_overrides_for_run: dict | None = None,  # NICE-4: per-user TF risk overrides
     use_risk_engine: bool = False,      # When True, every signal's SL/TP is routed through
                                         # backend.services.risk_engine.compute_tp_sl which:
                                         #   • Honours strategy-provided structural SL/TP if
@@ -908,14 +909,20 @@ def run_futures_backtest(
                     # ATR(14) with a healthy warmup buffer, cheap to slice.
                     tail_start = max(0, i - 60)
                     df_for_atr = df.iloc[tail_start:i + 1]
+                    # NICE-4: pass through the same user overrides the live
+                    # engine reads. We don't know which user is running the
+                    # backtest in this scope, but the backtester is invoked
+                    # by the router which can pass user_overrides if desired.
+                    # Default None = use TIMEFRAME_CONFIG defaults.
                     plan = risk_engine.compute_tp_sl(
-                        entry        = float(entry_price),
-                        direction    = sig_dir,
-                        df           = df_for_atr,
-                        timeframe    = timeframe,
-                        strategy_sl  = float(sig_sl) if (use_signal_sltp and sig_sl is not None) else None,
-                        strategy_tp  = float(sig_tp) if (use_signal_sltp and sig_tp is not None) else None,
-                        strategy_tp2 = float(sig_tp2) if (sig_tp2 is not None) else None,
+                        entry          = float(entry_price),
+                        direction      = sig_dir,
+                        df             = df_for_atr,
+                        timeframe      = timeframe,
+                        strategy_sl    = float(sig_sl) if (use_signal_sltp and sig_sl is not None) else None,
+                        strategy_tp    = float(sig_tp) if (use_signal_sltp and sig_tp is not None) else None,
+                        strategy_tp2   = float(sig_tp2) if (sig_tp2 is not None) else None,
+                        user_overrides = risk_overrides_for_run,
                     )
                     if not plan.valid:
                         # Track + skip — the signal was generated but the risk

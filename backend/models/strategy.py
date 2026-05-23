@@ -18,10 +18,11 @@ class Strategy(Base):
     pairs = Column(JSON)
     stoploss = Column(Float, default=-0.03)
     is_template = Column(Boolean, default=False)
-    # --- Auto-trade enablement per strategy ---
-    auto_trade_enabled = Column(Boolean, default=False)
-    auto_trade_mode = Column(Text, default="paper")  # 'paper' | 'live'
-    allow_copy_trading = Column(Boolean, default=False, server_default='false', nullable=True)
+    # NICE-8: auto_trade_enabled / auto_trade_mode / allow_copy_trading
+    # columns were dropped after the spot purge — the engines that wrote
+    # them (autotrade_engine, copy_trading) are gone. Migration
+    # 20260523_a1b2c3d4e5f6 drops the columns where the DB supports it
+    # (Postgres + SQLite ≥ 3.35); older SQLite is best-effort.
     default_leverage   = Column(Integer, default=1,     server_default='1',     nullable=True)
     take_profit        = Column(Float,   default=0.015, server_default='0.015', nullable=True)  # e.g. 0.015 = 1.5%
     # ── Phase 5 — Structured strategy template (PDF §8) ─────────────────

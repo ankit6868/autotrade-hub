@@ -280,20 +280,48 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
                   {bot.winding_down && (
                     <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-amber-500/20 text-amber-400">CLOSING</span>
                   )}
+                  {bot.paused && !bot.winding_down && (
+                    <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-purple-500/20 text-purple-400">PAUSED</span>
+                  )}
                   <span className={`text-[9px] px-1.5 py-0.5 rounded font-medium ${
                     bot.mode === 'live' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-indigo-500/20 text-indigo-400'
                   }`}>{bot.mode === 'live' ? 'LIVE' : 'PAPER'}</span>
                 </div>
-                <button
-                  onClick={async (e) => {
-                    e.stopPropagation();
-                    await api.futures.bots.stop(bot.id, bot.winding_down);
-                    refreshBots();
-                  }}
-                  className="text-red-400 hover:text-red-300 text-[10px] font-medium px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20"
-                >
-                  {bot.winding_down ? 'Force Stop' : 'Stop'}
-                </button>
+                <div className="flex items-center gap-1.5">
+                  {/* NICE-6 — Pause / Resume button. Hidden during wind-down
+                      (the bot is already on its way out). Pausing blocks new
+                      entries but keeps managing open positions. */}
+                  {!bot.winding_down && (
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        if (bot.paused) await api.futures.bots.resume(bot.id);
+                        else            await api.futures.bots.pause(bot.id);
+                        refreshBots();
+                      }}
+                      className={`text-[10px] font-medium px-2 py-0.5 rounded border ${
+                        bot.paused
+                          ? 'text-emerald-400 hover:text-emerald-300 bg-emerald-500/10 border-emerald-500/20'
+                          : 'text-purple-400 hover:text-purple-300 bg-purple-500/10 border-purple-500/20'
+                      }`}
+                      title={bot.paused
+                        ? 'Resume — new entries re-enabled.'
+                        : 'Pause — open positions keep managing (TP/SL/liq), but no new entries.'}
+                    >
+                      {bot.paused ? 'Resume' : 'Pause'}
+                    </button>
+                  )}
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      await api.futures.bots.stop(bot.id, bot.winding_down);
+                      refreshBots();
+                    }}
+                    className="text-red-400 hover:text-red-300 text-[10px] font-medium px-2 py-0.5 rounded bg-red-500/10 border border-red-500/20"
+                  >
+                    {bot.winding_down ? 'Force Stop' : 'Stop'}
+                  </button>
+                </div>
               </div>
 
               {/* Bot stats grid */}
@@ -517,6 +545,17 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   const [showTpModal, setShowTpModal] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
+  // Structured live-guardrail rejection payload. When present we render
+  // the actionable "Run Backtest Now →" CTA + confidence/missing-fields
+  // breakdown instead of a plain string.
+  const [blockedDetails, setBlockedDetails] = useState<{
+    confidence_score?: number;
+    live_permission?:  string;
+    missing_fields?:   string[];
+    conflicts?:        string[];
+    has_recent_backtest?: boolean;
+    resolver_notes?:   string[];
+  } | null>(null);
   const [success, setSuccess] = useState<{ botId: number; engineKey: string } | null>(null);
 
   // ── Advanced Risk Management (ARM) state ─────────────────────────────────
@@ -656,8 +695,24 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
       });
       if (r?.error) {
         setError(r.error);
+        // When the backend returns a structured live-guardrail rejection,
+        // stash the details so we can render a richer error panel with a
+        // one-click "Run Backtest Now" CTA.
+        if (r.blocked_reason === 'live_guardrail') {
+          setBlockedDetails({
+            confidence_score:    r.confidence_score,
+            live_permission:     r.live_permission,
+            missing_fields:      r.missing_fields  || [],
+            conflicts:           r.conflicts       || [],
+            has_recent_backtest: r.has_recent_backtest,
+            resolver_notes:      r.resolver_notes  || [],
+          });
+        } else {
+          setBlockedDetails(null);
+        }
       } else {
         setSuccess({ botId: r.bot_id, engineKey: r.engine_key });
+        setBlockedDetails(null);
         onCreated();
         // Auto-return to the strategy list after a brief confirmation, so
         // the new bot appears in Active Bots without the user having to
@@ -1080,7 +1135,71 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
               )}
             </div>
 
-            {error && <p className="text-red-400 text-xs">{error}</p>}
+            {/* Structured live-guardrail rejection panel.
+                Triggered when POST /api/futures/bots returns
+                blocked_reason === 'live_guardrail'. Shows the missing
+                pieces (confidence, fields, backtest) and offers a one-
+                click "Run Backtest Now" CTA that deep-links into
+                /futures-backtest pre-filled with this strategy + pair + TF. */}
+            {blockedDetails && (
+              <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3 space-y-2">
+                <div className="flex items-center gap-2 text-red-300 text-xs font-bold">
+                  🛑 Live trading blocked
+                  {typeof blockedDetails.confidence_score === 'number' && (
+                    <span className="ml-auto bg-red-500/20 rounded px-1.5 py-0.5 text-[10px] font-mono">
+                      {blockedDetails.confidence_score}/100 · {blockedDetails.live_permission}
+                    </span>
+                  )}
+                </div>
+
+                {/* Per-cause line items so the user sees exactly what to fix. */}
+                <ul className="text-[10px] text-red-200/90 space-y-0.5">
+                  {blockedDetails.has_recent_backtest === false && (
+                    <li>📊 <b>No recent backtest</b> — required within last 30 days for this strategy/pair/TF.</li>
+                  )}
+                  {(blockedDetails.missing_fields || []).length > 0 && (
+                    <li>⚠️ Missing fields: <span className="font-mono">{blockedDetails.missing_fields!.join(', ')}</span></li>
+                  )}
+                  {(blockedDetails.conflicts || []).length > 0 && (
+                    <li className="text-red-300">⚠️ {blockedDetails.conflicts!.join(' · ')}</li>
+                  )}
+                  {typeof blockedDetails.confidence_score === 'number' && blockedDetails.confidence_score < 85 && (
+                    <li>📉 Confidence {blockedDetails.confidence_score}/100 — needs ≥85 for live.</li>
+                  )}
+                </ul>
+
+                {/* Resolver audit trail (collapsible). */}
+                {(blockedDetails.resolver_notes || []).length > 0 && (
+                  <details className="text-[10px]">
+                    <summary className="text-red-300/70 cursor-pointer">Why this failed (resolver notes)</summary>
+                    <ul className="mt-1 pl-3 space-y-0.5 text-red-200/70">
+                      {blockedDetails.resolver_notes!.map((n, i) => <li key={i}>• {n}</li>)}
+                    </ul>
+                  </details>
+                )}
+
+                {/* Actionable CTAs. */}
+                <div className="flex flex-wrap gap-2 pt-1">
+                  {blockedDetails.has_recent_backtest === false && (
+                    <a
+                      href={`/futures-backtest?strategy_id=${
+                        bot.id || strategies.find(s => s.name === bot.name)?.id || ''
+                      }&pair=${encodeURIComponent(pair)}&tf=${encodeURIComponent(executionTimeframe)}`}
+                      className="text-[11px] font-bold px-3 py-1.5 rounded bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 transition-colors"
+                      title="Open the Futures Backtest tab pre-filled with this strategy, pair, and timeframe."
+                    >
+                      ▶ Run Backtest Now
+                    </a>
+                  )}
+                  <span className="text-[10px] text-indigo-300/80 italic self-center">
+                    Tip: switch the Paper/Live toggle (top-right of the terminal) to Paper to test this bot without the guardrail.
+                  </span>
+                </div>
+              </div>
+            )}
+
+            {/* Plain error fallback for non-guardrail failures. */}
+            {error && !blockedDetails && <p className="text-red-400 text-xs">{error}</p>}
           </div>
         )}
       </div>

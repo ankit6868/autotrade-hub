@@ -7,7 +7,9 @@ import httpx
 from backend.models import get_db, Config
 from backend.utils.encryption import encrypt, decrypt, DecryptError
 from backend.utils.clerk_auth import get_user_id, clerk_enabled
-from backend.services.kucoin_client import KuCoinClient
+# kucoin_client.py was deleted in the spot purge (NICE-9). The
+# /test-kucoin endpoint now hits the futures API directly via
+# native_trading_engine._kucoin_get_signed — see test_kucoin() below.
 
 router = APIRouter(prefix="/api/config", tags=["config"])
 
@@ -126,19 +128,44 @@ async def test_kucoin(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
+    """NICE-9: rewritten to use the FUTURES side directly.
+
+    Previously hit /api/v1/accounts via the deleted spot KuCoinClient.
+    Now hits /api/v1/account-overview on api-futures.kucoin.com, which is
+    the same endpoint the futures engine uses for balance checks — so a
+    successful "Test Connection" guarantees the futures bot can also
+    read the balance + place orders."""
     config = _config_for(db, user_id)
     if not config or not config.kucoin_key_enc:
         return {"connected": False, "error": "KuCoin keys not configured"}
 
     try:
-        client = KuCoinClient(
-            api_key=decrypt(config.kucoin_key_enc, user_id),
-            api_secret=decrypt(config.kucoin_secret_enc, user_id),
-            passphrase=decrypt(config.kucoin_passphrase_enc, user_id),
-        )
+        kk = decrypt(config.kucoin_key_enc, user_id)
+        ks = decrypt(config.kucoin_secret_enc, user_id)
+        kp = decrypt(config.kucoin_passphrase_enc, user_id)
     except DecryptError as e:
         return {"connected": False, "error": str(e)}
-    return await client.test_connection()
+
+    try:
+        from backend.services.native_trading_engine import _kucoin_get_signed
+        from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+        data = _kucoin_get_signed(
+            "/api/v1/account-overview", kk, ks, kp,
+            params={"currency": "USDT"},
+            base_url=KUCOIN_FUTURES_BASE,
+        )
+        if str(data.get("code")) == "200000":
+            acct = data.get("data", {}) or {}
+            return {
+                "connected": True,
+                "balance":   float(acct.get("availableBalance", 0) or 0),
+                "equity":    float(acct.get("accountEquity", 0) or 0),
+                "currency":  "USDT",
+                "source":    "futures",
+            }
+        return {"connected": False, "error": data.get("msg", "Unknown KuCoin error")}
+    except Exception as e:
+        return {"connected": False, "error": f"Could not reach KuCoin Futures: {e}"}
 
 
 @router.post("/test-openrouter")

@@ -33,6 +33,7 @@ from .native_trading_engine import (
 from . import risk_engine
 from . import mtf_candles
 from . import timeframe_adapter
+from . import notifier as _notifier      # NICE-7 — Discord webhooks
 
 log = logging.getLogger("futures_engine")
 
@@ -338,6 +339,23 @@ class FuturesEngine(NativeTradingEngine):
         self._day_max_dd_pct:    float = 25.0          # 25% daily DD trips bot
         self._day_dd_tripped:    bool  = False
 
+        # ── MUST-2: Compile-failure circuit breaker ──────────────────────
+        # If the strategy_runner raises N consecutive times during the
+        # signal-scan loop (rare — usually a NaN crash on bad candle data
+        # or an upstream KuCoin glitch), auto-stop the bot instead of
+        # spamming the action_log indefinitely. The start-time compile
+        # check in start_futures catches gross errors; this breaker
+        # catches the ones that only manifest on real candle batches.
+        self._consec_compile_failures: int = 0
+        self._max_compile_failures:    int = 5
+        # ── NICE-6: Pause flag ───────────────────────────────────────────
+        # `_paused = True` blocks new entries (signal scan exits early)
+        # but KEEPS managing open positions — TP / SL / liquidation /
+        # ARM all keep firing. Different from wind_down which exits the
+        # engine when positions all close. Pause can be toggled freely;
+        # the bot resumes immediately when set back to False.
+        self._paused: bool = False
+
     def wind_down(self):
         """Stop opening new positions but keep managing existing ones until all are closed."""
         self._winding_down = True
@@ -348,6 +366,34 @@ class FuturesEngine(NativeTradingEngine):
     @property
     def is_winding_down(self) -> bool:
         return self._winding_down
+
+    # ── NICE-6: pause / resume (no new entries, keep managing positions) ─
+
+    def pause(self) -> None:
+        """Block opening new positions on the next signal scan. Existing
+        positions keep running through TP/SL/ARM/liq. Idempotent."""
+        if not self._paused:
+            self._paused = True
+            self._log_action("paused",
+                "Bot paused — no new entries; existing positions still managed.")
+            log.info("[%s] Engine paused", self.user_id)
+            _notifier.notify_paused(
+                self.user_id, strategy=self._strategy, mode=self._mode,
+            )
+
+    def resume(self) -> None:
+        """Re-enable new entries. Idempotent."""
+        if self._paused:
+            self._paused = False
+            self._log_action("resumed", "Bot resumed — new entries re-enabled.")
+            log.info("[%s] Engine resumed", self.user_id)
+            _notifier.notify_resumed(
+                self.user_id, strategy=self._strategy, mode=self._mode,
+            )
+
+    @property
+    def is_paused(self) -> bool:
+        return self._paused
 
     def _log_action(self, action_type: str, detail: str, **extra):
         entry = {
@@ -492,6 +538,38 @@ class FuturesEngine(NativeTradingEngine):
                     self.user_id, strategy_name, _compile_exc,
                 )
 
+        # ── MUST-3: MTF cache warm-up ───────────────────────────────────
+        # The Timeframe Adapter wants HTF candles (e.g. 1h + 4h when
+        # execution_tf=5m) on EVERY signal scan. Without this warm-up,
+        # the first scan after start_futures cold-fetches 3-4 TFs
+        # sequentially = ~4 seconds of latency. Fire a background thread
+        # that pre-populates mtf_candles._CACHE before the run loop's
+        # first tick, so the first signal scan is responsive.
+        try:
+            from . import timeframe_adapter, mtf_candles
+            # Strategy's authored TF (defaults to execution TF if missing).
+            strat_tf = timeframe or "15m"
+            bundle = timeframe_adapter.adapt(strategy_tf=strat_tf, execution_tf=timeframe)
+            tfs_to_warm = bundle.required_timeframes
+            def _warm():
+                # Cap at the first 4 TFs so we don't burn through KuCoin
+                # rate-limit budget on first start. Sequential is fine —
+                # this thread doesn't block the engine.
+                for p in pairs[:5]:                       # also cap pairs
+                    for tf in tfs_to_warm[:4]:
+                        try:
+                            mtf_candles.get_candles(p, tf, force_refresh=False)
+                        except Exception as _e:
+                            log.debug("[%s] MTF warm-up %s/%s failed: %s",
+                                      self.user_id, p, tf, _e)
+            import threading as _t
+            _t.Thread(target=_warm, daemon=True,
+                      name=f"futures-warm-{self.user_id}").start()
+            log.info("[%s] MTF cache warm-up dispatched for %s pair(s) × %s TF(s)",
+                     self.user_id, len(pairs[:5]), len(tfs_to_warm[:4]))
+        except Exception as _warm_exc:
+            log.debug("[%s] MTF warm-up skipped: %s", self.user_id, _warm_exc)
+
         import threading
         self._thread = threading.Thread(
             target=self._run_loop, daemon=True,
@@ -504,6 +582,62 @@ class FuturesEngine(NativeTradingEngine):
                  self.user_id, self._leverage, mode, strategy_name)
         return {"started": True, "mode": mode, "market_type": "futures",
                 "leverage": self._leverage, "strategy": strategy_name}
+
+    # ── Run loop (lives on FuturesEngine after the spot purge) ──────────
+    #
+    # Before the spot purge this method lived on NativeTradingEngine as a
+    # shared base implementation. After the purge we kept only the futures
+    # path, so the run loop now lives here directly. It drives an adaptive
+    # tick rate (5s when positions are open, 60s when flat) and calls the
+    # overridden _tick_continuous on every iteration.
+
+    def _run_loop(self):
+        """Adaptive futures-engine loop.
+
+        Two speeds:
+          • FAST (5 s)  — positions open: catches TP / SL / liq instantly.
+          • SLOW (60 s) — flat: just scans for entry signals.
+        """
+        import time as _time
+
+        seen_signal:    dict[str, object] = {}  # pair → direction of last fired signal
+        last_signal_ts: dict[str, float]  = {}
+        SIGNAL_INTERVAL = 60.0
+
+        log.info("[%s] Futures engine loop started — strategy=%s pairs=%s mode=%s tf=%s",
+                 self.user_id, self._strategy, self._pairs, self._mode, self._timeframe)
+
+        while not self._stop_evt.is_set():
+            try:
+                now_ts = _time.time()
+                self._tick_continuous(
+                    None,                       # signal_fn ignored — engine builds its own per scan
+                    seen_signal,
+                    last_signal_ts=last_signal_ts,
+                    signal_interval=SIGNAL_INTERVAL,
+                )
+                # Update the per-pair signal-scan clock so the
+                # `if elapsed < signal_interval: continue` guard works.
+                for pair in self._pairs:
+                    last_signal_ts.setdefault(pair, 0.0)
+                    if (now_ts - last_signal_ts[pair]) >= SIGNAL_INTERVAL:
+                        last_signal_ts[pair] = now_ts
+            except Exception as exc:
+                with self._lock:
+                    self.errors += 1
+                    self.last_action = f"engine error: {exc}"
+                log.warning("[%s] engine error: %s", self.user_id, exc)
+                # Exponential back-off on repeated errors so we don't
+                # hammer KuCoin during an outage.
+                self._stop_evt.wait(min(60, 5 * max(1, self.errors)))
+                continue
+
+            # Adaptive sleep — 5s when positions open, 60s when flat.
+            with self._lock:
+                has_open = bool(self.positions)
+            self._stop_evt.wait(5.0 if has_open else 60.0)
+
+        log.info("[%s] Futures engine loop exited.", self.user_id)
 
     # ── Tick override — adds liquidation check ──────────────────────────
 
@@ -583,6 +717,11 @@ class FuturesEngine(NativeTradingEngine):
                             log.warning("[%s] %s", self.user_id, self.last_action)
                             _persist_closed_trade(self.user_id, pos, self._mode,
                                                   self._strategy_id, pos.db_id)
+                            _notifier.notify_liquidated(
+                                self.user_id, pair=pair, direction=pos.direction,
+                                liq_price=pos.liquidation_price, pnl=pos.pnl_abs,
+                                leverage=self._leverage, mode=self._mode,
+                            )
                             continue
 
                     # ── Phase 3 — ARM trail-to-TP1 ratchet ─────────────
@@ -672,6 +811,11 @@ class FuturesEngine(NativeTradingEngine):
                                               self._strategy_id, pos.db_id)
                         if self._mode == "live":
                             self._place_live_exit(pair, pos, exit_price)
+                        _notifier.notify_position_closed(
+                            self.user_id, pair=pair, direction=pos.direction,
+                            entry=pos.entry, exit_p=exit_price, pnl=pos.pnl_abs,
+                            reason=reason, leverage=self._leverage, mode=self._mode,
+                        )
                         # Copy-trading broadcast removed in spot purge —
                         # futures bots no longer publish signals to a
                         # copy-trading service. The futures terminal is
@@ -683,6 +827,12 @@ class FuturesEngine(NativeTradingEngine):
                         self._log_action("wind_down_complete", "All positions closed — stopping engine")
                         log.info("[%s] Wind-down complete, all positions closed", self.user_id)
                         self._stop_evt.set()
+                    continue
+
+                # NICE-6: paused → skip the signal-scan path entirely.
+                # Position management (above) already ran, so TP/SL/liq/ARM
+                # are still serviced. Only NEW entries are blocked.
+                if self._paused:
                     continue
 
                 # Position limit guards.
@@ -745,11 +895,40 @@ class FuturesEngine(NativeTradingEngine):
                     stoploss_pct    = abs(self._stoploss) * 100.0,
                     take_profit_pct = self._take_profit * 100.0,
                 )
+                # Successful compile — reset the breaker counter so transient
+                # blips don't accumulate forever.
+                self._consec_compile_failures = 0
             except StrategyCompileError as e:
-                self.last_action = f"STRATEGY COMPILE FAILED: {e}"
+                self._consec_compile_failures += 1
+                self.last_action = (
+                    f"STRATEGY COMPILE FAILED ({self._consec_compile_failures}/"
+                    f"{self._max_compile_failures}): {e}"
+                )
                 self._log_action("strategy_compile_failed_tick",
-                    self.last_action, pair=pair, error=str(e))
+                    self.last_action, pair=pair, error=str(e),
+                    consecutive=self._consec_compile_failures,
+                    threshold=self._max_compile_failures)
                 log.warning("[%s] %s", self.user_id, self.last_action)
+                # MUST-2: circuit breaker. After N consecutive failures the
+                # strategy is almost certainly broken in a way that recovers
+                # never — auto-stop so the action_log isn't endlessly spammed
+                # and so no half-state position management leaks resources.
+                if self._consec_compile_failures >= self._max_compile_failures:
+                    self.last_action = (
+                        f"BOT AUTO-STOPPED: {self._consec_compile_failures} consecutive "
+                        f"strategy_runner failures — last error: {e}. "
+                        "Edit the strategy code or re-upload, then restart this bot."
+                    )
+                    self._log_action("auto_stop_compile_failures",
+                        self.last_action, error=str(e),
+                        consecutive=self._consec_compile_failures)
+                    log.error("[%s] %s", self.user_id, self.last_action)
+                    _notifier.notify_compile_failed(
+                        self.user_id, strategy=self._strategy, error=str(e),
+                    )
+                    # Tell the run loop to exit — bot transitions to !is_running
+                    # which the UI surfaces in the active-bots list.
+                    self._stop_evt.set()
                 continue
 
             # Latest bar index — strategy_runner's signal_fn uses edge
@@ -886,6 +1065,12 @@ class FuturesEngine(NativeTradingEngine):
                             day_pnl_pct=today_pnl_pct, limit=-self._day_max_dd_pct,
                             day_trades=self._day_trades)
                         log.warning("[%s] %s", self.user_id, self.last_action)
+                        _notifier.notify_daily_dd_trip(
+                            self.user_id, pnl_pct=today_pnl_pct,
+                            limit_pct=self._day_max_dd_pct,
+                            starting_balance=self._day_start_balance,
+                            balance_now=self.balance,
+                        )
                     continue
                 if self._day_dd_tripped:
                     # Already tripped today — keep skipping new entries.
@@ -930,19 +1115,21 @@ class FuturesEngine(NativeTradingEngine):
 
             entry = live_price
 
-            # ── Phase 4: timeframe-aware risk plan ──────────────────────────
+            # ── Phase 4 + NICE-4: timeframe-aware risk plan w/ overrides ─
             # Pass the strategy's structural SL/TP through risk_engine,
             # which (a) honours them if they validate, (b) falls back to
-            # ATR×per-TF-multiplier defaults if not, and (c) enforces a
-            # min-RR gate per the spec.
+            # ATR×per-TF-multiplier defaults (with per-user overrides), and
+            # (c) enforces a min-RR gate per the spec.
+            user_risk_overrides = risk_engine.load_user_risk_overrides(self.user_id)
             plan = risk_engine.compute_tp_sl(
-                entry        = entry,
-                direction    = direction,
-                df           = df,
-                timeframe    = self._timeframe,
-                strategy_sl  = sl_s,
-                strategy_tp  = tp_s,
-                strategy_tp2 = tp2_s,
+                entry          = entry,
+                direction      = direction,
+                df             = df,
+                timeframe      = self._timeframe,
+                strategy_sl    = sl_s,
+                strategy_tp    = tp_s,
+                strategy_tp2   = tp2_s,
+                user_overrides = user_risk_overrides,
             )
 
             if not plan.valid:
@@ -1035,6 +1222,35 @@ class FuturesEngine(NativeTradingEngine):
                 log.info("[%s] %s", self.user_id, self.last_action)
                 if self._mode == "live":
                     self._place_live_entry(pair, pos)
+                    # NICE-5: rewrite KuCoin's on-exchange TP/SL to match
+                    # the new position direction. Critical for stop-and-
+                    # reverse: when the old long flipped to a short, KuCoin
+                    # still has the OLD long's stops (SL below entry, TP
+                    # above) — which would be plain wrong for the new short.
+                    # Pushing fresh stops here also covers the "bot crashes
+                    # right after open" case.
+                    try:
+                        from .kucoin_futures_client import normalize_futures_symbol
+                        sym = normalize_futures_symbol(
+                            pair.replace("/", "").replace("USDT", "USDTM"),
+                        )
+                        # Use TP2 when ARM is on (final target), else the
+                        # plan-level TP (single-TP case).
+                        tp_to_push = pos.tp2_price if (pos.arm_active and pos.tp2_price) else pos.tp
+                        self._push_live_tp_sl(sym, pos.sl, tp_to_push, label="open")
+                    except Exception as _push_exc:
+                        log.debug("[%s] TP/SL push on open skipped: %s",
+                                  self.user_id, _push_exc)
+
+                # NICE-7 — Discord notification (best-effort, async).
+                _notifier.notify_position_opened(
+                    self.user_id, pair=pair, direction=direction,
+                    entry=entry, sl=pos.sl, tp=pos.tp, leverage=self._leverage,
+                    strategy=self._strategy, mode=self._mode,
+                    arm=pos.arm_active,
+                    tp1=pos.tp1_price if pos.arm_active else None,
+                    tp2=pos.tp2_price if pos.arm_active else None,
+                )
 
                 # Copy-trading broadcast removed in spot purge.
 
@@ -1170,23 +1386,35 @@ class FuturesEngine(NativeTradingEngine):
         # SL-wise (limits the loss) but means TP would fire too small.
         # Push the BE-buffered SL and TP2 to the exchange now so the remainder
         # has correct stops even without the bot running.
-        if not isinstance(pos, FuturesPosition) or pos.tp2_price is None:
+        if isinstance(pos, FuturesPosition) and pos.tp2_price is not None:
+            self._push_live_tp_sl(symbol, pos.sl, pos.tp2_price, label="rewrite-after-tp1")
+
+    def _push_live_tp_sl(self, symbol: str, sl: float, tp: float, *, label: str = "rewrite") -> None:
+        """NICE-5 helper — push fresh SL + TP to KuCoin Lead Trading so the
+        on-exchange stops match the local position state.
+
+        Called from:
+          • _place_live_partial_close — after ARM TP1 partial close
+          • _tick_continuous stop-and-reverse — after the new opposite-
+            direction position opens (so the OLD direction's stops on
+            KuCoin are replaced with the NEW direction's).
+          • Manual TP/SL edit from PositionsPanel (existing endpoint).
+
+        Best-effort: failures are logged but never roll back local state.
+        """
+        if self._mode != "live" or not self._api_key:
             return
         try:
             from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
             from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
-            from urllib.parse import urlencode
             import urllib.request as _ureq, json as _json
-            # KuCoin Lead Trading's TP/SL endpoint is documented as
-            # POST /api/v1/copy-trade/futures/position/risk-limit/sl-tp
-            # with body {symbol, stopLossPrice, takeProfitPrice}.
             body = {
                 "symbol":          symbol,
-                "stopLossPrice":   str(round(pos.sl, 4)),
-                "takeProfitPrice": str(round(pos.tp2_price, 4)),
+                "stopLossPrice":   str(round(sl, 4)),
+                "takeProfitPrice": str(round(tp, 4)),
             }
             data = _json.dumps(body).encode()
-            ts2 = str(int(time.time() * 1000))
+            ts2  = str(int(time.time() * 1000))
             endpoint = "/api/v1/copy-trade/futures/position/risk-limit/sl-tp"
             headers = _sign_request(
                 self._api_sec, self._api_pass, self._api_key,
@@ -1195,16 +1423,11 @@ class FuturesEngine(NativeTradingEngine):
             headers["Content-Type"] = "application/json"
             req2 = _ureq.Request(f"{_base}{endpoint}", data=data, headers=headers, method="POST")
             with _proxy_urlopen(req2, timeout=15) as r2:
-                tpsl_resp = _json.loads(r2.read().decode())
-            log.info("[%s] Lead Trading TP/SL rewrite after TP1: %s",
-                     self.user_id, tpsl_resp.get("code"))
-        except Exception as e2:
-            # Non-fatal — the bot's own check_exit will still close at SL/TP
-            # on the next tick. Just log so it's visible.
-            log.warning(
-                "[%s] Could not rewrite exchange-side TP/SL after partial: %s",
-                self.user_id, e2,
-            )
+                resp = _json.loads(r2.read().decode())
+            log.info("[%s] Lead Trading TP/SL %s ok: code=%s",
+                     self.user_id, label, resp.get("code"))
+        except Exception as e:
+            log.warning("[%s] TP/SL %s failed: %s", self.user_id, label, e)
 
     def _place_live_exit(self, pair: str, pos, price: float) -> None:
         """Close a futures position via KuCoin Lead Trading API."""
@@ -1386,6 +1609,7 @@ class FuturesEngine(NativeTradingEngine):
         base["action_log"]    = list(self.action_log)
         base["signal_count"]  = self.signal_count
         base["winding_down"]  = self._winding_down
+        base["paused"]        = self._paused
         for pos_info in base.get("positions", []):
             for k, p in self.positions.items():
                 if p.pair == pos_info["pair"]:

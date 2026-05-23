@@ -82,9 +82,73 @@ MAX_SL_PCT_OF_ENTRY = 0.08   # 8% — hard cap
 MIN_SL_PCT_OF_ENTRY = 0.0008  # 0.08% — exchange spread + fee floor
 
 
-def get_tf_config(tf: str) -> dict:
-    """Return config for `tf`, defaulting to 15m if the TF is unknown."""
-    return TIMEFRAME_CONFIG.get(tf, TIMEFRAME_CONFIG["15m"])
+def get_tf_config(tf: str, overrides: Optional[dict] = None) -> dict:
+    """Return config for `tf`, defaulting to 15m if the TF is unknown.
+
+    `overrides` is the {tf: {sl_mult, tp_mult, atr_period, min_rr}} map
+    persisted on Config.risk_config_json. Per-user, per-TF — lets power
+    users tune scalp / swing multipliers per pair without redeploying.
+    Unknown keys fall back to the hardcoded TIMEFRAME_CONFIG values.
+    """
+    base = TIMEFRAME_CONFIG.get(tf, TIMEFRAME_CONFIG["15m"])
+    if not overrides:
+        return base
+    user_tf = overrides.get(tf)
+    if not user_tf:
+        return base
+    merged = dict(base)
+    for k in ("atr_period", "sl_mult", "tp_mult", "min_rr"):
+        if k in user_tf and user_tf[k] is not None:
+            try:
+                merged[k] = float(user_tf[k]) if k != "atr_period" else int(user_tf[k])
+            except (TypeError, ValueError):
+                pass
+    return merged
+
+
+def load_user_risk_overrides(user_id: str) -> Optional[dict]:
+    """Read Config.risk_config_json for `user_id` and return the parsed
+    overrides map. None when no row exists or the JSON is malformed.
+
+    Cached for 30s on the module to avoid a DB hit on every signal scan.
+    The engine fetches this once per signal scan via the helper; per-bot
+    caching avoids a per-tick lookup."""
+    import json, time
+    global _OVERRIDES_CACHE
+    now = time.time()
+    entry = _OVERRIDES_CACHE.get(user_id)
+    if entry and (now - entry[0] < 30):
+        return entry[1]
+    try:
+        from backend.models import SessionLocal, Config
+        from sqlalchemy import select
+        with SessionLocal() as db:
+            cfg = db.execute(
+                select(Config).where(Config.user_id == user_id).limit(1)
+            ).scalar_one_or_none()
+        if not cfg or not getattr(cfg, "risk_config_json", None):
+            _OVERRIDES_CACHE[user_id] = (now, None)
+            return None
+        parsed = json.loads(cfg.risk_config_json)
+        if not isinstance(parsed, dict):
+            _OVERRIDES_CACHE[user_id] = (now, None)
+            return None
+        _OVERRIDES_CACHE[user_id] = (now, parsed)
+        return parsed
+    except Exception:
+        _OVERRIDES_CACHE[user_id] = (now, None)
+        return None
+
+
+_OVERRIDES_CACHE: dict[str, tuple[float, Optional[dict]]] = {}
+
+
+def invalidate_overrides_cache(user_id: Optional[str] = None) -> None:
+    """Drop the cached overrides — called when the user PUTs new values."""
+    if user_id is None:
+        _OVERRIDES_CACHE.clear()
+    else:
+        _OVERRIDES_CACHE.pop(user_id, None)
 
 
 # ─────────────────────────── ATR computation ──────────────────────────────────
@@ -265,6 +329,7 @@ def compute_tp_sl(
     strategy_tp:  Optional[float] = None,
     strategy_tp2: Optional[float] = None,
     min_rr_override: Optional[float] = None,
+    user_overrides: Optional[dict] = None,   # NICE-4: per-user TF overrides
 ) -> RiskPlan:
     """
     Compute a RiskPlan for a fresh signal on the selected execution TF.
@@ -285,7 +350,7 @@ def compute_tp_sl(
         RiskPlan. Check `.valid` — False means SKIP this signal and log
         `.rejected_reason`.
     """
-    cfg     = get_tf_config(timeframe)
+    cfg     = get_tf_config(timeframe, overrides=user_overrides)
     atr     = compute_atr(df, cfg["atr_period"])
     sl_mult = cfg["sl_mult"]
     tp_mult = cfg["tp_mult"]

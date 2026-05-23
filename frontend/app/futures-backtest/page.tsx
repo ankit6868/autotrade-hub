@@ -149,10 +149,29 @@ function FuturesBacktestInner() {
   const [useRiskEngine,    setUseRiskEngine]    = useState(false);
 
   useEffect(() => {
+    // MUST-1: deep-link query params from the bot panel's "Run Backtest Now"
+    // CTA (after a live-guardrail block). Reads ?strategy_id=X&pair=BTC/USDT&tf=15m
+    // and pre-fills the form so the user can hit Run immediately.
+    let presetStrategyId: number | null = null;
+    let presetPair:       string | null = null;
+    let presetTf:         string | null = null;
+    try {
+      const sp = new URLSearchParams(window.location.search);
+      const sid = sp.get('strategy_id');
+      if (sid) presetStrategyId = Number(sid);
+      const pp  = sp.get('pair');
+      if (pp)  presetPair = pp;
+      const tf  = sp.get('tf');
+      if (tf)  presetTf = tf;
+    } catch { /* ignore */ }
+
     api.strategy.list().then(d => {
       setStrategies(d.strategies ?? []);
-      if (d.strategies?.length > 0) {
-        setStrategyId(Number(d.strategies[0].id));
+      const list = d.strategies ?? [];
+      if (presetStrategyId && list.some((s: any) => Number(s.id) === presetStrategyId)) {
+        setStrategyId(presetStrategyId);
+      } else if (list.length > 0) {
+        setStrategyId(Number(list[0].id));
       }
     }).catch(() => {});
 
@@ -165,6 +184,17 @@ function FuturesBacktestInner() {
     api.futures.backtest.history()
       .then(d => setHistory(d.backtests ?? []))
       .catch(() => {});
+
+    // Pre-fill pair + TF from deep-link params AFTER pairs load so the
+    // dropdown actually has the value to select. Order doesn't matter
+    // for setPairs/setTimeframe since they're independent of `availablePairs`.
+    if (presetPair) {
+      setPairs([presetPair]);
+    }
+    if (presetTf) {
+      setTimeframe(presetTf);
+      setTfSrc('manual' as any);
+    }
   }, []);
 
   // Pull all risk parameters from a strategy row and write them into the

@@ -227,6 +227,11 @@ async def _upload_strategy_impl(
     code_take_profit = float(roi_match.group(1)) if roi_match else 0.015
     code_timeframe   = tf_match.group(1)          if tf_match  else "15m"
 
+    # NICE-8: auto_trade_enabled / auto_trade_mode / allow_copy_trading
+    # were dropped in the spot purge. The `auto_trade` + `auto_trade_mode`
+    # form fields are still accepted on the upload endpoint for backward
+    # compat with old UI calls — we just ignore them.
+    _ = auto_flag, mode_flag  # silenced
     strategy = Strategy(
         user_id=user_id,
         name=name,
@@ -234,8 +239,6 @@ async def _upload_strategy_impl(
         original_text=strategy_text,
         generated_code=code,
         model_used=model_used,
-        auto_trade_enabled=auto_flag,
-        auto_trade_mode=mode_flag,
         stoploss=code_stoploss,
         take_profit=code_take_profit,
         default_leverage=10,        # sensible futures default; user can change in editor
@@ -558,39 +561,18 @@ def list_strategies(
                 "description":        s.description,
                 "timeframe":          s.timeframe or "15m",
                 "is_template":        getattr(s, "is_template", False),
-                "auto_trade_enabled": bool(getattr(s, "auto_trade_enabled", False)),
-                "auto_trade_mode":    getattr(s, "auto_trade_mode", "paper"),
                 # Trading config — auto-fill stop-loss, take-profit, leverage on frontend
                 "stoploss":           getattr(s, "stoploss", -0.03) or -0.03,
                 "take_profit":        getattr(s, "take_profit", 0.015) or 0.015,
                 "default_leverage":   getattr(s, "default_leverage", 1) or 1,
+                # Phase 5 — confidence + live permission (decoded by validator)
+                "confidence_score":   int(getattr(s, "confidence_score", 0) or 0),
+                "live_permission":    getattr(s, "live_permission", "blocked") or "blocked",
                 "created_at":         str(s.created_at),
             }
             for s in strategies
         ]
     }
-
-
-@router.post("/{strategy_id}/auto-trade")
-def set_strategy_auto_trade(
-    strategy_id: int,
-    enabled: bool = True,
-    mode: str = "paper",
-    db: Session = Depends(get_db),
-    user_id: str = Depends(get_user_id),
-):
-    """Toggle the auto-trade flag on a single strategy. The autotrade engine
-    only considers strategies that have this flag set when picking which
-    template to deploy from a scanner recommendation."""
-    s = db.execute(
-        select(Strategy).where(Strategy.id == strategy_id, or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa: E712
-    ).scalar_one_or_none()
-    if not s:
-        return {"error": "Strategy not found"}
-    s.auto_trade_enabled = bool(enabled)
-    s.auto_trade_mode = "live" if mode == "live" else "paper"
-    db.commit()
-    return {"id": s.id, "auto_trade_enabled": s.auto_trade_enabled, "auto_trade_mode": s.auto_trade_mode}
 
 
 @router.get("/templates")

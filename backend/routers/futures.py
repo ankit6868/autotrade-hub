@@ -425,6 +425,10 @@ def run_futures_backtest(
         vip_tier          = vip_tier,
         maker_only_entry  = maker_only_entry,
         use_risk_engine   = use_risk_engine,
+        risk_overrides_for_run = (
+            (lambda: __import__('backend.services.risk_engine', fromlist=['load_user_risk_overrides']).load_user_risk_overrides(user_id))()
+            if use_risk_engine else None
+        ),
     )
 
     if "error" in result:
@@ -2384,6 +2388,114 @@ def partial_close_futures_position(
     }
 
 
+@router.get("/risk-config")
+def get_risk_config(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """NICE-4 (FR-04) — return the per-TF risk overrides for this user.
+
+    Response shape:
+      {
+        defaults: {"1m": {atr_period, sl_mult, tp_mult, min_rr}, ...},
+        overrides: {"1m": {...}, "1h": {...}}    # may be empty
+      }
+
+    The UI renders the defaults next to the overrides so the user always
+    sees the baseline. PUT writes overrides only (delete a key to revert
+    that TF to default).
+    """
+    import json as _json
+    from backend.services.risk_engine import TIMEFRAME_CONFIG
+    cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+    overrides: dict = {}
+    if cfg and getattr(cfg, "risk_config_json", None):
+        try:
+            parsed = _json.loads(cfg.risk_config_json)
+            if isinstance(parsed, dict):
+                overrides = parsed
+        except Exception:
+            overrides = {}
+    # Defaults — sanitised to the same shape the UI will write back.
+    defaults = {
+        tf: {
+            "atr_period": int(c["atr_period"]),
+            "sl_mult":    float(c["sl_mult"]),
+            "tp_mult":    float(c["tp_mult"]),
+            "min_rr":     float(c["min_rr"]),
+            "style":      c.get("style", ""),
+        } for tf, c in TIMEFRAME_CONFIG.items()
+    }
+    return {"defaults": defaults, "overrides": overrides}
+
+
+@router.put("/risk-config")
+def put_risk_config(
+    req: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Write per-TF overrides. Body:
+      {"overrides": {"1m": {sl_mult: 1.2, tp_mult: 2.5}, "1h": {min_rr: 2.5}}}
+
+    Only the keys provided are stored. Missing keys (e.g. atr_period) fall
+    back to TIMEFRAME_CONFIG defaults at risk_engine.compute_tp_sl time.
+
+    Validation:
+      • TF must be in {1m, 5m, 15m, 30m, 1h, 4h, 1d}
+      • sl_mult / tp_mult clamped to (0.1, 10.0)
+      • min_rr clamped to (1.0, 5.0)
+      • atr_period clamped to (5, 50)
+    """
+    import json as _json
+    from backend.services.risk_engine import TIMEFRAME_CONFIG, invalidate_overrides_cache
+
+    raw = req.get("overrides") or {}
+    if not isinstance(raw, dict):
+        return {"error": "overrides must be an object"}
+
+    VALID_TFS = set(TIMEFRAME_CONFIG.keys())
+    cleaned: dict = {}
+    for tf, vals in raw.items():
+        if tf not in VALID_TFS or not isinstance(vals, dict):
+            continue
+        tf_block: dict = {}
+        if "atr_period" in vals and vals["atr_period"] is not None:
+            try:
+                tf_block["atr_period"] = max(5, min(50, int(vals["atr_period"])))
+            except (TypeError, ValueError):
+                pass
+        for k in ("sl_mult", "tp_mult"):
+            if k in vals and vals[k] is not None:
+                try:
+                    tf_block[k] = max(0.1, min(10.0, float(vals[k])))
+                except (TypeError, ValueError):
+                    pass
+        if "min_rr" in vals and vals["min_rr"] is not None:
+            try:
+                tf_block["min_rr"] = max(1.0, min(5.0, float(vals["min_rr"])))
+            except (TypeError, ValueError):
+                pass
+        if tf_block:
+            cleaned[tf] = tf_block
+
+    cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+    if not cfg:
+        cfg = Config(user_id=user_id)
+        db.add(cfg)
+    cfg.risk_config_json = _json.dumps(cleaned) if cleaned else None
+    db.commit()
+    # Drop the per-user cached overrides so the very next signal scan
+    # picks up the new values.
+    invalidate_overrides_cache(user_id)
+
+    log_event(db, user_id, "futures.risk_config.put", request, payload={
+        "tfs_set": list(cleaned.keys()),
+    })
+    return {"ok": True, "overrides": cleaned}
+
+
 @router.get("/orders")
 def get_futures_orders(
     symbol: str = None,
@@ -3332,6 +3444,7 @@ def list_futures_bots(
             "wallet": i.wallet,
             "is_running": (i.is_running and engine_running) or winding,
             "winding_down": winding,
+            "paused":         (engine_status or {}).get("paused", False),
             "engine_running": engine_running,
             "total_trades": eng_total or db_count or i.total_trades or 0,
             "closed_trades": (engine_status or {}).get("total_trades", i.total_trades or 0),
@@ -3581,6 +3694,62 @@ def create_futures_bot(
         "arm_trail_to_tp1": arm_trail_to_tp1 if arm_enabled else None,
     })
     return {"bot_id": instance.id, "engine_key": engine_key, **result}
+
+
+@router.post("/bots/{bot_id}/pause")
+def pause_futures_bot(
+    bot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """NICE-6 — pause a futures bot.
+
+    Block new entries while STILL managing open positions (TP/SL/liq/ARM).
+    Different from DELETE /bots/{id} which winds down + stops the engine.
+    Pause is fully reversible via POST /bots/{id}/resume."""
+    instance = db.execute(
+        select(StrategyInstance).where(
+            StrategyInstance.id == bot_id, StrategyInstance.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if not instance:
+        return {"error": "Bot not found"}
+    if not instance.engine_key:
+        return {"error": "Bot has no engine key — cannot pause."}
+    bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
+    eng = bot_engines.get(instance.engine_key)
+    if not eng or not eng.is_running:
+        return {"error": "Bot engine is not running."}
+    eng.pause()
+    log_event(db, user_id, "futures.pause_bot", request, payload={"bot_id": bot_id})
+    return {"paused": True, "bot_id": bot_id}
+
+
+@router.post("/bots/{bot_id}/resume")
+def resume_futures_bot(
+    bot_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Resume a paused bot — new entries re-enabled."""
+    instance = db.execute(
+        select(StrategyInstance).where(
+            StrategyInstance.id == bot_id, StrategyInstance.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if not instance:
+        return {"error": "Bot not found"}
+    if not instance.engine_key:
+        return {"error": "Bot has no engine key — cannot resume."}
+    bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
+    eng = bot_engines.get(instance.engine_key)
+    if not eng or not eng.is_running:
+        return {"error": "Bot engine is not running."}
+    eng.resume()
+    log_event(db, user_id, "futures.resume_bot", request, payload={"bot_id": bot_id})
+    return {"paused": False, "bot_id": bot_id}
 
 
 @router.delete("/bots/{bot_id}")

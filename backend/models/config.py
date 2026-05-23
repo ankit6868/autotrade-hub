@@ -48,6 +48,12 @@ class Config(Base):
     discord_webhook_url = Column(Text, nullable=True)   # Discord channel webhook URL
     # --- Webhook (inbound signals from TradingView / external) ---
     webhook_secret = Column(Text, nullable=True)        # URL-safe token for /api/webhook/signal
+    # --- Phase-NICE-4: per-TF risk config override (FR-04) ---
+    # JSON map of {tf: {atr_period, sl_mult, tp_mult, min_rr}} that
+    # overrides the hardcoded TIMEFRAME_CONFIG values in risk_engine.
+    # When null the engine uses the defaults. Stored as TEXT (sqlite + pg
+    # compatible) — risk_engine.load_user_risk_config parses + caches.
+    risk_config_json = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
 

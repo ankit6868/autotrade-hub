@@ -395,6 +395,12 @@ export const api = {
       return request<any>(`/api/futures/orders/all${qs ? `?${qs}` : ''}`, { method: 'DELETE' });
     },
     leadTradingStatus: () => request<any>('/api/futures/lead-trading-status'),
+    // NICE-4: per-TF risk config (FR-04) — defaults + user overrides
+    riskConfig: {
+      get: () => request<any>('/api/futures/risk-config'),
+      put: (overrides: Record<string, any>) =>
+        request<any>('/api/futures/risk-config', { method: 'PUT', body: JSON.stringify({ overrides }) }),
+    },
     bots: {
       list: (mode?: 'paper' | 'live') =>
         request<any>(`/api/futures/bots${mode ? `?mode=${mode}` : ''}`),
@@ -402,6 +408,9 @@ export const api = {
         request<any>('/api/futures/bots', { method: 'POST', body: JSON.stringify(data) }),
       stop: (botId: number, force?: boolean) =>
         request<any>(`/api/futures/bots/${botId}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
+      // NICE-6: pause / resume — manages open positions but blocks new entries
+      pause:  (botId: number) => request<any>(`/api/futures/bots/${botId}/pause`,  { method: 'POST' }),
+      resume: (botId: number) => request<any>(`/api/futures/bots/${botId}/resume`, { method: 'POST' }),
       performance: (botId: number) => request<any>(`/api/futures/bots/${botId}/performance`),
     },
   },
