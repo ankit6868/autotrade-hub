@@ -817,11 +817,15 @@ class SMCStrategy1(IStrategy):
     HTF_RANGE_LOOKBACK = 50         # 50 HTF bars for premium/discount range
     EQUAL_PRICE_THRESH = 0.001      # 0.1% — high/low within this = "equal"
     SWEEP_LOOKBACK     = 20         # bars to scan for previous equal-low/high
+    SWEEP_VALID_BARS   = 5          # how recent a sweep must be to still
+                                    # count for entry (PDF: "wait for the
+                                    # trap, then wait for BOS confirmation"
+                                    # — sweep and BOS can be on different
+                                    # bars within this window)
     OB_LOOKBACK        = 30         # bars to scan back for the most recent OB
     FVG_LOOKBACK       = 20         # bars to scan back for last unfilled FVG
     FVG_PROXIMITY_PCT  = 0.0030     # within 0.3% of FVG midpoint = "at FVG"
     OB_PROXIMITY_PCT   = 0.0030     # within 0.3% of OB midpoint = "at OB"
-    STRONG_BODY_X_ATR  = 1.5        # body ≥ 1.5× ATR(14) = "strong move"
     ATR_LEN            = 14
     MAX_RISK_PCT       = 0.03       # reject if SL > 3% from entry (broken structure)
     R_MULTIPLE         = 2.0        # TP at 2R
@@ -1080,23 +1084,36 @@ class SMCStrategy1(IStrategy):
         closes = df["close"].to_numpy()
 
         # Equal-highs / equal-lows clustering within EQUAL_PRICE_THRESH
-        # over the last SWEEP_LOOKBACK bars.
+        # over the last SWEEP_LOOKBACK bars. PDF §3 Step 2: "Equal Highs
+        # (Buy-side liquidity): abs(high1 - high2) < threshold".
+        # Earlier code only checked the absolute top/bottom of the window;
+        # this missed mid-range clusters (e.g. highs [100, 95, 95, 90, 95]
+        # has a cluster at 95 but earlier code would miss it because 100
+        # is the top and has no near-duplicates). Now we scan the top-K
+        # candidates and pick the HIGHEST cluster that has 2+ bars within
+        # threshold — most relevant liquidity is at the highest cluster
+        # (most stops accumulate near recent tops).
         equal_high_lvl = np.full(n_total, np.nan)
         equal_low_lvl  = np.full(n_total, np.nan)
+        TOP_CANDIDATES = 5    # check top-5 unique highs / lows per window
         for i in range(n_total):
             if i < self.SWEEP_LOOKBACK: continue
             window_h = highs[i - self.SWEEP_LOOKBACK: i]
             window_l = lows [i - self.SWEEP_LOOKBACK: i]
-            # Pick the highest high in the window as the candidate; check
-            # if any OTHER bar's high is within threshold of it.
-            top = float(window_h.max())
-            close_to_top = window_h[np.abs(window_h - top) / max(top, 1e-9) < self.EQUAL_PRICE_THRESH]
-            if len(close_to_top) >= 2:
-                equal_high_lvl[i] = top
-            bot = float(window_l.min())
-            close_to_bot = window_l[np.abs(window_l - bot) / max(bot, 1e-9) < self.EQUAL_PRICE_THRESH]
-            if len(close_to_bot) >= 2:
-                equal_low_lvl[i] = bot
+            # ── Equal highs (look at the K highest values in the window) ──
+            sorted_h_desc = np.sort(window_h)[::-1]
+            for candidate in sorted_h_desc[:TOP_CANDIDATES]:
+                near = np.abs(window_h - candidate) / max(float(candidate), 1e-9) < self.EQUAL_PRICE_THRESH
+                if near.sum() >= 2:
+                    equal_high_lvl[i] = float(candidate)
+                    break    # pick highest qualifying cluster
+            # ── Equal lows (look at the K lowest values in the window) ────
+            sorted_l_asc = np.sort(window_l)
+            for candidate in sorted_l_asc[:TOP_CANDIDATES]:
+                near = np.abs(window_l - candidate) / max(float(candidate), 1e-9) < self.EQUAL_PRICE_THRESH
+                if near.sum() >= 2:
+                    equal_low_lvl[i] = float(candidate)
+                    break    # pick lowest qualifying cluster
 
         # Liquidity SWEEP: this bar's wick took out the equal-high (long
         # = sell-side sweep, then reclaim) AND closed back through it.
@@ -1115,6 +1132,24 @@ class SMCStrategy1(IStrategy):
         df["equal_low_lvl"]  = equal_low_lvl
         df["equal_high_lvl"] = equal_high_lvl
 
+        # ── Sweep memory (PDF: "wait for trap THEN wait for confirmation") ─
+        # The original spec is sequential: liquidity sweep happens FIRST,
+        # then LTF BOS confirms 1-5 bars later. Earlier code required both
+        # on the SAME bar which is the rare special case — caused near-zero
+        # entries on real data. Track "did a sweep happen recently?" over a
+        # rolling SWEEP_VALID_BARS window, so a sweep on bar i remains
+        # valid for entry until bar i+SWEEP_VALID_BARS-1.
+        recent_bull_sweep = np.zeros(n_total, dtype=bool)
+        recent_bear_sweep = np.zeros(n_total, dtype=bool)
+        for i in range(n_total):
+            lo = max(0, i - self.SWEEP_VALID_BARS + 1)
+            if np.any(bull_sweep[lo: i + 1]):
+                recent_bull_sweep[i] = True
+            if np.any(bear_sweep[lo: i + 1]):
+                recent_bear_sweep[i] = True
+        df["recent_bull_sweep"] = recent_bull_sweep
+        df["recent_bear_sweep"] = recent_bear_sweep
+
         # ── Step 6: LTF BOS confirmation on execution TF ─────────────
         ph_l, pl_l = self._strict_pivots(highs, lows, self.SWING_N)
         last_ph_ltf, last_pl_ltf = self._shifted_pivot_values(highs, lows, ph_l, pl_l, self.SWING_N)
@@ -1131,12 +1166,21 @@ class SMCStrategy1(IStrategy):
         df["last_pl_ltf"]  = last_pl_ltf
 
         # ── Step 5: Premium/Discount classification on LTF ───────────
-        in_discount = closes <= range_mid_proj    # below 50% of HTF range → buy zone
-        in_premium  = closes >= range_mid_proj    # above 50% → sell zone
+        # Strict < and > (PDF: "Below 50% → Discount, Above 50% → Premium").
+        # At exact midpoint (rare), NEITHER zone is active — no trade.
+        # The earlier `<=` / `>=` would mark BOTH zones true at the
+        # midpoint, enabling both long and short setups on the same bar.
+        in_discount = closes < range_mid_proj     # strictly below 50% → buy zone
+        in_premium  = closes > range_mid_proj     # strictly above 50% → sell zone
         df["in_discount"] = in_discount
         df["in_premium"]  = in_premium
 
-        # ── ATR for strong-move filter ───────────────────────────────
+        # ── ATR (used by risk-engine downstream + diagnostics) ──────
+        # NOTE: a per-bar "strong_move" filter is NOT applied to entries.
+        # The spec uses "strong move" only as a criterion for OB DETECTION
+        # (the move AFTER the OB candle must be strong), which is already
+        # embedded in _compute_mtf_zones above. Adding it as an entry
+        # filter would over-restrict signals and isn't in the user's spec.
         high = df["high"]; low = df["low"]; close = df["close"]
         prev_close = close.shift()
         tr = pd.concat([
@@ -1145,9 +1189,7 @@ class SMCStrategy1(IStrategy):
             (low  - prev_close).abs(),
         ], axis=1).max(axis=1)
         atr = tr.ewm(alpha=1.0 / self.ATR_LEN, adjust=False).mean().to_numpy()
-        body = (close - df["open"]).abs().to_numpy()
         df["atr"] = atr
-        df["strong_move"] = body >= self.STRONG_BODY_X_ATR * atr
 
         # ── Step 8: NY Session filter ────────────────────────────────
         hours = df["date"].dt.hour
@@ -1166,8 +1208,13 @@ class SMCStrategy1(IStrategy):
         at_bear_zone = np.where(np.isnan(bear_ob_proj) & np.isnan(bear_fvg_proj), False, at_bear_ob | at_bear_fvg)
 
         # ── FINAL ENTRY: ALL 6 conditions must align (PDF §4) ────────
-        long_setup  = (htf_bias_arr == "bull") & in_discount & at_bull_zone & bull_sweep & bull_bos_ltf & df["in_session"].to_numpy()
-        short_setup = (htf_bias_arr == "bear") & in_premium  & at_bear_zone & bear_sweep & bear_bos_ltf & df["in_session"].to_numpy()
+        # Uses `recent_bull_sweep` / `recent_bear_sweep` (not just same-bar
+        # `bull_sweep` / `bear_sweep`). PDF specifies the sequential flow:
+        # (1) sweep happens → (2) wait → (3) LTF BOS confirms.
+        # The recent-sweep gate allows up to SWEEP_VALID_BARS between the
+        # sweep and the BOS confirmation, which is what the spec describes.
+        long_setup  = (htf_bias_arr == "bull") & in_discount & at_bull_zone & recent_bull_sweep & bull_bos_ltf & df["in_session"].to_numpy()
+        short_setup = (htf_bias_arr == "bear") & in_premium  & at_bear_zone & recent_bear_sweep & bear_bos_ltf & df["in_session"].to_numpy()
 
         # ── Risk math: SL beyond sweep, TP = 2R ──────────────────────
         # Long SL = recent equal-low (or LTF pivot low) - 10bps buffer
