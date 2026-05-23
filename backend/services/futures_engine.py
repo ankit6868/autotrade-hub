@@ -573,6 +573,12 @@ class FuturesEngine(NativeTradingEngine):
         session_start_hr_utc: int   = 12,
         session_end_hr_utc:   int   = 21,
         equal_price_thresh:   float = 0.001,
+        # ── Optional per-strategy risk gates ─────────────────────────
+        # 0 = disabled (don't enforce). When > 0, the engine adds the
+        # corresponding circuit breaker. Strategies that don't set
+        # these (most don't) get the legacy unbounded behaviour.
+        max_hold_candles:    int   = 0,    # close trade after N bars open
+        max_stops_per_day:   int   = 0,    # halt new entries after N stops today
         **_kwargs,
     ) -> dict:
         # Always do a clean stop before (re)starting.
@@ -626,6 +632,22 @@ class FuturesEngine(NativeTradingEngine):
             "session_end_hr_utc":   max(0, min(23, int(session_end_hr_utc))),
             "equal_price_thresh":   max(0.0001, min(0.05, float(equal_price_thresh))),
         }
+        # ── Optional per-strategy risk gates ─────────────────────────
+        # max_hold_candles: force-close any position open longer than N
+        # bars on the engine's execution TF. 0 = disabled. Useful for
+        # scalp strategies that want a hard max-hold (e.g. 60 LTF
+        # candles = 5h on 5m). Strategy can declare via class attribute
+        # `max_hold_candles = 60`; engine reads it through compiled_df
+        # attrs (same mechanism as max_trades_per_day).
+        self._max_hold_candles  = max(0, int(max_hold_candles))
+        # max_stops_per_day: halt new entries after this many stop-loss
+        # exits today. 0 = disabled. Stricter than max_trades_per_day
+        # because it specifically counts STOPS (signals of strategy
+        # failure) — a strategy that's winning 10 trades in a row
+        # doesn't trip even with low limit; one that loses 3 in a row
+        # does. Resets at the start of a new UTC day, like _day_trades.
+        self._max_stops_per_day = max(0, int(max_stops_per_day))
+        self._day_stops         = 0
         self.balance       = wallet
         self.positions     = {}
         self.closed_trades = []
@@ -933,12 +955,29 @@ class FuturesEngine(NativeTradingEngine):
                     # TP/SL exit — checked every tick (5 s when positions open)
                     pos.update_trail(live_price)
                     exit_info = pos.check_exit(live_price, live_price)
+                    # ── Max-hold force-close (optional gate) ─────────────
+                    # If the strategy / user declared a max-hold limit and
+                    # this position has been open longer than that, force
+                    # an exit at the live price with reason="max_hold_expired".
+                    # PDF / SMC-spec rationale: scalp/intraday strategies
+                    # shouldn't sit in a setup forever — bias staleness
+                    # eventually invalidates the trade thesis.
+                    if exit_info is None and self._max_hold_candles > 0:
+                        bars_held = int((now - pos.opened_at).total_seconds() // tf_seconds)
+                        if bars_held >= self._max_hold_candles:
+                            exit_info = (live_price, "max_hold_expired")
                     if exit_info:
                         exit_price, reason = exit_info
                         pos.close(exit_price, reason, now)
                         self.balance += pos.pnl_abs
                         self.closed_trades.append(pos)
                         del self.positions[trade_key]
+                        # Count stop-losses for the daily-stops breaker.
+                        # Only "stop_loss" qualifies — TP exits, max-hold,
+                        # and liquidations are tracked separately so they
+                        # don't trip the bot's "strategy is failing" gate.
+                        if reason == "stop_loss":
+                            self._day_stops += 1
                         # Reset to None (Phase 2 edge detection stores direction).
                         seen_signal[pair] = None
                         # Phase 8: arm cooldown after every close (TP, SL, manual).
@@ -1193,6 +1232,7 @@ class FuturesEngine(NativeTradingEngine):
             if day_now != self._day_key:
                 self._day_key            = day_now
                 self._day_trades         = 0
+                self._day_stops          = 0   # ← new: per-day stop-loss counter
                 self._day_start_balance  = self.balance
                 self._day_dd_tripped     = False
                 self._log_action("day_rollover", f"New trading day {day_now} — counters reset",
@@ -1208,6 +1248,24 @@ class FuturesEngine(NativeTradingEngine):
                     pair=pair, direction=direction,
                     day_trades=self._day_trades,
                     max_trades_per_day=self._max_trades_per_day)
+                continue
+
+            # Max-stops-per-day breaker (optional; 0 = disabled).
+            # When the strategy or user explicitly declares this gate, halt
+            # all new entries once the day's stop-loss count reaches the
+            # limit. Stricter than max_trades_per_day because it counts
+            # ONLY stop-losses (signals of strategy failure) — a strategy
+            # that's winning doesn't trip; one that's bleeding does.
+            # Resets at the same UTC midnight rollover as _day_trades.
+            if self._max_stops_per_day > 0 and self._day_stops >= self._max_stops_per_day:
+                self.last_action = (
+                    f"DAILY STOPS CAP {pair} {direction} — {self._day_stops}/"
+                    f"{self._max_stops_per_day} stops already today, halting new entries"
+                )
+                self._log_action("daily_stops_cap_skip", self.last_action,
+                    pair=pair, direction=direction,
+                    day_stops=self._day_stops,
+                    max_stops_per_day=self._max_stops_per_day)
                 continue
 
             # Daily-DD breaker: trips the bot if today's loss exceeds the

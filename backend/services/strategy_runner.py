@@ -601,6 +601,23 @@ def evaluate_strategy(
     cls_cooldown = getattr(strategy_cls, "cooldown_candles", None)
     if isinstance(cls_cooldown, int) and 0 <= cls_cooldown <= 100:
         work.attrs["class_cooldown_candles"] = cls_cooldown
+    # Optional risk gates (added 2026-05-24) — opt-in per strategy.
+    # max_hold_candles: force-close trades open longer than N bars.
+    # max_stops_per_day: halt new entries after N stops today.
+    # Both default to 0 (disabled) in the engine when not set, so
+    # strategies that don't declare these get unchanged behaviour.
+    cls_max_hold = getattr(strategy_cls, "max_hold_candles", None)
+    if isinstance(cls_max_hold, int) and 1 <= cls_max_hold <= 5000:
+        work.attrs["class_max_hold_candles"] = cls_max_hold
+    cls_max_stops = getattr(strategy_cls, "max_stops_per_day", None)
+    if isinstance(cls_max_stops, int) and 1 <= cls_max_stops <= 100:
+        work.attrs["class_max_stops_per_day"] = cls_max_stops
+    # Sub-bar timeframes for lower-TF analysis (e.g. liquidity sweep on
+    # 1m when execution_tf=5m). Symmetric to bias_timeframes but for
+    # the downward direction. Only fetched when declared.
+    cls_sub_tfs = getattr(strategy_cls, "sub_timeframes", None)
+    if isinstance(cls_sub_tfs, (list, tuple)):
+        work.attrs["class_sub_timeframes"] = list(cls_sub_tfs)
     return work
 
 

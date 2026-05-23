@@ -104,6 +104,41 @@ def get_strategy_bias_tfs(strategy_instance, execution_tf: str) -> list[str]:
     return valid
 
 
+def get_strategy_sub_tfs(strategy_instance, execution_tf: str) -> list[str]:
+    """Read `sub_timeframes` off the strategy — the SYMMETRIC counterpart
+    to bias_timeframes for the DOWNWARD direction.
+
+    Use case: SMC strategies that detect liquidity sweeps on 1m or 3m
+    while running on a 5m / 15m execution clock. The sub-TF data is
+    exposed via metadata['sub'][tf] (same structure as metadata['htf']).
+
+    Validation: drops any TF that isn't STRICTLY LOWER than execution_tf.
+    A strategy that accidentally puts a higher TF here gets it filtered;
+    they should use bias_timeframes for higher TFs.
+    """
+    raw = getattr(strategy_instance, "sub_timeframes", None)
+    if not raw:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        log.warning("sub_timeframes must be a list; got %r — ignoring", type(raw))
+        return []
+    exec_min = _tf_minutes(execution_tf)
+    valid: list[str] = []
+    seen: set[str] = set()
+    for tf in raw:
+        tf_s = str(tf).strip()
+        if tf_s not in _VALID_TFS:
+            continue
+        if tf_s in seen:
+            continue
+        if _tf_minutes(tf_s) >= exec_min:
+            log.debug("dropping sub_tf %s (not strictly lower than %s)", tf_s, execution_tf)
+            continue
+        seen.add(tf_s)
+        valid.append(tf_s)
+    return valid
+
+
 def attach_htf_context(
     *,
     strategy_instance,
@@ -134,38 +169,55 @@ def attach_htf_context(
         Dict[tf_str → DataFrame|None]. None values mean fetch failed.
     """
     bias_tfs = get_strategy_bias_tfs(strategy_instance, execution_tf)
+    sub_tfs  = get_strategy_sub_tfs(strategy_instance, execution_tf)
     htf_map: dict[str, Optional[pd.DataFrame]] = {}
-    if not bias_tfs:
-        # No opt-in — leave metadata['htf'] empty so strategies can still
-        # safely call metadata.get('htf', {}).get('1h').
-        metadata.setdefault("htf", {})
-        # NOTE: we deliberately do NOT write htf into df.attrs — pandas
-        # concat operations merge attrs via dict equality, and dicts
-        # containing DataFrames raise "truth value ambiguous" inside
-        # pd.concat. Strategies read from metadata['htf'] instead.
+    sub_map: dict[str, Optional[pd.DataFrame]] = {}
+
+    # Always set both keys on metadata so strategies can safely call
+    # metadata.get('htf', {}).get('1h') / metadata.get('sub', {}).get('1m')
+    # without checking for KeyError.
+    metadata.setdefault("htf", {})
+    metadata.setdefault("sub", {})
+
+    if not bias_tfs and not sub_tfs:
+        # No opt-in for either layer — early-out preserves legacy behaviour
+        # for every strategy that doesn't declare bias_timeframes or
+        # sub_timeframes (i.e. the original 7 strategies).
         return {}
 
     from backend.services import mtf_candles
-    for tf in bias_tfs:
+
+    def _fetch(tf: str) -> Optional[pd.DataFrame]:
+        """Fetch + clip to historical anchor (for backtest safety)."""
         try:
             tf_df = mtf_candles.get_candles(pair, tf, force_refresh=False)
             if tf_df is not None and historical_anchor_ts is not None:
-                # Backtest mode — clip to the anchor so the strategy can't
-                # peek at HTF bars whose CLOSE is in the future relative
-                # to the current backtest bar. The mtf_candles helper
-                # already trims partial bars; this is the extra historical
-                # safety net.
+                # Backtest mode — clip so the strategy can't peek at bars
+                # whose close is in the future relative to the current
+                # backtest bar. The mtf_candles helper already trims
+                # partial bars; this is the extra historical safety net.
                 if "date" in tf_df.columns:
                     try:
                         anchor_dt = pd.Timestamp(historical_anchor_ts, unit="s", tz="UTC")
                         tf_df = tf_df[tf_df["date"] <= anchor_dt].copy()
                     except Exception:
                         pass
-            htf_map[tf] = tf_df
+            return tf_df
         except Exception as e:
             log.debug("mtf_analyzer: fetch %s/%s failed: %s", pair, tf, e)
-            htf_map[tf] = None
+            return None
+
+    # ── HTF (higher than execution_tf) ──────────────────────────────────
+    for tf in bias_tfs:
+        htf_map[tf] = _fetch(tf)
+    # ── SUB (strictly lower than execution_tf) ──────────────────────────
+    # Used by scalp/SMC strategies that need tick-level structure (e.g.
+    # 1m liquidity sweep when running on 5m). Symmetric to bias_timeframes
+    # but for the downward direction. Strategies that don't declare
+    # sub_timeframes see an empty {} (no extra fetches).
+    for tf in sub_tfs:
+        sub_map[tf] = _fetch(tf)
 
     metadata["htf"] = htf_map
-    # NOTE: not written to df.attrs — see above comment.
+    metadata["sub"] = sub_map
     return htf_map

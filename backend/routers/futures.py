@@ -3553,6 +3553,11 @@ def create_futures_bot(
     max_trades_per_day = max(1, min(1000, int(req.get("max_trades_per_day", 999))))
     cooldown_candles   = max(0, min(50,   int(req.get("cooldown_candles",   0))))
     max_daily_dd_pct   = max(5.0, min(80.0, float(req.get("max_daily_dd_pct", 25.0))))
+    # Optional per-strategy risk gates (added 2026-05-24). Defaults to 0
+    # = disabled, matching the engine's "no enforcement" stance. When the
+    # user / strategy declares > 0, the engine adds the circuit breaker.
+    max_hold_candles   = max(0, min(5000, int(req.get("max_hold_candles", 0))))
+    max_stops_per_day  = max(0, min(100,  int(req.get("max_stops_per_day", 0))))
 
     # ── Session window + equal-price threshold (PDF §3, §6) ─────────
     # When the user picks a region in the UI we receive the UTC hour
@@ -3784,6 +3789,8 @@ def create_futures_bot(
         session_start_hr_utc = session_start_hr_utc,
         session_end_hr_utc   = session_end_hr_utc,
         equal_price_thresh   = equal_price_thresh,
+        max_hold_candles     = max_hold_candles,
+        max_stops_per_day    = max_stops_per_day,
     )
 
     log_event(db, user_id, "futures.create_bot", request, payload={
