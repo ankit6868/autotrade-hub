@@ -357,12 +357,24 @@ class PaperScalpEngine:
         Reuses backend.services.strategy_runner.evaluate_strategy which
         is the EXACT same function the backtester uses — so paper signal
         timing matches backtest signal timing for the same data.
+
+        Passes pair + execution_tf so the mtf_analyzer can fetch the
+        right HTF bars for the right symbol. Without these args, the
+        analyzer would default to BTC/USDT @ 15m and break any non-BTC
+        bot AND any non-15m strategy. Also forwards per-bot overrides
+        (session window, equal-price threshold) so SMC-family strategies
+        can be tuned per bot without editing class code.
         """
         from backend.services.strategy_runner import evaluate_strategy
         if not self.generated_code:
             # Fallback: no code provided, skip evaluation
             return df
-        return evaluate_strategy(self.generated_code, df)
+        return evaluate_strategy(
+            self.generated_code, df,
+            pair         = self.pair,
+            execution_tf = self.timeframe,
+            overrides    = getattr(self, "strategy_overrides", None),
+        )
 
     # ─────────────────── Position lifecycle ─────────────────────────────
 

@@ -427,10 +427,21 @@ def validate_and_score(
     #       cap, which was getting applied even when the strategy spec
     #       didn't ask for any limit (and silently restricting users).
     #
+    # Reads both from `strategy_class` (direct access when available) AND
+    # from `compiled_df.attrs` (surfaced by strategy_runner during compile,
+    # works when strategy_class is None — which it is in the live validator
+    # path where the class is exec'd but not passed in). Without the attrs
+    # fallback, every strategy looked "limit-less" because strategy_class
+    # was almost always None in production calls.
+    #
     # The UI override (max_trades_per_day input in BotPanel Advanced) still
     # wins over both — user is always in charge.
     cls_max_trades = getattr(strategy_class, "max_trades_per_day", None) if strategy_class else None
+    if cls_max_trades is None and compiled_df is not None:
+        cls_max_trades = compiled_df.attrs.get("class_max_trades_per_day")
     cls_cooldown   = getattr(strategy_class, "cooldown_candles",   None) if strategy_class else None
+    if cls_cooldown is None and compiled_df is not None:
+        cls_cooldown = compiled_df.attrs.get("class_cooldown_candles")
 
     if cls_max_trades is not None:
         resolved_max_trades = int(cls_max_trades)

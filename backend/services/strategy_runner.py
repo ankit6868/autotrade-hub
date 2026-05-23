@@ -590,6 +590,17 @@ def evaluate_strategy(
                 work.attrs["class_take_profit_ignored"] = (
                     f"{tp_abs*100:.1f}% — outside sane range [{SANE_TP_MIN*100}%–{SANE_TP_MAX*100}%]"
                 )
+
+    # Trade-limit class attrs — surfaced to the validator so it can use
+    # the strategy's declared values (when present) instead of the safe
+    # "999/day, 0 cooldown" defaults. A strategy can opt into a hard
+    # cap via:    max_trades_per_day = 5   # in the class body
+    cls_max_trades = getattr(strategy_cls, "max_trades_per_day", None)
+    if isinstance(cls_max_trades, int) and 1 <= cls_max_trades <= 1000:
+        work.attrs["class_max_trades_per_day"] = cls_max_trades
+    cls_cooldown = getattr(strategy_cls, "cooldown_candles", None)
+    if isinstance(cls_cooldown, int) and 0 <= cls_cooldown <= 100:
+        work.attrs["class_cooldown_candles"] = cls_cooldown
     return work
 
 

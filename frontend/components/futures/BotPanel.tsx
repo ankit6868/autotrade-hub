@@ -1222,11 +1222,11 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                       Max trades / day
                     </span>
                     <input
-                      type="number" min={1} max={50}
+                      type="number" min={1} max={1000}
                       value={maxTradesPerDay}
-                      onChange={e => setMaxTradesPerDay(e.target.value === '' ? '' : Math.max(1, Math.min(50, Number(e.target.value))))}
-                      placeholder="default"
-                      className="w-16 px-2 py-1 text-[11px] bg-[#1e222d] border border-white/[0.08] rounded text-white"
+                      onChange={e => setMaxTradesPerDay(e.target.value === '' ? '' : Math.max(1, Math.min(1000, Number(e.target.value))))}
+                      placeholder="unlimited"
+                      className="w-20 px-2 py-1 text-[11px] bg-[#1e222d] border border-white/[0.08] rounded text-white"
                     />
                   </div>
 
