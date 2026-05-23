@@ -3537,11 +3537,14 @@ def create_futures_bot(
     arm_trail_to_tp1  = bool(req.get("arm_trail_to_tp1", True))
 
     # Phase 8 — Cooldown / max-trades-per-day / daily DD trip.
-    # Defaults are mode-based (scalp = 8 trades, intraday = 4, swing = 2)
-    # picked by the validator. The router accepts overrides from the UI
-    # so power users can tune per-bot. Range-clamped to safe bounds.
-    max_trades_per_day = max(1, min(50, int(req.get("max_trades_per_day", 8))))
-    cooldown_candles   = max(0, min(50, int(req.get("cooldown_candles", 3))))
+    # Defaults follow the validator's TRADE_LIMIT_DEFAULT: when the
+    # strategy doesn't declare its own max_trades_per_day, the bot uses
+    # 999 (effectively unlimited) rather than imposing a mode-based cap
+    # the user never asked for. Range-clamped only to a sane upper bound
+    # (1000/day) to catch runaway-bug loops. The UI's "Max trades / day"
+    # input still wins over both when the user fills it in.
+    max_trades_per_day = max(1, min(1000, int(req.get("max_trades_per_day", 999))))
+    cooldown_candles   = max(0, min(50,   int(req.get("cooldown_candles",   0))))
     max_daily_dd_pct   = max(5.0, min(80.0, float(req.get("max_daily_dd_pct", 25.0))))
 
     # ── Session window + equal-price threshold (PDF §3, §6) ─────────

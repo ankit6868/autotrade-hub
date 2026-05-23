@@ -59,27 +59,36 @@ _DEFAULTS_BY_MODE: dict[str, dict] = {
     "scalp": {
         "risk_per_trade_pct":  0.35,   # spec: 0.25-0.5%
         "risk_reward":         1.5,    # spec: 1R-1.5R
-        "max_trades_per_day":  8,      # spec: 5-10
-        "cooldown_candles":    4,      # spec: 3-5
+        # max_trades_per_day + cooldown_candles intentionally OMITTED here:
+        # see TRADE_LIMIT_DEFAULT. PDF §7 recommends scalp 5-10, intraday
+        # 2-5, swing 1-3 as "safe defaults" but they were being applied as
+        # ENFORCED CAPS even when the user's strategy doesn't mention any
+        # trade limit. User pushed back: "if my strategy doesn't say it,
+        # don't impose it". So the validator now treats missing trade
+        # limits as "no limit" (999/day) and only applies a low cap when
+        # the strategy class explicitly declares one via class attributes.
     },
     "intraday": {
         "risk_per_trade_pct":  0.75,   # spec: 0.5-1.0%
         "risk_reward":         2.0,    # spec: 1.5R-2R
-        "max_trades_per_day":  4,      # spec: 2-5
-        "cooldown_candles":    3,
     },
     "swing": {
         "risk_per_trade_pct":  1.0,    # spec: 0.5-1%
         "risk_reward":         2.5,    # spec: 2R-3R
-        "max_trades_per_day":  2,      # spec: 1-3
-        "cooldown_candles":    2,
     },
     "position": {
         "risk_per_trade_pct":  1.0,
         "risk_reward":         3.0,
-        "max_trades_per_day":  1,
-        "cooldown_candles":    1,
     },
+}
+
+# Safety cap used when a strategy declares no limit. High enough to be
+# "effectively unlimited" for any human-tunable setup, low enough to
+# catch a runaway-bug loop (e.g. signal_fn returning a fresh trade every
+# bar at 1m = 1440 trades/day, which would still trip).
+TRADE_LIMIT_DEFAULT = {
+    "max_trades_per_day":  999,
+    "cooldown_candles":    0,      # no enforced cooldown — strategy decides
 }
 
 
@@ -409,15 +418,46 @@ def validate_and_score(
     if risk.risk_per_trade_pct == defaults["risk_per_trade_pct"]:
         inferred.append("risk_per_trade_pct")
 
-    # ── 4. Trade limits (always defaults — these are operational settings) ──
+    # ── 4. Trade limits ─────────────────────────────────────────────────
+    # Two-tier lookup:
+    #   (a) Strategy class declares max_trades_per_day / cooldown_candles
+    #       as class attributes → use those (source = "user_strategy")
+    #   (b) Otherwise → TRADE_LIMIT_DEFAULT (999/day, 0 cooldown)
+    #       This means "no enforced limit" rather than the old mode-based
+    #       cap, which was getting applied even when the strategy spec
+    #       didn't ask for any limit (and silently restricting users).
+    #
+    # The UI override (max_trades_per_day input in BotPanel Advanced) still
+    # wins over both — user is always in charge.
+    cls_max_trades = getattr(strategy_class, "max_trades_per_day", None) if strategy_class else None
+    cls_cooldown   = getattr(strategy_class, "cooldown_candles",   None) if strategy_class else None
+
+    if cls_max_trades is not None:
+        resolved_max_trades = int(cls_max_trades)
+        max_trades_src = "user_strategy"
+    else:
+        resolved_max_trades = TRADE_LIMIT_DEFAULT["max_trades_per_day"]
+        max_trades_src = "default_safe"
+        inferred.append("max_trades_per_day")
+
+    if cls_cooldown is not None:
+        resolved_cooldown = int(cls_cooldown)
+        cooldown_src = "user_strategy"
+    else:
+        resolved_cooldown = TRADE_LIMIT_DEFAULT["cooldown_candles"]
+        cooldown_src = "default_safe"
+        inferred.append("cooldown_candles")
+
+    # Overall trade_limits source = user_strategy only if BOTH were declared.
+    tl_src = "user_strategy" if (max_trades_src == "user_strategy" and cooldown_src == "user_strategy") else "default_safe"
+
     trade_limits = StrategyTradeLimits(
-        max_trades_per_day    = defaults["max_trades_per_day"],
-        cooldown_candles      = defaults["cooldown_candles"],
+        max_trades_per_day    = resolved_max_trades,
+        cooldown_candles      = resolved_cooldown,
         require_fresh_trigger = True,
         max_concurrent        = 1,
-        source                = "default_safe",
+        source                = tl_src,
     )
-    inferred.extend(["max_trades_per_day", "cooldown_candles"])
 
     # ── 5. Direction + critical-field check ──────────────────────────────
     # Direction: prefer signal columns from compile (works without
