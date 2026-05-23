@@ -40,6 +40,134 @@ log = logging.getLogger("futures_engine")
 KUCOIN_FUTURES_BASE = "https://api-futures.kucoin.com"
 MAINTENANCE_MARGIN  = 0.005   # 0.5% — standard KuCoin simplified
 
+# KuCoin Futures kline granularity is in MINUTES (not seconds — fixed in
+# commit f6003ff). Map from our TF strings to KuCoin's minute count.
+_FUTURES_TF_MIN = {
+    "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+    "1h": 60, "2h": 120, "4h": 240, "8h": 480, "12h": 720,
+    "1d": 1440, "1w": 10080,
+}
+
+
+def _fetch_futures_candles(pair: str, tf: str, limit: int = 200) -> list[dict]:
+    """Bug-fix: the legacy `_fetch_candles` hits api.kucoin.com (SPOT). The
+    futures engine MUST use futures candles — basis between spot and perp
+    can be 0.1-0.5% in normal markets and several % during stress events,
+    so strategies firing on spot data on the futures engine were trading
+    a different market than the chart implied.
+
+    This fetcher hits api-futures.kucoin.com/api/v1/kline/query — same
+    endpoint /api/market/ohlcv uses. Returns the same dict shape as
+    _fetch_candles so callers don't need to change downstream code.
+    """
+    from ._kucoin_proxy import urlopen as _proxy_urlopen
+    import urllib.request as _ureq
+    from .kucoin_futures_client import normalize_futures_symbol
+    # Pair like "BTC/USDT" → "XBTUSDTM"
+    sym = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+    gran = _FUTURES_TF_MIN.get(tf, 15)
+    now_ms  = int(time.time() * 1000)
+    # +5 bars buffer so dropping the partial bar still leaves `limit` closed bars.
+    from_ms = now_ms - (limit + 5) * gran * 60_000
+    url = (f"{KUCOIN_FUTURES_BASE}/api/v1/kline/query"
+           f"?symbol={sym}&granularity={gran}&from={from_ms}&to={now_ms}")
+    try:
+        req = _ureq.Request(url, headers={"User-Agent": "AutoTradeHub/2.0"})
+        with _proxy_urlopen(req, timeout=20) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning("_fetch_futures_candles %s/%s fetch failed: %s", sym, tf, e)
+        return []
+    if str(payload.get("code")) != "200000":
+        return []
+    rows: list[dict] = []
+    tf_secs = gran * 60
+    now_sec = int(time.time())
+    for r in payload.get("data") or []:
+        if len(r) < 6:
+            continue
+        ts = int(r[0]) // 1000   # KuCoin returns ms; our convention is seconds
+        if ts >= now_sec - tf_secs:
+            continue              # drop the currently-forming partial bar
+        rows.append({
+            "ts":    ts,
+            "open":  float(r[1]),
+            "high":  float(r[2]),
+            "low":   float(r[3]),
+            "close": float(r[4]),
+            "vol":   float(r[5]),
+        })
+    rows.sort(key=lambda r: r["ts"])
+    return rows[-limit:]
+
+
+# ── Contract multiplier cache (per-symbol lot size lookup) ──────────────
+#
+# Bug-fix: the legacy live order placement used `contracts = stake × leverage
+# / entry × 1000` which assumes BTC's 0.001-BTC multiplier. For ETH (0.01),
+# SOL (0.1), DOGE (1000-token contracts) this is wildly wrong — would
+# trade either way too little or way too much. This cache hits
+# /api/v1/contracts/{symbol} once per symbol, then memoises.
+
+_CONTRACT_MULTIPLIERS: dict[str, float] = {}
+_CONTRACT_LOT_SIZES:   dict[str, float] = {}    # min order step (e.g. 1 contract)
+_CONTRACT_CACHE_LOCK = None
+def _get_contract_multiplier(symbol: str) -> tuple[float, float]:
+    """Return (multiplier, lot_size) for `symbol` (e.g. 'XBTUSDTM').
+
+      multiplier — base units per contract (BTC=0.001, ETH=0.01, etc.)
+      lot_size   — minimum contract increment (almost always 1)
+
+    Defaults to (0.001, 1) if the lookup fails — same as BTC. Conservative
+    fallback: BTC's tiny lot size means a misclassified pair will trade
+    1000× smaller, not larger.
+    """
+    global _CONTRACT_CACHE_LOCK
+    import threading as _t
+    if _CONTRACT_CACHE_LOCK is None:
+        _CONTRACT_CACHE_LOCK = _t.Lock()
+    with _CONTRACT_CACHE_LOCK:
+        cached = _CONTRACT_MULTIPLIERS.get(symbol)
+        if cached is not None:
+            return cached, _CONTRACT_LOT_SIZES.get(symbol, 1.0)
+    # Cold lookup. The contracts endpoint is unauthenticated and cheap.
+    try:
+        from ._kucoin_proxy import urlopen as _proxy_urlopen
+        import urllib.request as _ureq
+        url = f"{KUCOIN_FUTURES_BASE}/api/v1/contracts/{symbol}"
+        req = _ureq.Request(url, headers={"User-Agent": "AutoTradeHub/2.0"})
+        with _proxy_urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read().decode())
+        data = payload.get("data") or {}
+        mult = float(data.get("multiplier", 0.001) or 0.001)
+        lot  = float(data.get("lotSize",    1.0)   or 1.0)
+    except Exception as e:
+        log.warning("contracts/%s lookup failed (using BTC defaults): %s", symbol, e)
+        mult, lot = 0.001, 1.0
+    with _CONTRACT_CACHE_LOCK:
+        _CONTRACT_MULTIPLIERS[symbol] = mult
+        _CONTRACT_LOT_SIZES[symbol]   = lot
+    return mult, lot
+
+
+def _stake_to_contracts(stake_usdt: float, leverage: int, entry: float,
+                        symbol: str) -> int:
+    """Convert (USDT margin, leverage, entry price) → integer contract count
+    using the symbol's actual multiplier. Replaces the BTC-only `× 1000`
+    calculation in the live order helpers.
+
+      contracts = (stake × leverage) / (entry × multiplier)
+
+    Then snapped to the nearest lotSize integer, floor=1.
+    """
+    if entry <= 0:
+        return 1
+    multiplier, lot = _get_contract_multiplier(symbol)
+    base_qty = (stake_usdt * leverage) / entry          # how much BASE the position controls
+    raw      = base_qty / max(multiplier, 1e-9)          # how many contracts that is
+    snapped  = max(1, int(raw // max(lot, 1.0) * lot))
+    return snapped
+
 
 def _calc_liquidation_price(entry: float, direction: str, leverage: int) -> float:
     """Return the price at which this leveraged position gets liquidated."""
@@ -607,9 +735,19 @@ class FuturesEngine(NativeTradingEngine):
         log.info("[%s] Futures engine loop started — strategy=%s pairs=%s mode=%s tf=%s",
                  self.user_id, self._strategy, self._pairs, self._mode, self._timeframe)
 
+        last_reconcile_ts = 0.0
+        RECONCILE_INTERVAL = 60.0    # check for live-position drift every 60s
+
         while not self._stop_evt.is_set():
             try:
                 now_ts = _time.time()
+                # Live-position drift reconciliation — once per minute is
+                # plenty (KuCoin doesn't drift continuously, only on user
+                # action / liquidation we missed / rejected re-order).
+                if (self._mode == "live"
+                    and now_ts - last_reconcile_ts >= RECONCILE_INTERVAL):
+                    self._reconcile_live_positions()
+                    last_reconcile_ts = now_ts
                 self._tick_continuous(
                     None,                       # signal_fn ignored — engine builds its own per scan
                     seen_signal,
@@ -864,7 +1002,11 @@ class FuturesEngine(NativeTradingEngine):
                     continue   # wait for next 60 s window
 
             try:
-                candles = _fetch_candles(pair.replace("/", "-"), self._timeframe)
+                # Bug-fix: use the FUTURES candle endpoint, not the spot one
+                # imported from native_trading_engine. Strategies on the
+                # futures engine must trade off futures perp data; spot/perp
+                # basis can shift signal timing by several %.
+                candles = _fetch_futures_candles(pair, self._timeframe, limit=200)
             except Exception as e:
                 log.warning("[%s] candle fetch %s: %s", self.user_id, pair, e)
                 continue
@@ -1221,21 +1363,53 @@ class FuturesEngine(NativeTradingEngine):
                     diagnostics=getattr(user_signal_fn, "diagnostics", None))
                 log.info("[%s] %s", self.user_id, self.last_action)
                 if self._mode == "live":
-                    self._place_live_entry(pair, pos)
-                    # NICE-5: rewrite KuCoin's on-exchange TP/SL to match
-                    # the new position direction. Critical for stop-and-
-                    # reverse: when the old long flipped to a short, KuCoin
-                    # still has the OLD long's stops (SL below entry, TP
-                    # above) — which would be plain wrong for the new short.
-                    # Pushing fresh stops here also covers the "bot crashes
-                    # right after open" case.
+                    # Bug-fix: place the KuCoin order FIRST, then commit local
+                    # state. On any rejection (insufficient margin, lot-size
+                    # mismatch, leverage cap, transport error) we must
+                    # remove the position from self.positions, refund the
+                    # stake, and delete the open-trade DB row — otherwise
+                    # the engine manages a phantom position that doesn't
+                    # exist on KuCoin and ARM/TP/SL fire reduce-only orders
+                    # which all fail.
+                    ok, err = self._place_live_entry(pair, pos)
+                    if not ok:
+                        self.last_action = (
+                            f"LIVE ENTRY REJECTED {pair} {direction} @ {entry:.4f}: {err}"
+                        )
+                        self._log_action("live_entry_rejected", self.last_action,
+                            pair=pair, direction=direction, error=err,
+                            stake=stake, leverage=self._leverage)
+                        log.error("[%s] %s", self.user_id, self.last_action)
+                        # Roll back: remove from positions, refund balance,
+                        # delete the DB row (best-effort), reset signal flag
+                        # so the next bar can re-attempt cleanly.
+                        self.positions.pop(trade_key, None)
+                        self.balance += stake
+                        self._day_trades = max(0, self._day_trades - 1)
+                        seen_signal[pair] = None
+                        try:
+                            from backend.models import SessionLocal as _SL
+                            from backend.models.trade import Trade as _Trade
+                            from sqlalchemy import select as _select
+                            if getattr(pos, "db_id", None):
+                                with _SL() as _db:
+                                    row = _db.execute(
+                                        _select(_Trade).where(_Trade.id == pos.db_id)
+                                    ).scalar_one_or_none()
+                                    if row:
+                                        _db.delete(row)
+                                        _db.commit()
+                        except Exception:
+                            pass
+                        # No notification — the order didn't happen.
+                        # Continue to next pair instead of falling through.
+                        continue
+                    # NICE-5: rewrite on-exchange TP/SL for the new position.
                     try:
                         from .kucoin_futures_client import normalize_futures_symbol
                         sym = normalize_futures_symbol(
                             pair.replace("/", "").replace("USDT", "USDTM"),
                         )
-                        # Use TP2 when ARM is on (final target), else the
-                        # plan-level TP (single-TP case).
                         tp_to_push = pos.tp2_price if (pos.arm_active and pos.tp2_price) else pos.tp
                         self._push_live_tp_sl(sym, pos.sl, tp_to_push, label="open")
                     except Exception as _push_exc:
@@ -1256,37 +1430,154 @@ class FuturesEngine(NativeTradingEngine):
 
     # ── Live order placement via KuCoin Futures API ─────────────────────
 
-    def _place_live_entry(self, pair: str, pos) -> None:
-        """Place a real futures order via KuCoin Lead Trading API."""
+    # ── KuCoin Lead Trading helpers — all order placements now route
+    #     through _kucoin_lead_post() so response codes are checked
+    #     uniformly and the order id (when present) is captured.
+
+    def _kucoin_lead_post(self, body: dict, *, label: str) -> tuple[bool, dict, str]:
+        """Send a signed POST to /api/v1/copy-trade/futures/orders and
+        verify the response is a real success (HTTP 2xx **and** business
+        code 200000).
+
+        Returns (ok, data_dict, error_msg). On failure, error_msg carries
+        either KuCoin's `msg` field or a transport-level exception string.
+
+        Replaces the four ad-hoc try/except blocks in entry / exit /
+        partial-close / push_tp_sl that silently swallowed HTTP and
+        business-logic errors. Single source of truth so a phantom
+        position (local-yes / KuCoin-no) can't happen on any path.
+        """
         if self._mode != "live" or not self._api_key:
-            return
+            return False, {}, "not in live mode"
         try:
             from .native_trading_engine import _kucoin_post_signed
-            from .kucoin_futures_client import normalize_futures_symbol
-            symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
-            side   = "buy" if pos.direction == "long" else "sell"
-            position_side = "LONG" if pos.direction == "long" else "SHORT"
-            contract_size  = pos.size * self._leverage
-            contracts      = max(1, int(contract_size / pos.entry * 1000))
-            margin_mode = self.get_symbol_margin(symbol).upper() or "ISOLATED"
-            body = {
-                "clientOid":    f"atf-{int(time.time()*1000)}",
-                "side":          side,
-                "symbol":        symbol,
-                "type":          "market",
-                "size":          contracts,
-                "leverage":      self._leverage,
-                "marginMode":    margin_mode,
-                "positionSide":  position_side,
-            }
             resp = _kucoin_post_signed(
                 "/api/v1/copy-trade/futures/orders", body,
                 self._api_key, self._api_sec, self._api_pass,
                 base_url=KUCOIN_FUTURES_BASE,
             )
-            log.info("[%s] Lead Trading ENTRY order: %s", self.user_id, resp)
         except Exception as e:
-            log.error("[%s] Lead Trading entry order failed: %s", self.user_id, e)
+            log.error("[%s] Lead Trading %s transport error: %s",
+                      self.user_id, label, e)
+            return False, {}, f"transport: {e}"
+        code = str((resp or {}).get("code", ""))
+        if code != "200000":
+            err = (resp or {}).get("msg") or f"KuCoin code {code}"
+            log.error("[%s] Lead Trading %s REJECTED: %s (resp=%s)",
+                      self.user_id, label, err, resp)
+            return False, resp or {}, err
+        log.info("[%s] Lead Trading %s ok: %s", self.user_id, label, resp.get("data"))
+        return True, resp.get("data") or {}, ""
+
+    def _place_live_entry(self, pair: str, pos) -> tuple[bool, str]:
+        """Place a real futures market order for the entry. Returns
+        (ok, error_msg). On failure the caller MUST roll back local state
+        (remove pos from self.positions, refund stake to balance, delete
+        the DB row) so the engine doesn't manage a phantom position."""
+        if self._mode != "live" or not self._api_key:
+            return True, ""   # paper mode — pretend success
+        from .kucoin_futures_client import normalize_futures_symbol
+        symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+        side   = "buy" if pos.direction == "long" else "sell"
+        position_side = "LONG" if pos.direction == "long" else "SHORT"
+        # Bug-fix: per-symbol lot-size-aware contract count (was BTC-only ×1000).
+        contracts   = _stake_to_contracts(pos.size, self._leverage, pos.entry, symbol)
+        margin_mode = self.get_symbol_margin(symbol).upper() or "ISOLATED"
+        client_oid  = f"atf-{int(time.time()*1000)}"
+        body = {
+            "clientOid":    client_oid,
+            "side":          side,
+            "symbol":        symbol,
+            "type":          "market",
+            "size":          contracts,
+            "leverage":      self._leverage,
+            "marginMode":    margin_mode,
+            "positionSide":  position_side,
+        }
+        ok, data, err = self._kucoin_lead_post(body, label=f"ENTRY {pair} {side}")
+        if ok:
+            # Bug-fix: capture the exchange order id so cancel-all,
+            # reconciliation and the partial-close path can find the order.
+            order_id = data.get("orderId") or client_oid
+            try:
+                pos.exchange_order_id = str(order_id)
+                pos.client_oid        = client_oid
+            except Exception:
+                pass
+        return ok, err
+
+    def _reconcile_live_positions(self) -> None:
+        """Periodic check: drop local positions that no longer exist on
+        KuCoin (manually closed via the exchange UI, or auto-closed due
+        to liquidation we missed, or never opened because the entry order
+        was rejected after we already optimistically wrote local state).
+
+        Called from the run loop on the slow tick (~ once per minute).
+        Live mode only; paper mode keeps the engine as source of truth.
+
+        On a discovered mismatch:
+          • Local position not on KuCoin → mark closed_reason='reconciled_drift'
+            and remove from self.positions + close DB row.
+          • Don't touch KuCoin-side positions that exist locally; the
+            engine continues managing them normally.
+        """
+        if self._mode != "live" or not self._api_key or not self.positions:
+            return
+        try:
+            from .native_trading_engine import _kucoin_get_signed
+            from .kucoin_futures_client import normalize_futures_symbol
+            resp = _kucoin_get_signed(
+                "/api/v1/positions",
+                self._api_key, self._api_sec, self._api_pass,
+                base_url=KUCOIN_FUTURES_BASE,
+            )
+            if str(resp.get("code")) != "200000":
+                return
+            # Build a set of (symbol, direction) tuples that KuCoin says
+            # are open. Direction = sign of currentQty (positive = long).
+            exchange_open: set[tuple[str, str]] = set()
+            for p in resp.get("data") or []:
+                qty = float(p.get("currentQty", 0) or 0)
+                if qty == 0:
+                    continue
+                sym = p.get("symbol", "")
+                exchange_open.add((sym, "long" if qty > 0 else "short"))
+            # Walk local positions; drop any that KuCoin doesn't see.
+            drift: list[str] = []
+            with self._lock:
+                for trade_key, pos in list(self.positions.items()):
+                    sym = normalize_futures_symbol(
+                        pos.pair.replace("/", "").replace("USDT", "USDTM"),
+                    )
+                    if (sym, pos.direction) not in exchange_open:
+                        drift.append(trade_key)
+                for trade_key in drift:
+                    pos = self.positions.pop(trade_key, None)
+                    if pos is None:
+                        continue
+                    # Use last-known price as the close fill; net P&L is
+                    # whatever the bot saw before the drift. Persist so the
+                    # trade history shows the reconciliation.
+                    fill = self._last_prices.get(pos.pair, pos.entry)
+                    try:
+                        pos.close(fill, "reconciled_drift", datetime.now(timezone.utc))
+                        self.balance += pos.pnl_abs
+                        self.closed_trades.append(pos)
+                        _persist_closed_trade(
+                            self.user_id, pos, self._mode,
+                            self._strategy_id, pos.db_id,
+                        )
+                    except Exception:
+                        pass
+                    self.last_action = (
+                        f"RECONCILED-DRIFT {pos.pair} {pos.direction} — "
+                        f"no on-exchange position; cleared local state."
+                    )
+                    self._log_action("reconciled_drift", self.last_action,
+                        pair=pos.pair, direction=pos.direction)
+                    log.warning("[%s] %s", self.user_id, self.last_action)
+        except Exception as e:
+            log.debug("[%s] reconcile_live_positions: %s", self.user_id, e)
 
     def _live_spread_too_wide(self, pair: str, expected_reward_pct: float) -> tuple[bool, dict]:
         """Op#10 — Spread / slippage gate.
@@ -1336,74 +1627,51 @@ class FuturesEngine(NativeTradingEngine):
                       self.user_id, e)
             return False, {"reason": f"spread check error: {e}"}
 
-    def _place_live_partial_close(self, pair: str, pos, close_pct: float, fill_price: float) -> None:
-        """LIVE-mode: send a reduce-only market order to close `close_pct` of the
-        position via KuCoin Lead Trading. Mirrors the partial-close booked
-        in the local position state so the on-exchange position size matches.
-
-        Best-effort: failures are logged but don't roll back the local state.
-        The /position/tp-sl endpoint should also be re-written to TP2 by the
-        live exit path so the exchange-side SL/TP catches the remainder.
-        """
+    def _place_live_partial_close(self, pair: str, pos, close_pct: float, fill_price: float) -> tuple[bool, str]:
+        """LIVE-mode: send a reduce-only market order to close `close_pct`
+        of the position via KuCoin Lead Trading. Returns (ok, error_msg).
+        Mirrors the partial-close booked in the local position state."""
         if self._mode != "live" or not self._api_key or close_pct <= 0:
-            return
-        try:
-            from .native_trading_engine import _kucoin_post_signed
-            from .kucoin_futures_client import normalize_futures_symbol
-            symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
-            side   = "sell" if pos.direction == "long" else "buy"
-            position_side = "LONG" if pos.direction == "long" else "SHORT"
-            # Contracts in the partial leg = total contracts × close_pct, min 1.
-            full_contracts = max(1, int(pos.size * self._leverage / max(pos.entry, 1e-9) * 1000))
-            leg_contracts  = max(1, int(full_contracts * close_pct))
-            margin_mode    = self.get_symbol_margin(symbol).upper() or "ISOLATED"
-            body = {
-                "clientOid":    f"atf-tp1-{int(time.time()*1000)}",
-                "side":          side,
-                "symbol":        symbol,
-                "type":          "market",
-                "size":          leg_contracts,
-                "leverage":      self._leverage,
-                "marginMode":    margin_mode,
-                "positionSide":  position_side,
-                "reduceOnly":    True,
-            }
-            resp = _kucoin_post_signed(
-                "/api/v1/copy-trade/futures/orders", body,
-                self._api_key, self._api_sec, self._api_pass,
-                base_url=KUCOIN_FUTURES_BASE,
-            )
-            log.info("[%s] Lead Trading TP1 PARTIAL close (%.0f%%): %s",
-                     self.user_id, close_pct * 100, resp)
-        except Exception as e:
-            log.error("[%s] Lead Trading TP1 partial close failed: %s", self.user_id, e)
-            return
+            return True, ""
+        from .kucoin_futures_client import normalize_futures_symbol
+        symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+        side   = "sell" if pos.direction == "long" else "buy"
+        position_side = "LONG" if pos.direction == "long" else "SHORT"
+        # Bug-fix: per-symbol lot-size-aware contracts.
+        full_contracts = _stake_to_contracts(pos.size, self._leverage, pos.entry, symbol)
+        leg_contracts  = max(1, int(full_contracts * close_pct))
+        margin_mode    = self.get_symbol_margin(symbol).upper() or "ISOLATED"
+        body = {
+            "clientOid":    f"atf-tp1-{int(time.time()*1000)}",
+            "side":          side,
+            "symbol":        symbol,
+            "type":          "market",
+            "size":          leg_contracts,
+            "leverage":      self._leverage,
+            "marginMode":    margin_mode,
+            "positionSide":  position_side,
+            "reduceOnly":    True,
+        }
+        ok, _, err = self._kucoin_lead_post(
+            body, label=f"TP1 PARTIAL {pair} ({close_pct*100:.0f}%)",
+        )
+        if not ok:
+            return False, err
 
         # ── Op#9 — rewrite on-exchange TP/SL after the partial ────────────
-        # KuCoin keeps the original stops on the position until we update them.
-        # If the bot crashes between the partial close and the remainder's
-        # exit, the original SL/TP would still execute — which is fine
-        # SL-wise (limits the loss) but means TP would fire too small.
-        # Push the BE-buffered SL and TP2 to the exchange now so the remainder
-        # has correct stops even without the bot running.
         if isinstance(pos, FuturesPosition) and pos.tp2_price is not None:
             self._push_live_tp_sl(symbol, pos.sl, pos.tp2_price, label="rewrite-after-tp1")
+        return True, ""
 
-    def _push_live_tp_sl(self, symbol: str, sl: float, tp: float, *, label: str = "rewrite") -> None:
-        """NICE-5 helper — push fresh SL + TP to KuCoin Lead Trading so the
-        on-exchange stops match the local position state.
+    def _push_live_tp_sl(self, symbol: str, sl: float, tp: float, *, label: str = "rewrite") -> bool:
+        """NICE-5 helper — push fresh SL + TP to KuCoin Lead Trading.
 
-        Called from:
-          • _place_live_partial_close — after ARM TP1 partial close
-          • _tick_continuous stop-and-reverse — after the new opposite-
-            direction position opens (so the OLD direction's stops on
-            KuCoin are replaced with the NEW direction's).
-          • Manual TP/SL edit from PositionsPanel (existing endpoint).
-
-        Best-effort: failures are logged but never roll back local state.
-        """
+        Bug-fix: previously called _sign_request(body_str=…) but the
+        function's parameter is `body` — would have raised TypeError on
+        every call (which means NICE-5 was actually a no-op in production
+        until now).  Returns True on a real KuCoin-side success."""
         if self._mode != "live" or not self._api_key:
-            return
+            return False
         try:
             from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
             from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
@@ -1413,59 +1681,60 @@ class FuturesEngine(NativeTradingEngine):
                 "stopLossPrice":   str(round(sl, 4)),
                 "takeProfitPrice": str(round(tp, 4)),
             }
-            data = _json.dumps(body).encode()
+            body_str = _json.dumps(body)
             ts2  = str(int(time.time() * 1000))
             endpoint = "/api/v1/copy-trade/futures/position/risk-limit/sl-tp"
             headers = _sign_request(
                 self._api_sec, self._api_pass, self._api_key,
-                ts2, "POST", endpoint, body_str=data.decode(),
+                ts2, "POST", endpoint, body=body_str,    # ← was body_str=, TypeError
             )
             headers["Content-Type"] = "application/json"
-            req2 = _ureq.Request(f"{_base}{endpoint}", data=data, headers=headers, method="POST")
+            req2 = _ureq.Request(
+                f"{_base}{endpoint}", data=body_str.encode(),
+                headers=headers, method="POST",
+            )
             with _proxy_urlopen(req2, timeout=15) as r2:
                 resp = _json.loads(r2.read().decode())
-            log.info("[%s] Lead Trading TP/SL %s ok: code=%s",
-                     self.user_id, label, resp.get("code"))
+            code = str(resp.get("code", ""))
+            if code != "200000":
+                log.warning("[%s] TP/SL %s REJECTED: %s",
+                            self.user_id, label, resp.get("msg") or f"code {code}")
+                return False
+            log.info("[%s] Lead Trading TP/SL %s ok", self.user_id, label)
+            return True
         except Exception as e:
             log.warning("[%s] TP/SL %s failed: %s", self.user_id, label, e)
+            return False
 
-    def _place_live_exit(self, pair: str, pos, price: float) -> None:
-        """Close a futures position via KuCoin Lead Trading API."""
+    def _place_live_exit(self, pair: str, pos, price: float) -> tuple[bool, str]:
+        """Close a futures position via KuCoin Lead Trading API. Returns
+        (ok, error_msg). ARM-aware sizing: only the REMAINING fraction is
+        sent (closing the full original size after a TP1 partial would
+        oversell and KuCoin would reject with insufficient-position)."""
         if self._mode != "live" or not self._api_key:
-            return
-        try:
-            from .native_trading_engine import _kucoin_post_signed
-            from .kucoin_futures_client import normalize_futures_symbol
-            symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
-            side   = "sell" if pos.direction == "long" else "buy"
-            position_side = "LONG" if pos.direction == "long" else "SHORT"
-            # ARM-aware sizing: when the position had a TP1 partial close,
-            # only the REMAINING fraction is still open on KuCoin's side.
-            # Closing the full original size would oversell and likely fail.
-            remaining_pct = getattr(pos, "remaining_pct", 1.0) or 1.0
-            contract_size = pos.size * self._leverage
-            full_contracts = max(1, int(contract_size / max(pos.entry, 1e-9) * 1000))
-            contracts     = max(1, int(full_contracts * remaining_pct))
-            margin_mode = self.get_symbol_margin(symbol).upper() or "ISOLATED"
-            body = {
-                "clientOid":    f"atf-exit-{int(time.time()*1000)}",
-                "side":          side,
-                "symbol":        symbol,
-                "type":          "market",
-                "size":          contracts,
-                "leverage":      self._leverage,
-                "marginMode":    margin_mode,
-                "positionSide":  position_side,
-                "reduceOnly":    True,
-            }
-            resp = _kucoin_post_signed(
-                "/api/v1/copy-trade/futures/orders", body,
-                self._api_key, self._api_sec, self._api_pass,
-                base_url=KUCOIN_FUTURES_BASE,
-            )
-            log.info("[%s] Lead Trading EXIT order: %s", self.user_id, resp)
-        except Exception as e:
-            log.error("[%s] Lead Trading exit order failed: %s", self.user_id, e)
+            return True, ""
+        from .kucoin_futures_client import normalize_futures_symbol
+        symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+        side   = "sell" if pos.direction == "long" else "buy"
+        position_side = "LONG" if pos.direction == "long" else "SHORT"
+        remaining_pct = getattr(pos, "remaining_pct", 1.0) or 1.0
+        # Bug-fix: per-symbol multiplier (was BTC-only ×1000).
+        full_contracts = _stake_to_contracts(pos.size, self._leverage, pos.entry, symbol)
+        contracts      = max(1, int(full_contracts * remaining_pct))
+        margin_mode    = self.get_symbol_margin(symbol).upper() or "ISOLATED"
+        body = {
+            "clientOid":    f"atf-exit-{int(time.time()*1000)}",
+            "side":          side,
+            "symbol":        symbol,
+            "type":          "market",
+            "size":          contracts,
+            "leverage":      self._leverage,
+            "marginMode":    margin_mode,
+            "positionSide":  position_side,
+            "reduceOnly":    True,
+        }
+        ok, _, err = self._kucoin_lead_post(body, label=f"EXIT {pair} {side}")
+        return ok, err
 
     # ── Manual order management ──────────────────────────────────────────
 
