@@ -1506,6 +1506,24 @@ class FuturesEngine(NativeTradingEngine):
                 pass
         return ok, err
 
+    def maybe_reconcile_live_positions(self, *, throttle_secs: int = 30) -> bool:
+        """Throttled wrapper around _reconcile_live_positions, safe to call
+        from HTTP endpoints that don't have a run loop (e.g. the user-
+        shared manual-trade engine where _run_loop isn't running).
+
+        Returns True if a reconcile actually ran. Throttle protects against
+        the /open endpoint's 8-second poll from hammering KuCoin's
+        /positions endpoint."""
+        if self._mode != "live" or not self._api_key:
+            return False
+        now = time.time()
+        last = getattr(self, "_last_manual_reconcile_ts", 0.0)
+        if now - last < throttle_secs:
+            return False
+        self._last_manual_reconcile_ts = now
+        self._reconcile_live_positions()
+        return True
+
     def _reconcile_live_positions(self) -> None:
         """Periodic check: drop local positions that no longer exist on
         KuCoin (manually closed via the exchange UI, or auto-closed due

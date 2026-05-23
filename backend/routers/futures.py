@@ -33,6 +33,41 @@ _cache: dict[str, tuple[float, any]] = {}
 CACHE_TTL = 1.5  # seconds
 
 
+def _futures_ticker_price(pair: str) -> float | None:
+    """Bug-fix helper: get the FUTURES perp last price for a pair.
+
+    Before this, six different endpoints in this router were calling
+    `_kucoin_get('/api/v1/market/orderbook/level1', ...)` which hits the
+    SPOT API (api.kucoin.com). Spot/perp basis drift means the P&L on
+    Positions, the force-close exit price, and the manual-order panel
+    indicators were all using slightly wrong reference prices. This
+    helper hits api-futures.kucoin.com so every futures-router endpoint
+    references the correct market.
+
+    Returns None on transport / parsing failure so the caller can fall
+    back to an entry-price-based P&L estimate."""
+    try:
+        from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+        from backend.services.kucoin_futures_client import (
+            normalize_futures_symbol, KUCOIN_FUTURES_BASE as _base,
+        )
+        import urllib.request as _ureq, json as _json
+        sym = normalize_futures_symbol(
+            pair.replace("/", "").replace("USDT", "USDTM"),
+        )
+        url = f"{_base}/api/v1/ticker?symbol={sym}"
+        req = _ureq.Request(url, headers={"User-Agent": "AutoTradeHub/2.0"})
+        with _proxy_urlopen(req, timeout=5) as resp:
+            data = _json.loads(resp.read().decode())
+        if str(data.get("code")) != "200000":
+            return None
+        d = data.get("data") or {}
+        p = float(d.get("price", 0) or 0)
+        return p if p > 0 else None
+    except Exception:
+        return None
+
+
 # ── KuCoin Futures lot-size table ────────────────────────────────────────────
 # KuCoin contracts have a fixed multiplier — the amount of underlying per
 # contract. Smallest order is 1 contract, so 1 contract's *notional* sets the
@@ -826,18 +861,44 @@ def futures_open_positions(
 ):
     from backend.services.native_trading_engine import _kucoin_get
 
-    eng = futures_engine_registry.for_user(user_id)
+    user_eng = futures_engine_registry.for_user(user_id)
+    # Collect every futures engine owned by this user — the manual-trading
+    # `for_user` engine PLUS one per running bot. Without this, bot
+    # positions only show up via the DB fallback and miss the rich live
+    # ARM state (tp1_price, tp1_hit, partial_exits, trailed_to_tp1, etc.).
+    bot_engines = [e for _, e in futures_engine_registry.user_bot_engines(user_id)]
+    all_engines = [user_eng] + bot_engines
+
+    # Throttled live-position reconciliation: catches manual closes done
+    # via the KuCoin UI, missed liquidations, and post-fill risk-engine
+    # rollbacks. Bot engines run this inside _run_loop already; the
+    # user-shared manual-trade engine doesn't have a loop, so we trigger
+    # it here on every UI poll (capped to once per 30s per engine).
+    for _eng in all_engines:
+        try:
+            _eng.maybe_reconcile_live_positions(throttle_secs=30)
+        except Exception:
+            pass
+
     # Build positions list filtered by mode.
     # Each position may have a _mode tag (manual trades), otherwise use engine mode.
     native_positions = []
-    with eng._lock:
-        for p in eng.positions.values():
-            pos_mode = getattr(p, "_mode", eng._mode or "paper")
-            if mode is not None and pos_mode != mode:
-                continue
-            liq = getattr(p, "liquidation_price", None)
-            lev = getattr(p, "leverage", 1)
-            native_positions.append({
+    seen_keys: set[tuple[str, str, str]] = set()    # de-dupe across engines
+    for eng in all_engines:
+        with eng._lock:
+            for p in eng.positions.values():
+                pos_mode = getattr(p, "_mode", eng._mode or "paper")
+                if mode is not None and pos_mode != mode:
+                    continue
+                # De-dupe by (pair, direction, mode) — two engines could
+                # theoretically claim the same position via reconciliation race.
+                k = (p.pair, p.direction, pos_mode)
+                if k in seen_keys:
+                    continue
+                seen_keys.add(k)
+                liq = getattr(p, "liquidation_price", None)
+                lev = getattr(p, "leverage", 1)
+                native_positions.append({
                 "pair":              p.pair,
                 "direction":         p.direction,
                 "entry":             round(p.entry, 6),
@@ -862,16 +923,12 @@ def futures_open_positions(
                 "trailed_to_tp1":    bool(getattr(p, "trailed_to_tp1", False)),
             })
 
-    # Fetch live prices
+    # Fetch live FUTURES prices (was using spot orderbook — basis bug).
     live_prices: dict[str, float] = {}
     for p in native_positions:
-        try:
-            sym  = p["pair"].replace("/", "-")
-            data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
-            if str(data.get("code")) == "200000":
-                live_prices[p["pair"]] = float(data["data"]["price"])
-        except Exception:
-            pass
+        price = _futures_ticker_price(p["pair"])
+        if price is not None:
+            live_prices[p["pair"]] = price
 
     native_trades = []
     for p in native_positions:
@@ -920,13 +977,9 @@ def futures_open_positions(
     db_only_pairs   = {t.pair for t in db_rows if t.pair not in pairs_in_native}
     for pair_name in db_only_pairs:
         if pair_name not in live_prices:
-            try:
-                sym  = pair_name.replace("/", "-")
-                data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
-                if str(data.get("code")) == "200000":
-                    live_prices[pair_name] = float(data["data"]["price"])
-            except Exception:
-                pass
+            price = _futures_ticker_price(pair_name)
+            if price is not None:
+                live_prices[pair_name] = price
 
     db_trades = []
     for t in db_rows:
@@ -1094,15 +1147,10 @@ def futures_manual_entry(
     _raw_tp = getattr(eng, "_take_profit", None) or getattr(eng, "_take_profit_pct", None)
     tp_pct   = float(_raw_tp) * 100 if (_raw_tp and float(_raw_tp) <= 1) else (float(_raw_tp) if _raw_tp else 3.0)
 
-    # Fetch current price
-    try:
-        sym  = pair.replace("/", "-")
-        data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
-        if str(data.get("code")) != "200000":
-            return {"error": f"Could not fetch price for {pair}"}
-        entry_price = float(data["data"]["price"])
-    except Exception as e:
-        return {"error": f"Price fetch failed: {e}"}
+    # Fetch current FUTURES price (was hitting spot — basis bug).
+    entry_price = _futures_ticker_price(pair)
+    if entry_price is None:
+        return {"error": f"Could not fetch futures price for {pair}"}
 
     # User's *intended* margin in USDT.
     # Priority 1: explicit cost_usdt from the frontend (live market orders).
@@ -1290,12 +1338,8 @@ async def futures_force_close(
     eng = futures_engine_registry.for_user(user_id)
 
     # Fetch live exit price
-    try:
-        sym  = pair.replace("/", "-")
-        data = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym})
-        exit_price = float(data["data"]["price"]) if str(data.get("code")) == "200000" else None
-    except Exception:
-        exit_price = None
+    # Fetch FUTURES exit price (was hitting spot — basis bug).
+    exit_price = _futures_ticker_price(pair)
 
     now = datetime.now(_tz.utc)
     closed_positions = []
@@ -1565,13 +1609,10 @@ async def futures_orderbook(
         result = {"symbol": symbol, "asks": data.get("asks", []), "bids": data.get("bids", []), "ts": data.get("ts")}
     except Exception:
         from backend.services.kucoin_futures_client import generate_paper_orderbook
-        from backend.services.native_trading_engine import _kucoin_get
         pair = symbol.replace("USDTM", "/USDT").replace("-", "/")
-        try:
-            d = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": pair.replace("/", "-")})
-            price = float(d["data"]["price"]) if str(d.get("code")) == "200000" else 50000
-        except Exception:
-            price = 50000
+        # Use futures perp price for paper orderbook generation so paper
+        # and live use the same reference market.
+        price = _futures_ticker_price(pair) or 50000
         ob = generate_paper_orderbook(price)
         result = {"symbol": symbol, "asks": ob["asks"], "bids": ob["bids"], "ts": ob["ts"]}
 
@@ -1702,14 +1743,13 @@ def place_futures_order(
     if cost_usdt > 0:
         ref_price = price or stop_price
         if ref_price is None:
-            try:
-                from backend.services.native_trading_engine import _kucoin_get
-                sym_p = symbol.replace("USDTM", "-USDT").replace("XBTUSDTM", "BTC-USDT")
-                _pdata = _kucoin_get("/api/v1/market/orderbook/level1", {"symbol": sym_p})
-                if str(_pdata.get("code")) == "200000":
-                    ref_price = float(_pdata["data"]["price"])
-            except Exception:
-                pass
+            # Use FUTURES price (was hitting spot — basis bug).
+            pair_for_lookup = (
+                symbol.replace("USDTM", "/USDT")
+                      .replace("XBTUSDTM", "BTC/USDT")
+                      .replace("-USDT", "/USDT")
+            )
+            ref_price = _futures_ticker_price(pair_for_lookup)
 
         if mode == "live":
             contracts, real_margin, real_notional, sz_err = _compute_live_sizing(
