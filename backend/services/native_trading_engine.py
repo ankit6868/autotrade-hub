@@ -329,6 +329,8 @@ def build_strategy_signal_fn(
     leverage:      int,
     stoploss_pct:  float,              # positive % e.g. 3.0 for 3%
     take_profit_pct: float,
+    pair:          str = "BTC/USDT",   # MTF analyzer: which pair to fetch HTF data for
+    execution_tf:  str = "15m",        # MTF analyzer: engine TF (drops bias TFs <= this)
 ):
     """Compile the user's strategy code into a per-bar signal_fn(df, i).
 
@@ -382,7 +384,10 @@ def build_strategy_signal_fn(
         )
 
     try:
-        df_with_signals = evaluate_strategy(strat.generated_code, df)
+        df_with_signals = evaluate_strategy(
+            strat.generated_code, df,
+            pair=pair, execution_tf=execution_tf,
+        )
     except Exception as e:
         # Re-raise as StrategyCompileError so the caller can show a clean
         # message and refuse to open trades.

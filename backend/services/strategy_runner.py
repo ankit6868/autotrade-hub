@@ -309,12 +309,30 @@ def _safe_builtins(freqtrade_mod) -> dict[str, Any]:
     return allowed
 
 
-def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
+def evaluate_strategy(
+    generated_code: str,
+    df: pd.DataFrame,
+    *,
+    pair: str = "BTC/USDT",
+    execution_tf: str = "15m",
+    historical_anchor_ts: int | None = None,
+) -> pd.DataFrame:
     """Run the user's IStrategy code against `df` and return a copy with
     signal columns added: enter_long, enter_short, exit_long, exit_short.
 
     Raises RuntimeError with a clear message on any failure so the caller
     can surface it to the user.
+
+    Multi-TF context (PDF §5)
+    -------------------------
+    When the user's strategy class declares `bias_timeframes = ["1h", "4h"]`,
+    the analyzer pre-fetches closed-only HTF candles BEFORE populate_indicators
+    runs and exposes them via `metadata['htf']`. Strategies that don't
+    declare it see no change (metadata['htf'] is just empty).
+
+    For backtests pass `historical_anchor_ts` (epoch seconds of the
+    current bar) so HTF candles are clipped to the past — prevents
+    future-data peek when running the same strategy through backtest.
     """
     if not generated_code or not generated_code.strip():
         raise RuntimeError("strategy has no generated_code to execute")
@@ -380,7 +398,27 @@ def evaluate_strategy(generated_code: str, df: pd.DataFrame) -> pd.DataFrame:
     # name-matched built-in → user's edits silently ignored.
     if "vol" in work.columns and "volume" not in work.columns:
         work["volume"] = work["vol"]
-    metadata = {"pair": "BTC/USDT"}
+    metadata = {"pair": pair, "execution_tf": execution_tf}
+
+    # ── Multi-TF Analyzer (PDF §5) ────────────────────────────────────
+    # Opt-in: strategies that declare `bias_timeframes = ["1h","4h"]`
+    # get closed HTF candles in metadata['htf']. Strategies without it
+    # see metadata['htf'] = {} — fully backward compatible.
+    try:
+        from backend.services import mtf_analyzer
+        htf_map = mtf_analyzer.attach_htf_context(
+            strategy_instance     = instance,
+            pair                  = pair,
+            execution_tf          = execution_tf,
+            metadata              = metadata,
+            df                    = work,
+            historical_anchor_ts  = historical_anchor_ts,
+        )
+        if htf_map:
+            work.attrs["bias_timeframes"] = list(htf_map.keys())
+    except Exception as _mtf_exc:
+        # Never block strategy execution on MTF fetch issues.
+        log.debug("mtf_analyzer attach failed (continuing without HTF context): %s", _mtf_exc)
 
     # Diagnostic: log the user-defined methods on their strategy so we can
     # see in Railway logs what entry/exit hooks they actually have. This

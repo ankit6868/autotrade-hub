@@ -294,6 +294,9 @@ export const api = {
     // complete IStrategy class with populate_* methods.
     regenerate: (id: number) =>
       request<any>(`/api/strategy/${id}/regenerate`, { method: 'POST', body: JSON.stringify({}) }),
+    // PDF §4.1 — guided wizard upload (no LLM)
+    uploadGuided: (form: Record<string, unknown>) =>
+      request<any>('/api/strategy/upload-guided', { method: 'POST', body: JSON.stringify(form) }),
   },
 
   // Futures-only market data — `candles` and `signals` were removed

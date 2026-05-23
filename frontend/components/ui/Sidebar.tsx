@@ -12,9 +12,10 @@ import { SidebarSignOut } from '@/components/AuthShell';
 const nav = [
   { href: '/setup',              label: 'Setup',              icon: '⚙️',  section: null },
   // ── Strategy ──────────────────────────────────────────────────────
-  { href: '/strategy/upload',    label: 'Upload Strategy',    icon: '📄',  section: 'STRATEGY' },
-  { href: '/strategy/editor',    label: 'Strategy Editor',    icon: '✏️',  section: null },
-  { href: '/strategy/templates', label: 'Templates',          icon: '📋',  section: null },
+  { href: '/strategy/upload',         label: 'Upload Strategy',  icon: '📄',  section: 'STRATEGY' },
+  { href: '/strategy/upload-guided',  label: 'Guided Builder',   icon: '🧭',  section: null },
+  { href: '/strategy/editor',         label: 'Strategy Editor',  icon: '✏️',  section: null },
+  { href: '/strategy/templates',      label: 'Templates',        icon: '📋',  section: null },
   // ── Futures Trading ───────────────────────────────────────────────
   // Futures Paper / Futures Live were collapsed into Futures Terminal
   // (which has the Paper/Live toggle in its top-right corner).

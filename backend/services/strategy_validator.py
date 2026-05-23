@@ -547,7 +547,10 @@ def validate_for_live(
             "close": [100.5 + i * 0.01 for i in range(400)],
             "vol":   [1000.0] * 400,
         })
-        compiled_df = evaluate_strategy(generated_code, dummy)
+        compiled_df = evaluate_strategy(
+            generated_code, dummy,
+            pair="BTC/USDT", execution_tf=execution_timeframe,
+        )
     except Exception as e:
         tpl = StrategyTemplate(strategy_name=strategy_name, strategy_id=strategy_id,
                                execution_timeframe=execution_timeframe,

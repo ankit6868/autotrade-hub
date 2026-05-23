@@ -444,7 +444,10 @@ def preview_strategy_template(
             "close": [100.5 + i * 0.01 for i in range(400)],
             "vol":   [1000.0] * 400,
         })
-        compiled_df = evaluate_strategy(code, dummy)
+        compiled_df = evaluate_strategy(
+            code, dummy,
+            pair="BTC/USDT", execution_tf=timeframe,
+        )
     except Exception as e:
         # Compile failed — return a blocked template with the error.
         from backend.services.strategy_template import StrategyTemplate
@@ -479,6 +482,109 @@ def preview_strategy_template(
         pass
 
     return template.to_dict()
+
+
+@router.post("/upload-guided")
+def upload_strategy_guided(
+    req: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """PDF §4.1 — Guided Strategy Upload.
+
+    Accepts a structured form payload, synthesizes a complete IStrategy
+    class via guided_strategy_builder.build_strategy_code, auto-validates,
+    and saves. Returns the same payload shape as POST /upload so the UI
+    can re-use the existing success modal.
+
+    Body schema (all fields optional except `name`):
+      {
+        "name": "My RSI Strategy",
+        "timeframe": "15m",
+        "direction": "both",                 # long | short | both
+        "entry_indicator": "rsi_threshold",  # rsi_threshold | macd_cross | ema_cross | bollinger_touch
+        "entry_period": 14,
+        "entry_value": 30,
+        "stoploss_type": "fixed_pct",        # fixed_pct | atr_multiplier
+        "stoploss_pct": 2.0,
+        "take_profit_type": "risk_reward",   # risk_reward | fixed_pct
+        "risk_reward": 2.0,
+        "take_profit_pct": 4.0,
+        "risk_per_trade_pct": 0.5,
+        "bias_filter": "htf_ema200_up",      # none | htf_ema200_up
+        "bias_timeframes": ["1h", "4h"],     # MTF analyzer opt-in
+        "session_filter": "ny",              # 24h | ny | london
+        "arm_enabled": true,
+        "arm_tp1_close_pct": 50
+      }
+    """
+    from backend.services.guided_strategy_builder import GuidedForm, build_strategy_code
+    from backend.services.strategy_validator import validate_for_live
+
+    try:
+        form = GuidedForm.from_dict(req or {})
+        code = build_strategy_code(form)
+    except Exception as e:
+        return {"error": f"Could not build strategy from form: {e}"}
+
+    # Derive description from the form so it shows in the strategy list.
+    description = (
+        f"Guided wizard build · {form.entry_indicator} @ {form.timeframe} · "
+        f"{form.direction} · SL {form.stoploss_pct}% · "
+        f"{'RR ' + str(form.risk_reward) if form.take_profit_type == 'risk_reward' else 'TP ' + str(form.take_profit_pct) + '%'}"
+        f"{' · HTF bias filter' if form.bias_filter != 'none' else ''}"
+        f"{' · ARM' if form.arm_enabled else ''}"
+    )
+
+    strategy = Strategy(
+        user_id=user_id,
+        name=form.name,
+        description=description,
+        original_text=f"Built via guided wizard:\n{req}",
+        generated_code=code,
+        model_used="guided_wizard_v1",
+        stoploss=-abs(form.stoploss_pct) / 100.0,
+        take_profit=(form.stoploss_pct * form.risk_reward / 100.0
+                     if form.take_profit_type == "risk_reward"
+                     else form.take_profit_pct / 100.0),
+        default_leverage=10,
+        timeframe=form.timeframe,
+    )
+    db.add(strategy)
+    db.commit()
+    db.refresh(strategy)
+
+    # Persist file mirror (consistent with POST /upload).
+    user_dir = USER_STRATEGIES_DIR / user_id
+    user_dir.mkdir(parents=True, exist_ok=True)
+    with open(user_dir / f"strategy_{strategy.id}.py", "w") as f:
+        f.write(code)
+
+    # Auto-validate so confidence_score + live_permission are populated.
+    try:
+        ok, template, _ = validate_for_live(
+            strategy_name       = strategy.name,
+            strategy_id         = strategy.id,
+            generated_code      = code,
+            execution_timeframe = form.timeframe,
+        )
+        strategy.compiled_template = template.to_dict()
+        strategy.confidence_score  = template.confidence_score
+        strategy.live_permission   = template.live_permission
+        db.commit()
+    except Exception:
+        pass
+
+    return {
+        "id":               strategy.id,
+        "code":             code,
+        "description":      description,
+        "model_used":       "guided_wizard_v1",
+        "confidence_score": getattr(strategy, "confidence_score", 0),
+        "live_permission":  getattr(strategy, "live_permission", "blocked"),
+        "form":             req,   # echo back so the wizard can edit
+    }
 
 
 @router.post("/parse")

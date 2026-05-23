@@ -555,7 +555,14 @@ def run_futures_backtest(
                 from backend.services.strategy_runner import (
                     evaluate_strategy, make_signal_fn_from_df,
                 )
-                df = evaluate_strategy(generated_code, df)
+                # MTF analyzer: pass the current pair + tf so HTF context
+                # is available to populate_indicators. historical_anchor_ts
+                # caps HTF candles to the strategy's "now" so we don't
+                # leak future data into the backtest.
+                df = evaluate_strategy(
+                    generated_code, df,
+                    pair=pair, execution_tf=timeframe,
+                )
                 # If the user's strategy class declares its OWN stoploss /
                 # minimal_roi, prefer those over slider values BY DEFAULT —
                 # the class is the source of truth for the strategy's risk
