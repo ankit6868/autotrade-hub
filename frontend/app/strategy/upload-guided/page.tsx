@@ -40,6 +40,12 @@ export default function UploadGuidedPage() {
   const [biasFilter,       setBiasFilter]       = useState<'none'|'htf_ema200_up'>('none');
   const [biasTimeframes,   setBiasTimeframes]   = useState<string[]>([]);
   const [sessionFilter,    setSessionFilter]    = useState<'24h'|'ny'|'london'>('24h');
+  // PDF §4 — volatility regime + explicit exit signal
+  const [volatilityFilter, setVolatilityFilter] = useState<'none'|'middle_band'>('none');
+  const [volatilityLowPct, setVolatilityLowPct] = useState(25);
+  const [volatilityHighPct,setVolatilityHighPct]= useState(75);
+  const [exitSignal,       setExitSignal]       = useState<'none'|'rsi_neutral'|'ema_cross_exit'>('none');
+  const [exitPeriod,       setExitPeriod]       = useState(14);
   const [armEnabled,       setArmEnabled]       = useState(false);
   const [armTp1ClosePct,   setArmTp1ClosePct]   = useState(50);
   const [submitting, setSubmitting] = useState(false);
@@ -66,6 +72,11 @@ export default function UploadGuidedPage() {
         bias_filter:     biasFilter,
         bias_timeframes: biasTimeframes,
         session_filter:  sessionFilter,
+        volatility_filter:   volatilityFilter,
+        volatility_low_pct:  volatilityLowPct,
+        volatility_high_pct: volatilityHighPct,
+        exit_signal:     exitSignal,
+        exit_period:     exitPeriod,
         arm_enabled:     armEnabled,
         arm_tp1_close_pct: armTp1ClosePct,
       });
@@ -204,6 +215,39 @@ export default function UploadGuidedPage() {
                 </button>
               ))}
             </div>
+          </div>
+
+          {/* PDF §4 — Volatility regime filter */}
+          <div>
+            <label className="label">Volatility regime filter</label>
+            <select className="input" value={volatilityFilter} onChange={e => setVolatilityFilter(e.target.value as any)}>
+              <option value="none">None — trade in any volatility</option>
+              <option value="middle_band">Middle band — trade only when ATR is in {volatilityLowPct}-{volatilityHighPct} percentile (skip dead-chop + crash-vol)</option>
+            </select>
+            {volatilityFilter === 'middle_band' && (
+              <div className="flex items-center gap-2 mt-1.5">
+                <label className="text-[10px] text-slate-500">Low % (skip chop):</label>
+                <input type="number" min={0} max={50} className="input w-16 !py-0.5" value={volatilityLowPct} onChange={e => setVolatilityLowPct(parseInt(e.target.value || '25'))} />
+                <label className="text-[10px] text-slate-500 ml-2">High % (skip crash):</label>
+                <input type="number" min={50} max={100} className="input w-16 !py-0.5" value={volatilityHighPct} onChange={e => setVolatilityHighPct(parseInt(e.target.value || '75'))} />
+              </div>
+            )}
+          </div>
+
+          {/* PDF §4 — Explicit exit signal */}
+          <div>
+            <label className="label">Explicit exit signal (in addition to SL/TP)</label>
+            <select className="input" value={exitSignal} onChange={e => setExitSignal(e.target.value as any)}>
+              <option value="none">None — rely on SL/TP only</option>
+              <option value="rsi_neutral">RSI crosses 50 (close longs at &gt;50, shorts at &lt;50)</option>
+              <option value="ema_cross_exit">EMA cross reverses (close on opposite-direction cross)</option>
+            </select>
+            {exitSignal !== 'none' && (
+              <div className="flex items-center gap-2 mt-1.5">
+                <label className="text-[10px] text-slate-500">Period:</label>
+                <input type="number" min={2} max={200} className="input w-20 !py-0.5" value={exitPeriod} onChange={e => setExitPeriod(parseInt(e.target.value || '14'))} />
+              </div>
+            )}
           </div>
         </div>
 

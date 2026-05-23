@@ -139,10 +139,10 @@ def attach_htf_context(
         # No opt-in — leave metadata['htf'] empty so strategies can still
         # safely call metadata.get('htf', {}).get('1h').
         metadata.setdefault("htf", {})
-        try:
-            df.attrs["htf"] = {}
-        except Exception:
-            pass
+        # NOTE: we deliberately do NOT write htf into df.attrs — pandas
+        # concat operations merge attrs via dict equality, and dicts
+        # containing DataFrames raise "truth value ambiguous" inside
+        # pd.concat. Strategies read from metadata['htf'] instead.
         return {}
 
     from backend.services import mtf_candles
@@ -167,8 +167,5 @@ def attach_htf_context(
             htf_map[tf] = None
 
     metadata["htf"] = htf_map
-    try:
-        df.attrs["htf"] = htf_map
-    except Exception:
-        pass
+    # NOTE: not written to df.attrs — see above comment.
     return htf_map

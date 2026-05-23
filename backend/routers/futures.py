@@ -12,7 +12,7 @@ import time as _time
 from datetime import datetime
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
-from sqlalchemy import select, desc
+from sqlalchemy import select, desc, func
 
 from backend.models import get_db
 from backend.models.trade import Trade, StrategyInstance, FuturesOrder
@@ -699,12 +699,13 @@ def start_futures(
     strategy_id   = req.get("strategy_id")
     mode          = req.get("mode", "paper")
     pairs         = req.get("pairs", ["BTC/USDT"])
-    leverage      = min(LEAD_MAX_LEVERAGE, int(req.get("leverage", 10)))
+    # PDF §7 hard safety caps (matches POST /bots).
+    leverage      = max(1, min(LEAD_MAX_LEVERAGE, int(req.get("leverage", 10))))
     timeframe     = req.get("timeframe", "15m")
-    stoploss      = float(req.get("stoploss", -0.03))
-    wallet        = float(req.get("wallet", 1000.0))
-    take_profit   = float(req.get("take_profit_pct", 1.5))
-    max_pos_pct   = float(req.get("max_position_pct", 5.0))
+    stoploss      = max(-0.50, min(-0.001, float(req.get("stoploss", -0.03))))
+    wallet        = max(10.0,  min(1_000_000.0, float(req.get("wallet", 1000.0))))
+    take_profit   = max(0.1,   min(200.0, float(req.get("take_profit_pct", 1.5))))   # %, not decimal
+    max_pos_pct   = max(0.5,   min(25.0,  float(req.get("max_position_pct", 5.0))))
 
     # Resolve strategy name
     strategy_name = req.get("strategy_name", "SimpleTargetStrategy")
@@ -3514,22 +3515,25 @@ def create_futures_bot(
     strategy_name = req.get("strategy_name", "SimpleTargetStrategy")
     mode          = req.get("mode", "paper")
     pairs         = req.get("pairs", ["BTC/USDT"])
-    leverage      = min(LEAD_MAX_LEVERAGE, int(req.get("leverage", 10)))
+    # ── PDF §7 hard safety caps (per "sane defaults" table) ───────────
+    # Even if the UI's number inputs let the user type 99, the engine
+    # clamps to safe bounds here so a typo / bug can't size a 100%-risk
+    # bet at 50x leverage. These caps are stricter than KuCoin's own
+    # platform limits — they protect the trader from themselves.
+    leverage      = max(1, min(LEAD_MAX_LEVERAGE, int(req.get("leverage", 10))))
     timeframe     = req.get("timeframe", "15m")
-    wallet        = float(req.get("wallet", 1000))
-    stoploss      = float(req.get("stoploss", -0.03))
-    takeprofit    = float(req.get("takeprofit", 0.015))
-    drawdown_tolerance = float(req.get("drawdown_tolerance", 50))
-    max_position_pct   = float(req.get("max_position_pct", 5.0))
+    wallet        = max(10.0, min(1_000_000.0, float(req.get("wallet", 1000))))   # $10 floor / $1M ceiling
+    stoploss      = max(-0.50, min(-0.001, float(req.get("stoploss", -0.03))))    # SL between -0.1% and -50%
+    takeprofit    = max(0.001, min(2.0,    float(req.get("takeprofit", 0.015))))  # TP between 0.1% and 200%
+    drawdown_tolerance = max(0.0, min(100.0, float(req.get("drawdown_tolerance", 50))))
+    max_position_pct   = max(0.5, min(25.0,  float(req.get("max_position_pct", 5.0))))  # 0.5%-25% per trade
 
-    # Advanced Risk Management — accepted from the UI but NOT yet enforced
-    # in the live engine (the futures backtester already supports it). The
-    # values are logged so they show up in audit/event logs, and will be
-    # consumed by FuturesPosition's exit logic in Phase 3.
     arm_enabled       = bool(req.get("arm_enabled", False))
-    arm_tp1_close_pct = float(req.get("arm_tp1_close_pct", 50))
+    arm_tp1_close_pct = max(1.0, min(99.0,   float(req.get("arm_tp1_close_pct", 50))))
     arm_be_mode       = str(req.get("arm_be_mode", "leverage"))
-    arm_be_buffer_pct = float(req.get("arm_be_buffer_pct", 1.0))
+    if arm_be_mode not in ("leverage", "manual_pct", "entry"):
+        arm_be_mode   = "leverage"
+    arm_be_buffer_pct = max(0.0, min(10.0,   float(req.get("arm_be_buffer_pct", 1.0))))
     arm_trail_to_tp1  = bool(req.get("arm_trail_to_tp1", True))
 
     # Phase 8 — Cooldown / max-trades-per-day / daily DD trip.
@@ -3604,13 +3608,39 @@ def create_futures_bot(
                 (datetime.utcnow() - recent_bt.created_at).days <= 30
             )
 
-            if not live_ok or not has_recent_backtest:
+            # PDF §9 row 6 — "demo trading log on record". Count CLOSED paper
+            # trades for this (strategy, pair) and require ≥ MIN. Default 5
+            # is conservative; the user can lower via the request body to
+            # 0 (opt-out) only when their bot create payload explicitly
+            # passes `skip_paper_dwell: true` AND a successful backtest exists.
+            MIN_PAPER_TRADES = 5
+            paper_closed_count = db.execute(
+                select(func.count(Trade.id)).where(
+                    Trade.user_id == user_id,
+                    Trade.strategy_id == strategy_id,
+                    Trade.market_type == "futures",
+                    Trade.mode == "paper",
+                    Trade.pair == primary_pair,
+                    Trade.status == "closed",
+                )
+            ).scalar() or 0
+            has_paper_dwell = paper_closed_count >= MIN_PAPER_TRADES
+            skip_paper_dwell = bool(req.get("skip_paper_dwell", False)) and has_recent_backtest
+
+            if not live_ok or not has_recent_backtest or (not has_paper_dwell and not skip_paper_dwell):
                 block_reason = reason or "Live guardrail blocked"
                 if not has_recent_backtest:
                     block_reason += (
                         " | No backtest pass on record for this "
                         f"(strategy, {primary_pair}, {timeframe}) in the last 30 days. "
                         "Run a backtest first."
+                    )
+                if not has_paper_dwell and not skip_paper_dwell:
+                    block_reason += (
+                        f" | Only {paper_closed_count}/{MIN_PAPER_TRADES} closed paper trades on "
+                        f"this strategy + {primary_pair}. Run the bot in PAPER mode first to "
+                        "build a track record (or pass skip_paper_dwell=true if you've already "
+                        "validated externally)."
                     )
                 log_event(db, user_id, "futures.create_bot.blocked_live", request, payload={
                     "strategy": strategy_name, "reason": block_reason,
@@ -3619,6 +3649,8 @@ def create_futures_bot(
                     "missing_fields":   template.missing_fields,
                     "conflicts":        template.conflicts,
                     "has_recent_backtest": has_recent_backtest,
+                    "paper_closed_count": paper_closed_count,
+                    "min_paper_trades":   MIN_PAPER_TRADES,
                 })
                 return {
                     "error":             block_reason,
@@ -3628,12 +3660,16 @@ def create_futures_bot(
                     "missing_fields":    template.missing_fields,
                     "inferred_fields":   template.inferred_fields,
                     "conflicts":         template.conflicts,
-                    "has_recent_backtest": has_recent_backtest,
+                    "has_recent_backtest":  has_recent_backtest,
+                    "has_paper_dwell":      has_paper_dwell,
+                    "paper_closed_count":   paper_closed_count,
+                    "min_paper_trades":     MIN_PAPER_TRADES,
                     "resolver_notes":    template.resolver_notes,
                     "suggestion": (
-                        "Run a backtest first, then paper-trade for a few days. "
-                        "Live trading is blocked until confidence ≥ 85 AND a "
-                        "backtest exists for this strategy/pair/timeframe."
+                        "Step 1: Run a backtest. Step 2: Create a Paper-mode bot and "
+                        f"let it close at least {MIN_PAPER_TRADES} trades. Step 3: Then go Live. "
+                        "Live trading is blocked until confidence ≥ 85, a backtest exists, "
+                        "AND the paper bot has a track record."
                     ),
                 }
         except Exception as guard_exc:

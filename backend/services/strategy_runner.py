@@ -147,14 +147,23 @@ def _build_talib_stub() -> types.ModuleType:
             "lowerband":  mid - nbdevdn * std,
         })
 
-    def ATR(high, low, close, timeperiod: int = 14):
-        h, l, c = _to_series(high), _to_series(low), _to_series(close)
+    def _hlc(high, low=None, close=None):
+        """Bug-fix: Freqtrade strategies often call multi-arg indicators
+        with a single dataframe arg — e.g. `ta.ATR(df, timeperiod=14)`.
+        Real talib requires three separate arrays (high, low, close).
+        The stub now accepts EITHER convention. If low/close are None
+        AND high is a DataFrame, extract from the df."""
+        if isinstance(high, pd.DataFrame) and low is None and close is None:
+            return high["high"], high["low"], high["close"]
+        return _to_series(high), _to_series(low), _to_series(close)
+
+    def ATR(high, low=None, close=None, timeperiod: int = 14):
+        h, l, c = _hlc(high, low, close)
         tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
         return tr.rolling(timeperiod).mean()
 
-    def ADX(high, low, close, timeperiod: int = 14):
-        # Simplified ADX — Wilder's smoothing approximated by EWM.
-        h, l, c = _to_series(high), _to_series(low), _to_series(close)
+    def ADX(high, low=None, close=None, timeperiod: int = 14):
+        h, l, c = _hlc(high, low, close)
         up = h.diff()
         dn = -l.diff()
         plus_dm = up.where((up > dn) & (up > 0), 0.0)
@@ -166,9 +175,10 @@ def _build_talib_stub() -> types.ModuleType:
         dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, 1e-9)
         return dx.ewm(alpha=1 / timeperiod, adjust=False).mean()
 
-    def STOCH(high, low, close, fastk_period: int = 5, slowk_period: int = 3, slowk_matype: int = 0,
+    def STOCH(high, low=None, close=None,
+              fastk_period: int = 5, slowk_period: int = 3, slowk_matype: int = 0,
               slowd_period: int = 3, slowd_matype: int = 0):
-        h, l, c = _to_series(high), _to_series(low), _to_series(close)
+        h, l, c = _hlc(high, low, close)
         ll = l.rolling(fastk_period).min()
         hh = h.rolling(fastk_period).max()
         fastk = 100 * (c - ll) / (hh - ll).replace(0, 1e-9)

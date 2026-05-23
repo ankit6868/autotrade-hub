@@ -554,6 +554,9 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
     missing_fields?:   string[];
     conflicts?:        string[];
     has_recent_backtest?: boolean;
+    has_paper_dwell?:     boolean;
+    paper_closed_count?:  number;
+    min_paper_trades?:    number;
     resolver_notes?:   string[];
   } | null>(null);
   const [success, setSuccess] = useState<{ botId: number; engineKey: string } | null>(null);
@@ -705,6 +708,9 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
             missing_fields:      r.missing_fields  || [],
             conflicts:           r.conflicts       || [],
             has_recent_backtest: r.has_recent_backtest,
+            has_paper_dwell:     r.has_paper_dwell,
+            paper_closed_count:  r.paper_closed_count,
+            min_paper_trades:    r.min_paper_trades,
             resolver_notes:      r.resolver_notes  || [],
           });
         } else {
@@ -1156,6 +1162,9 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                 <ul className="text-[10px] text-red-200/90 space-y-0.5">
                   {blockedDetails.has_recent_backtest === false && (
                     <li>📊 <b>No recent backtest</b> — required within last 30 days for this strategy/pair/TF.</li>
+                  )}
+                  {blockedDetails.has_paper_dwell === false && (
+                    <li>📝 <b>Insufficient paper-trade history</b> — {blockedDetails.paper_closed_count}/{blockedDetails.min_paper_trades} closed paper trades. Run as a Paper bot first.</li>
                   )}
                   {(blockedDetails.missing_fields || []).length > 0 && (
                     <li>⚠️ Missing fields: <span className="font-mono">{blockedDetails.missing_fields!.join(', ')}</span></li>

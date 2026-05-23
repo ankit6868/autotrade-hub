@@ -137,6 +137,53 @@ def _session_filter_block(form: "GuidedForm") -> tuple[str, str]:
     return "", "True"
 
 
+def _volatility_filter_block(form: "GuidedForm") -> tuple[str, str]:
+    """Return (indicator_code, predicate) for the ATR-band volatility
+    regime filter from PDF §4. When ON, the strategy only fires when
+    current ATR sits in the middle band of the trailing 200-bar
+    distribution. Skips dead-chop AND crash-vol regimes."""
+    if not form.volatility_filter or form.volatility_filter == "none":
+        return "", "True"
+    if form.volatility_filter == "middle_band":
+        lo  = max(0,  min(100, int(form.volatility_low_pct  or 25)))
+        hi  = max(lo, min(100, int(form.volatility_high_pct or 75)))
+        return (
+            "        df[\"_atr14\"] = ta.ATR(df, timeperiod=14)\n"
+            f"        df[\"_atr_lo\"]  = df[\"_atr14\"].rolling(200).quantile({lo/100})\n"
+            f"        df[\"_atr_hi\"]  = df[\"_atr14\"].rolling(200).quantile({hi/100})\n",
+            "((df[\"_atr14\"] >= df[\"_atr_lo\"]) & (df[\"_atr14\"] <= df[\"_atr_hi\"]))"
+        )
+    return "", "True"
+
+
+def _exit_signal_block(form: "GuidedForm") -> tuple[str, str, str]:
+    """Return (indicator_code, exit_long_predicate, exit_short_predicate)
+    for the optional explicit exit signal. The engine still always
+    honours SL/TP, but when an exit signal fires the position closes
+    early at market."""
+    if not form.exit_signal or form.exit_signal == "none":
+        return "", "False", "False"
+    p = int(form.exit_period or 14)
+    if form.exit_signal == "rsi_neutral":
+        # Close longs when RSI crosses back ABOVE 50; shorts when below 50.
+        return (
+            f"        if \"rsi\" not in df.columns:\n"
+            f"            df[\"rsi\"] = ta.RSI(df, timeperiod={p})\n",
+            "((df[\"rsi\"] > 50) & (df[\"rsi\"].shift(1) <= 50))",
+            "((df[\"rsi\"] < 50) & (df[\"rsi\"].shift(1) >= 50))",
+        )
+    if form.exit_signal == "ema_cross_exit":
+        # Close longs on bearish EMA cross; shorts on bullish.
+        return (
+            f"        if \"_exit_ema\" not in df.columns:\n"
+            f"            df[\"_exit_ema_f\"] = ta.EMA(df, timeperiod={p})\n"
+            f"            df[\"_exit_ema_s\"] = ta.EMA(df, timeperiod={p*2})\n",
+            "((df[\"_exit_ema_f\"] < df[\"_exit_ema_s\"]) & (df[\"_exit_ema_f\"].shift(1) >= df[\"_exit_ema_s\"].shift(1)))",
+            "((df[\"_exit_ema_f\"] > df[\"_exit_ema_s\"]) & (df[\"_exit_ema_f\"].shift(1) <= df[\"_exit_ema_s\"].shift(1)))",
+        )
+    return "", "False", "False"
+
+
 # ── Public API ──────────────────────────────────────────────────────────
 
 @dataclass
@@ -160,6 +207,13 @@ class GuidedForm:
     bias_filter:             Optional[str]  = "none"        # none | htf_ema200_up
     bias_timeframes:         Optional[list[str]] = None     # MTF analyzer opt-in
     session_filter:          Optional[str]  = "24h"         # 24h | ny | london
+    # Volatility regime filter (PDF §4 — "trade only when ATR is in middle band")
+    volatility_filter:       Optional[str]  = "none"        # none | middle_band
+    volatility_low_pct:      Optional[int]  = 25            # percentile of trailing 200-bar ATR
+    volatility_high_pct:     Optional[int]  = 75
+    # Explicit exit signal (PDF §4 — beyond SL/TP)
+    exit_signal:             Optional[str]  = "none"        # none | rsi_neutral | ema_cross_exit
+    exit_period:             Optional[int]  = 14
     # ARM defaults (carried into the bot create form, NOT into the class itself)
     arm_enabled:             bool           = False
     arm_tp1_close_pct:       float          = 50.0
@@ -184,6 +238,11 @@ class GuidedForm:
             bias_filter         = str(_f("bias_filter", "none")),
             bias_timeframes     = list(_f("bias_timeframes") or []) or None,
             session_filter      = str(_f("session_filter", "24h")),
+            volatility_filter   = str(_f("volatility_filter", "none")),
+            volatility_low_pct  = (int(_f("volatility_low_pct"))  if _f("volatility_low_pct")  is not None else 25),
+            volatility_high_pct = (int(_f("volatility_high_pct")) if _f("volatility_high_pct") is not None else 75),
+            exit_signal         = str(_f("exit_signal", "none")),
+            exit_period         = (int(_f("exit_period")) if _f("exit_period") is not None else 14),
             arm_enabled         = bool(_f("arm_enabled", False)),
             arm_tp1_close_pct   = max(1.0, min(99.0, float(_f("arm_tp1_close_pct", 50.0)))),
         )
@@ -200,12 +259,16 @@ def build_strategy_code(form: GuidedForm) -> str:
     bias_code, bias_pred = _bias_filter_block(form)
     # Session filter
     sess_code, sess_pred = _session_filter_block(form)
+    # Volatility regime filter (PDF §4)
+    vol_code,  vol_pred  = _volatility_filter_block(form)
+    # Optional explicit exit signal (PDF §4 — beyond SL/TP)
+    exit_code, exit_long_pred, exit_short_pred = _exit_signal_block(form)
 
-    # Combine predicates with the bias + session gates.
+    # Combine predicates with the bias + session + volatility gates.
     bias_long  = bias_pred
     bias_short = bias_pred if bias_pred == "True" else f"(~{bias_pred})"
-    full_long  = f"{long_pred} & {bias_long} & {sess_pred}"
-    full_short = f"{short_pred} & {bias_short} & {sess_pred}"
+    full_long  = f"{long_pred} & {bias_long} & {sess_pred} & {vol_pred}"
+    full_short = f"{short_pred} & {bias_short} & {sess_pred} & {vol_pred}"
     if form.direction == "long":
         full_short = "False"   # disable short rules
     if form.direction == "short":
@@ -250,7 +313,7 @@ class {cls_name}(IStrategy):
     process_only_new_candles = True
 {bias_tfs_line}
     def populate_indicators(self, df: DataFrame, metadata: dict) -> DataFrame:
-{ind_code}{bias_code}{sess_code}        return df
+{ind_code}{bias_code}{sess_code}{vol_code}{exit_code}        return df
 
     def populate_entry_trend(self, df: DataFrame, metadata: dict) -> DataFrame:
         df["enter_long"]  = 0
@@ -268,5 +331,13 @@ class {cls_name}(IStrategy):
     def populate_exit_trend(self, df: DataFrame, metadata: dict) -> DataFrame:
         df["exit_long"]  = 0
         df["exit_short"] = 0
+        df.loc[
+            {exit_long_pred},
+            "exit_long",
+        ] = 1
+        df.loc[
+            {exit_short_pred},
+            "exit_short",
+        ] = 1
         return df
 '''
