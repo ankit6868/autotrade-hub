@@ -123,6 +123,7 @@ STRATEGY_NAMES = [
     "BestPracticesV1",
     "BestPracticesV1Strict",
     "SMCStrategy1",
+    "StrategyAsh",
 ]
 
 EXECUTION_TFS_TO_TEST = ["1m", "5m", "15m", "1h", "4h"]

@@ -1267,6 +1267,500 @@ class SMCStrategy1(IStrategy):
 '''
 
 
+# ── StrategyAsh — full institutional SMC strategy per user-provided spec ──
+#
+# Implements every component from the planning document the user shared:
+#   * Multi-TF: 4H structure/bias/dealing range + 1H EMA confluence
+#     + 15M ADX momentum filter + 5M execution clock
+#   * Sub-bar: 1M / 3M liquidity sweep detection (when available)
+#   * Indicators (5M): VWAP, Bollinger Bands(20,2), RSI(14)
+#   * Pattern detection: swing pivots, CHoCH, displacement, FVG with midpoint
+#   * Risk: structural SL (below swept level), TP1=2R / TP2=3R via ARM
+#   * Discipline: max_hold_candles=60 (5h on 5m) + max_stops_per_day=3
+#
+# All "complex" features use the opt-in engine attributes added in earlier
+# commits — other strategies that don't declare them are unaffected.
+_STRATEGY_ASH_CODE = '''
+from freqtrade.strategy import IStrategy
+import pandas as pd
+import numpy as np
+
+
+class StrategyAsh(IStrategy):
+    """
+    Strategy-Ash — institutional SMC strategy with full multi-TF analysis.
+
+    Per the user-provided spec ("strategy planning doc"). Aligns 3 layers:
+
+      LAYER       TF     PURPOSE
+      HTF        4H     Market structure (HH/HL/LL/LH) + BOS + bias
+                       Dealing range (50-bar high/low → premium/discount)
+                       EMA50, EMA200 (additional trend confirmation)
+      MTF        1H     EMA50, EMA200 (trend confluence)
+      MTF        15M    ADX(14) (momentum filter — only trade when trending)
+      LTF        5M     Execution clock + VWAP + BB + RSI + swing pivots
+                       + CHoCH + displacement + FVG midpoint
+      SUB        1M,3M  Liquidity sweep detection (sub-bar resolution)
+
+    ENTRY MODEL (long, short is symmetric):
+      1. HTF (4H) bias = bullish
+      2. 5M close in DISCOUNT zone (< 4H dealing-range midpoint)
+      3. 1M/3M LIQUIDITY SWEEP DOWN: low takes out previous LTF swing low
+         AND closes back above it (smart-money trap)
+      4. 5M CHoCH UP: 5M close crosses above the last lower-high
+      5. 5M DISPLACEMENT: bullish candle with body ≥ 1.5× 20-bar avg body
+      6. 5M FRESH BULLISH FVG: high[i-2] < low[i] in last 5 bars
+      7. CONFLUENCE: 1H close > 1H EMA50 > 1H EMA200 (trend alignment)
+      8. ADX (15M) ≥ 20 (only enter when trending)
+      9. RSI not extreme: 5M RSI < 75 (avoid chasing overbought)
+     10. Setup must complete within 10 LTF candles of CHoCH
+
+    RISK MODEL:
+      SL    = swept low - 10bps buffer (anchored to the liquidity sweep)
+      Reject if SL distance > 3% of entry (broken structure)
+      TP1   = entry + 2R  (ARM closes 50% here, moves SL to BE)
+      TP2   = entry + 3R  (ARM closes remainder)
+      Max hold = 60 LTF candles (engine force-exits at 5h)
+
+    DAILY DISCIPLINE:
+      max_stops_per_day = 3   (engine halts new entries after 3 SLs today)
+
+    BIAS-NEUTRAL: when 4H bias = "range" (no recent BOS), the strategy
+    sits on its hands — no trade in either direction. This matches the
+    spec's "RANGE (NO TRADE)" rule.
+    """
+
+    # ── Engine integration ─────────────────────────────────────────────
+    timeframe         = "5m"
+    bias_timeframes   = ["15m", "1h", "4h"]    # HTF / MTF context
+    sub_timeframes    = ["1m", "3m"]           # LTF sub-bar sweep detection
+    max_hold_candles  = 60                     # 60 × 5m = 5h
+    max_stops_per_day = 3                      # halt after 3 stops today
+    minimal_roi   = {"0": 100}                 # exits via engine SL/TP
+    stoploss      = -0.99                      # disable Freqtrade global SL
+    can_short     = True
+    startup_candle_count    = 250              # need EMA200 + buffer
+    process_only_new_candles = True
+
+    # ── Tunable parameters (mirroring the planning doc §37) ────────────
+    SWING_N_HTF             = 3        # 4H pivot lookback (smaller for HTF)
+    SWING_N_LTF             = 3        # 5M / 1M / 3M pivot lookback
+    HTF_RANGE_LOOKBACK      = 50       # 4H bars for dealing-range high/low
+    BB_LEN                  = 20
+    BB_STD                  = 2.0
+    RSI_LEN                 = 14
+    RSI_MAX_LONG            = 75       # block long if RSI > 75
+    RSI_MIN_SHORT           = 25       # block short if RSI < 25
+    ADX_LEN                 = 14
+    ADX_MIN_TRENDING        = 20       # 15M ADX threshold
+    DISPLACEMENT_BODY_MULT  = 1.5
+    DISPLACEMENT_LOOKBACK   = 20
+    FVG_FRESHNESS_BARS      = 5        # FVG must be from last 5 LTF bars
+    CHOCH_FRESHNESS_BARS    = 10       # spec §13: cancel setup after 10 LTF
+    SWEEP_LOOKBACK          = 20       # bars to scan for previous swing
+    R_TP1                   = 2.0      # 2R first target
+    R_TP2                   = 3.0      # 3R second target
+    MAX_SL_PCT              = 0.03     # reject if SL > 3% from entry
+    SL_BUFFER_PCT           = 0.001    # 10bps buffer beyond swept level
+
+    # ───────────────────────────── helpers ────────────────────────────
+
+    @staticmethod
+    def _strict_pivots(highs, lows, n):
+        """Strict-greater pivot detection (matches Pine ta.pivothigh/low).
+        Returns (is_pivot_high, is_pivot_low) bool arrays — True ON the
+        pivot bar, NOT yet shifted to the confirmation bar.
+        """
+        size = len(highs)
+        ph = np.zeros(size, dtype=bool)
+        pl = np.zeros(size, dtype=bool)
+        for j in range(n, size - n):
+            h = highs[j]; l = lows[j]
+            is_h = True; is_l = True
+            for d in range(1, n + 1):
+                if is_h and (highs[j - d] >= h or highs[j + d] >= h):
+                    is_h = False
+                if is_l and (lows [j - d] <= l or lows [j + d] <= l):
+                    is_l = False
+                if not is_h and not is_l:
+                    break
+            ph[j] = is_h
+            pl[j] = is_l
+        return ph, pl
+
+    @staticmethod
+    def _forward_fill_pivot_values(highs, lows, ph, pl, n):
+        """Forward-fill pivot VALUES (highs[j], lows[j]) to bar j+n.
+        Matches Pine's ta.pivothigh output: the value is reported at the
+        confirmation bar, n bars after the pivot itself."""
+        size = len(highs)
+        ph_vals = np.where(ph, highs, np.nan)
+        pl_vals = np.where(pl, lows,  np.nan)
+        ph_s = np.full(size, np.nan)
+        pl_s = np.full(size, np.nan)
+        if n < size:
+            ph_s[n:] = ph_vals[:-n]
+            pl_s[n:] = pl_vals[:-n]
+        return (pd.Series(ph_s).ffill().to_numpy(),
+                pd.Series(pl_s).ffill().to_numpy())
+
+    @staticmethod
+    def _project_onto_ltf(ltf_df, htf_date, htf_values):
+        """Forward-fill HTF series onto every LTF bar based on the most
+        recent CLOSED HTF bar. merge_asof with allow_exact_matches=False
+        ensures no look-ahead — an HTF bar closing at time T is only
+        visible to LTF bars whose timestamp is STRICTLY > T.
+        """
+        ltf_dates = pd.to_datetime(ltf_df["date"], utc=True)
+        htf_pairs = pd.DataFrame({
+            "date":  pd.to_datetime(htf_date, utc=True),
+            "value": np.asarray(htf_values),
+        }).sort_values("date").reset_index(drop=True)
+        out = pd.merge_asof(
+            pd.DataFrame({"date": ltf_dates}).reset_index(),
+            htf_pairs,
+            on="date", direction="backward",
+            allow_exact_matches=False,
+        )
+        return out["value"].to_numpy()
+
+    @classmethod
+    def _compute_htf_bias(cls, htf_df):
+        """4H structure → bias series (bull / bear / range)."""
+        n = cls.SWING_N_HTF
+        highs = htf_df["high"].to_numpy()
+        lows  = htf_df["low"].to_numpy()
+        closes = htf_df["close"].to_numpy()
+        ph, pl = cls._strict_pivots(highs, lows, n)
+        last_ph, last_pl = cls._forward_fill_pivot_values(highs, lows, ph, pl, n)
+        bias = np.full(len(htf_df), "range", dtype=object)
+        cur = "range"
+        for i in range(1, len(htf_df)):
+            if not np.isnan(last_ph[i]) and closes[i] > last_ph[i] and closes[i-1] <= last_ph[i]:
+                cur = "bull"
+            elif not np.isnan(last_pl[i]) and closes[i] < last_pl[i] and closes[i-1] >= last_pl[i]:
+                cur = "bear"
+            bias[i] = cur
+        return pd.Series(bias, index=htf_df.index)
+
+    @classmethod
+    def _compute_dealing_range(cls, htf_df):
+        """4H dealing range: 50-bar high/low → range_mid (premium/discount fib)."""
+        rh = htf_df["high"].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=10).max()
+        rl = htf_df["low" ].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=10).min()
+        return rh, rl, (rh + rl) / 2.0
+
+    @classmethod
+    def _compute_sub_sweep(cls, sub_df, lookback):
+        """Compute (recent_low, recent_high, sweep_long, sweep_short) on
+        a sub-bar dataframe (1M or 3M). Returns Series indexed by sub_df.
+        A "sweep" = wick takes out a recent extreme AND close reclaims it.
+        Forward-projected onto the LTF base later.
+        """
+        highs  = sub_df["high"].to_numpy()
+        lows   = sub_df["low"].to_numpy()
+        closes = sub_df["close"].to_numpy()
+        n = len(sub_df)
+        recent_low  = pd.Series(lows).shift(1).rolling(lookback, min_periods=5).min().to_numpy()
+        recent_high = pd.Series(highs).shift(1).rolling(lookback, min_periods=5).max().to_numpy()
+        # Sweep-long: low pierces previous low AND close > previous low (reclaim).
+        sweep_long  = (lows  < recent_low)  & (closes > recent_low)
+        sweep_short = (highs > recent_high) & (closes < recent_high)
+        return {
+            "date":         sub_df["date"],
+            "recent_low":   pd.Series(recent_low,  index=sub_df.index),
+            "recent_high":  pd.Series(recent_high, index=sub_df.index),
+            "sweep_long":   pd.Series(sweep_long,  index=sub_df.index),
+            "sweep_short":  pd.Series(sweep_short, index=sub_df.index),
+        }
+
+    @staticmethod
+    def _adx_pandas(high, low, close, length=14):
+        """Wilder ADX without TA-Lib (pandas only). Returns ADX series."""
+        prev_close = close.shift()
+        up = high.diff()
+        dn = -low.diff()
+        plus_dm  = np.where((up > dn) & (up > 0), up, 0.0)
+        minus_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
+        tr = pd.concat([
+            (high - low).abs(),
+            (high - prev_close).abs(),
+            (low  - prev_close).abs(),
+        ], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1.0/length, adjust=False).mean()
+        plus_di  = 100 * pd.Series(plus_dm,  index=high.index).ewm(alpha=1.0/length, adjust=False).mean() / atr.replace(0, np.nan)
+        minus_di = 100 * pd.Series(minus_dm, index=high.index).ewm(alpha=1.0/length, adjust=False).mean() / atr.replace(0, np.nan)
+        dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan))
+        return dx.ewm(alpha=1.0/length, adjust=False).mean()
+
+    # ─────────────────────────── main pipeline ────────────────────────
+
+    def populate_indicators(self, df, metadata):
+        n_total = len(df)
+        if n_total == 0:
+            return df
+
+        # ── HTF / MTF / SUB context from mtf_analyzer ───────────────
+        htf_map = metadata.get("htf", {}) or {}
+        sub_map = metadata.get("sub", {}) or {}
+        htf_4h  = htf_map.get("4h")
+        mtf_1h  = htf_map.get("1h")
+        mtf_15m = htf_map.get("15m")
+        sub_1m  = sub_map.get("1m")
+        sub_3m  = sub_map.get("3m")
+
+        highs  = df["high"].to_numpy()
+        lows   = df["low"].to_numpy()
+        opens  = df["open"].to_numpy()
+        closes = df["close"].to_numpy()
+
+        # ── Step 1: 4H bias + dealing range ─────────────────────────
+        htf_bias_arr   = np.full(n_total, "range", dtype=object)
+        range_mid_proj = np.full(n_total, np.nan)
+        range_hi_proj  = np.full(n_total, np.nan)
+        range_lo_proj  = np.full(n_total, np.nan)
+        if htf_4h is not None and len(htf_4h) >= self.SWING_N_HTF * 2 + 5:
+            bias_series = self._compute_htf_bias(htf_4h)
+            rh, rl, rm  = self._compute_dealing_range(htf_4h)
+            htf_bias_arr   = self._project_onto_ltf(df, htf_4h["date"], bias_series.values)
+            htf_bias_arr   = np.where(pd.isna(htf_bias_arr), "range", htf_bias_arr)
+            range_hi_proj  = self._project_onto_ltf(df, htf_4h["date"], rh.values)
+            range_lo_proj  = self._project_onto_ltf(df, htf_4h["date"], rl.values)
+            range_mid_proj = self._project_onto_ltf(df, htf_4h["date"], rm.values)
+        else:
+            # Fallback: EMA200 on execution TF + 50-bar dealing range on LTF.
+            ema200 = df["close"].ewm(span=200, adjust=False).mean().to_numpy()
+            for i in range(n_total):
+                if closes[i] > ema200[i]: htf_bias_arr[i] = "bull"
+                elif closes[i] < ema200[i]: htf_bias_arr[i] = "bear"
+            rh = df["high"].rolling(50, min_periods=10).max().to_numpy()
+            rl = df["low" ].rolling(50, min_periods=10).min().to_numpy()
+            range_hi_proj, range_lo_proj, range_mid_proj = rh, rl, (rh + rl) / 2.0
+
+        df["htf_bias"]     = htf_bias_arr
+        df["htf_range_hi"] = range_hi_proj
+        df["htf_range_lo"] = range_lo_proj
+        df["htf_range_md"] = range_mid_proj
+
+        # ── Step 2: 1H EMA confluence ────────────────────────────────
+        ema_h1_50  = np.full(n_total, np.nan)
+        ema_h1_200 = np.full(n_total, np.nan)
+        if mtf_1h is not None and len(mtf_1h) >= 200:
+            e50  = mtf_1h["close"].ewm(span=50,  adjust=False).mean()
+            e200 = mtf_1h["close"].ewm(span=200, adjust=False).mean()
+            ema_h1_50  = self._project_onto_ltf(df, mtf_1h["date"], e50.values)
+            ema_h1_200 = self._project_onto_ltf(df, mtf_1h["date"], e200.values)
+        df["ema_h1_50"]  = ema_h1_50
+        df["ema_h1_200"] = ema_h1_200
+
+        # ── Step 3: 15M ADX momentum filter ──────────────────────────
+        adx_15m_proj = np.full(n_total, np.nan)
+        if mtf_15m is not None and len(mtf_15m) >= self.ADX_LEN * 4:
+            adx_15m = self._adx_pandas(mtf_15m["high"], mtf_15m["low"], mtf_15m["close"], self.ADX_LEN)
+            adx_15m_proj = self._project_onto_ltf(df, mtf_15m["date"], adx_15m.values)
+        df["adx_15m"] = adx_15m_proj
+
+        # ── Step 4: LTF base indicators (5M) ────────────────────────
+        # VWAP — rolling 20-bar volume-weighted average.
+        vol  = df["vol"].replace(0, 1.0).to_numpy()
+        typ  = (df["high"] + df["low"] + df["close"]) / 3.0
+        vwap = (typ * vol).rolling(20, min_periods=5).sum() / pd.Series(vol).rolling(20, min_periods=5).sum().values
+        df["vwap"] = vwap.values
+        # Bollinger Bands
+        bb_mid = df["close"].rolling(self.BB_LEN, min_periods=5).mean()
+        bb_std = df["close"].rolling(self.BB_LEN, min_periods=5).std()
+        df["bb_mid"]   = bb_mid.values
+        df["bb_upper"] = (bb_mid + self.BB_STD * bb_std).values
+        df["bb_lower"] = (bb_mid - self.BB_STD * bb_std).values
+        # RSI — Wilder's smoothing
+        delta = df["close"].diff()
+        gain  = delta.clip(lower=0).ewm(alpha=1.0/self.RSI_LEN, adjust=False).mean()
+        loss  = (-delta.clip(upper=0)).ewm(alpha=1.0/self.RSI_LEN, adjust=False).mean()
+        rs = gain / loss.replace(0, np.nan)
+        df["rsi"] = (100 - 100 / (1 + rs)).fillna(50).values
+
+        # ── Step 5: LTF swing pivots (5M) ───────────────────────────
+        ph_l, pl_l = self._strict_pivots(highs, lows, self.SWING_N_LTF)
+        last_ph_5m, last_pl_5m = self._forward_fill_pivot_values(highs, lows, ph_l, pl_l, self.SWING_N_LTF)
+        df["last_ph_5m"] = last_ph_5m
+        df["last_pl_5m"] = last_pl_5m
+
+        # ── Step 6: Liquidity sweep (prefer sub-bar 1M/3M) ──────────
+        # When 1M/3M data is unavailable (engine/network), fall back to
+        # detecting the sweep on the 5M base itself. Either way, the
+        # result is forward-filled onto every 5M bar.
+        sweep_long_proj  = np.zeros(n_total, dtype=bool)
+        sweep_short_proj = np.zeros(n_total, dtype=bool)
+        swept_low_proj   = np.full(n_total, np.nan)
+        swept_high_proj  = np.full(n_total, np.nan)
+        used_sub = False
+        for sub_df in (sub_1m, sub_3m):
+            if sub_df is None or len(sub_df) < self.SWEEP_LOOKBACK + 5:
+                continue
+            res = self._compute_sub_sweep(sub_df, self.SWEEP_LOOKBACK)
+            sl_arr = self._project_onto_ltf(df, res["date"], res["sweep_long"].astype(float).values)
+            ss_arr = self._project_onto_ltf(df, res["date"], res["sweep_short"].astype(float).values)
+            rl_arr = self._project_onto_ltf(df, res["date"], res["recent_low"].values)
+            rh_arr = self._project_onto_ltf(df, res["date"], res["recent_high"].values)
+            sweep_long_proj  = sweep_long_proj  | (np.nan_to_num(sl_arr) > 0)
+            sweep_short_proj = sweep_short_proj | (np.nan_to_num(ss_arr) > 0)
+            # Only set swept level on bars where the sweep actually fired.
+            mask_l = (np.nan_to_num(sl_arr) > 0) & np.isnan(swept_low_proj)
+            mask_s = (np.nan_to_num(ss_arr) > 0) & np.isnan(swept_high_proj)
+            swept_low_proj  = np.where(mask_l, rl_arr, swept_low_proj)
+            swept_high_proj = np.where(mask_s, rh_arr, swept_high_proj)
+            used_sub = True
+        if not used_sub:
+            # 5M fallback: same sweep mechanic on the base TF.
+            recent_low_5m  = pd.Series(lows ).shift(1).rolling(self.SWEEP_LOOKBACK, min_periods=5).min().to_numpy()
+            recent_high_5m = pd.Series(highs).shift(1).rolling(self.SWEEP_LOOKBACK, min_periods=5).max().to_numpy()
+            sweep_long_proj  = (lows  < recent_low_5m)  & (closes > recent_low_5m)
+            sweep_short_proj = (highs > recent_high_5m) & (closes < recent_high_5m)
+            swept_low_proj   = np.where(sweep_long_proj,  recent_low_5m,  np.nan)
+            swept_high_proj  = np.where(sweep_short_proj, recent_high_5m, np.nan)
+        # Forward-fill swept levels so a CHoCH 1-3 bars later can still
+        # anchor SL to the swept extreme.
+        swept_low_proj  = pd.Series(swept_low_proj ).ffill(limit=10).to_numpy()
+        swept_high_proj = pd.Series(swept_high_proj).ffill(limit=10).to_numpy()
+        df["sweep_long"]  = sweep_long_proj
+        df["sweep_short"] = sweep_short_proj
+        df["swept_low"]   = swept_low_proj
+        df["swept_high"]  = swept_high_proj
+        # Recency: did a sweep happen in the last 10 LTF candles?
+        df["recent_sweep_long"]  = pd.Series(sweep_long_proj ).rolling(self.CHOCH_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
+        df["recent_sweep_short"] = pd.Series(sweep_short_proj).rolling(self.CHOCH_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
+
+        # ── Step 7: CHoCH on 5M ─────────────────────────────────────
+        # CHoCH up = close crosses above last lower-high (i.e. above the
+        # 5M last_ph). Defined symmetric to bull_bos but conceptually
+        # the FIRST BOS after a sweep — i.e. character-change confirmation.
+        choch_up = np.zeros(n_total, dtype=bool)
+        choch_dn = np.zeros(n_total, dtype=bool)
+        for i in range(1, n_total):
+            if not np.isnan(last_ph_5m[i]) and closes[i] > last_ph_5m[i] and closes[i-1] <= last_ph_5m[i]:
+                choch_up[i] = True
+            if not np.isnan(last_pl_5m[i]) and closes[i] < last_pl_5m[i] and closes[i-1] >= last_pl_5m[i]:
+                choch_dn[i] = True
+        df["choch_up"] = choch_up
+        df["choch_dn"] = choch_dn
+
+        # ── Step 8: Displacement (large candle body) ────────────────
+        body     = np.abs(closes - opens)
+        avg_body = pd.Series(body).rolling(self.DISPLACEMENT_LOOKBACK, min_periods=5).mean().to_numpy()
+        displ_up = (closes > opens) & (body > self.DISPLACEMENT_BODY_MULT * avg_body)
+        displ_dn = (closes < opens) & (body > self.DISPLACEMENT_BODY_MULT * avg_body)
+        df["displacement_up"] = displ_up
+        df["displacement_dn"] = displ_dn
+
+        # ── Step 9: Fresh FVG with midpoint (last 5 bars) ───────────
+        # Bullish FVG: high[i-2] < low[i]  →  zone [high[i-2], low[i]],
+        # midpoint = (high[i-2] + low[i]) / 2
+        h_shift2 = pd.Series(highs).shift(2).to_numpy()
+        l_shift2 = pd.Series(lows ).shift(2).to_numpy()
+        bull_fvg = h_shift2 < lows
+        bear_fvg = l_shift2 > highs
+        bull_fvg_mid = np.where(bull_fvg, (h_shift2 + lows) / 2.0, np.nan)
+        bear_fvg_mid = np.where(bear_fvg, (l_shift2 + highs) / 2.0, np.nan)
+        # Fresh = within FVG_FRESHNESS_BARS
+        df["fresh_bull_fvg"] = pd.Series(bull_fvg).rolling(self.FVG_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
+        df["fresh_bear_fvg"] = pd.Series(bear_fvg).rolling(self.FVG_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
+        df["bull_fvg_mid"]   = pd.Series(bull_fvg_mid).ffill(limit=self.FVG_FRESHNESS_BARS).values
+        df["bear_fvg_mid"]   = pd.Series(bear_fvg_mid).ffill(limit=self.FVG_FRESHNESS_BARS).values
+
+        # ── Step 10: Confluence gates ───────────────────────────────
+        ema_align_long  = (closes > df["ema_h1_50"].to_numpy()) & (df["ema_h1_50"].to_numpy() > df["ema_h1_200"].to_numpy())
+        ema_align_short = (closes < df["ema_h1_50"].to_numpy()) & (df["ema_h1_50"].to_numpy() < df["ema_h1_200"].to_numpy())
+        adx_arr = df["adx_15m"].to_numpy()
+        adx_ok  = np.isnan(adx_arr) | (adx_arr >= self.ADX_MIN_TRENDING)
+        rsi_arr = df["rsi"].to_numpy()
+        rsi_ok_long  = rsi_arr < self.RSI_MAX_LONG
+        rsi_ok_short = rsi_arr > self.RSI_MIN_SHORT
+        vwap_arr = df["vwap"].to_numpy()
+        vwap_ok_long  = np.isnan(vwap_arr) | (closes > vwap_arr * 0.998)  # close near or above VWAP
+        vwap_ok_short = np.isnan(vwap_arr) | (closes < vwap_arr * 1.002)
+        in_discount = closes < range_mid_proj
+        in_premium  = closes > range_mid_proj
+
+        # ── Final entry signals (spec §4 BUY/SELL MODELS) ──────────
+        long_setup  = (
+            (htf_bias_arr == "bull")
+            & in_discount
+            & df["recent_sweep_long"].to_numpy()
+            & choch_up
+            & displ_up
+            & df["fresh_bull_fvg"].to_numpy()
+            & np.where(np.isnan(df["ema_h1_50"].to_numpy()), True, ema_align_long)
+            & adx_ok
+            & rsi_ok_long
+            & vwap_ok_long
+        )
+        short_setup = (
+            (htf_bias_arr == "bear")
+            & in_premium
+            & df["recent_sweep_short"].to_numpy()
+            & choch_dn
+            & displ_dn
+            & df["fresh_bear_fvg"].to_numpy()
+            & np.where(np.isnan(df["ema_h1_50"].to_numpy()), True, ema_align_short)
+            & adx_ok
+            & rsi_ok_short
+            & vwap_ok_short
+        )
+
+        # ── Risk: SL beyond swept level, TP1/TP2 at 2R/3R ──────────
+        # SL anchor: swept_low (long) / swept_high (short) with buffer.
+        # Fall back to 5M pivot if swept level isn't available.
+        sl_long_arr = np.where(
+            ~np.isnan(swept_low_proj),
+            swept_low_proj  * (1.0 - self.SL_BUFFER_PCT),
+            last_pl_5m      * (1.0 - self.SL_BUFFER_PCT),
+        )
+        sl_short_arr = np.where(
+            ~np.isnan(swept_high_proj),
+            swept_high_proj * (1.0 + self.SL_BUFFER_PCT),
+            last_ph_5m      * (1.0 + self.SL_BUFFER_PCT),
+        )
+        risk_long  = closes - sl_long_arr
+        risk_short = sl_short_arr - closes
+        max_dist   = closes * self.MAX_SL_PCT
+        bad_long  = (risk_long  <= 0) | (risk_long  > max_dist) | np.isnan(sl_long_arr)
+        bad_short = (risk_short <= 0) | (risk_short > max_dist) | np.isnan(sl_short_arr)
+        long_signal  = long_setup  & ~bad_long
+        short_signal = short_setup & ~bad_short
+
+        tp1_long  = closes + self.R_TP1 * risk_long
+        tp2_long  = closes + self.R_TP2 * risk_long
+        tp1_short = closes - self.R_TP1 * risk_short
+        tp2_short = closes - self.R_TP2 * risk_short
+
+        df["sl_price"]  = np.where(long_signal, sl_long_arr,
+                            np.where(short_signal, sl_short_arr, np.nan))
+        df["tp_price"]  = np.where(long_signal, tp1_long,
+                            np.where(short_signal, tp1_short, np.nan))
+        df["tp2_price"] = np.where(long_signal, tp2_long,
+                            np.where(short_signal, tp2_short, np.nan))
+
+        df["_long_signal"]  = long_signal
+        df["_short_signal"] = short_signal
+        return df
+
+    def populate_entry_trend(self, df, metadata):
+        df["enter_long"]  = df["_long_signal"].astype(int)
+        df["enter_short"] = df["_short_signal"].astype(int)
+        return df
+
+    def populate_exit_trend(self, df, metadata):
+        # Engine handles SL / TP1 / TP2 / max_hold_candles automatically.
+        # Strategy emits an early-exit signal on OPPOSITE CHoCH (bias flip
+        # confirmation) so a fresh signal in the wrong direction force-
+        # closes an otherwise still-running trade. This is the "manage
+        # the open trade" rule from the spec.
+        df["exit_long"]  = df["choch_dn"].astype(int)
+        df["exit_short"] = df["choch_up"].astype(int)
+        return df
+'''
+
+
 # BestPracticesV1Strict — same strategy logic as V1, but with ATR regime
 # (middle 50% of 200-bar window) AND NY session (12-21 UTC) filters ON
 # by default. Generated programmatically from V1 to keep a single source
@@ -1424,6 +1918,26 @@ def _seed_builtin_strategies(db):
             "take_profit": 0.06,
             "leverage": 10,
             "timeframe": "15m",   # Default LTF entry TF; can be changed via UI
+        },
+        {
+            "name": "StrategyAsh",
+            "description": "Institutional SMC strategy — full multi-TF model per user-"
+                           "provided spec. ALIGNS 3 LAYERS: 4H structure + bias + dealing "
+                           "range (HTF bias engine), 1H EMA50/200 confluence (MTF trend), "
+                           "15M ADX(14) momentum filter, 5M execution clock with VWAP + "
+                           "Bollinger + RSI + swing pivots + CHoCH + displacement + FVG "
+                           "midpoint entry. Uses 1M/3M sub-bar liquidity-sweep detection "
+                           "(falls back to 5M when sub-data unavailable). Risk: structural "
+                           "SL below swept level + TP1=2R / TP2=3R via ARM. Discipline: "
+                           "max 60 LTF candles hold (5h on 5m) + max 3 stops per day. Only "
+                           "trades when HTF bias is clearly bull or bear — sits out RANGE. "
+                           "Declares max_hold_candles=60 + max_stops_per_day=3 + "
+                           "sub_timeframes=['1m','3m'] — engine honours all three opt-in.",
+            "code": _STRATEGY_ASH_CODE,
+            "stoploss": -0.03,
+            "take_profit": 0.06,
+            "leverage": 10,
+            "timeframe": "5m",
         },
     ]
 
