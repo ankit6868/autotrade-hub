@@ -1680,6 +1680,16 @@ class StrategyAsh(IStrategy):
         vwap_ok_short = np.isnan(vwap_arr) | (closes < vwap_arr * 1.002)
         in_discount = closes < range_mid_proj
         in_premium  = closes > range_mid_proj
+        # Surface as columns so diagnostics + UI can read them. The
+        # strategy's entry math uses the local variables; the columns
+        # are purely for debug visibility.
+        df["in_discount"]    = in_discount
+        df["in_premium"]     = in_premium
+        df["ema_align_long"] = np.where(np.isnan(df["ema_h1_50"].to_numpy()), True, ema_align_long)
+        df["ema_align_short"]= np.where(np.isnan(df["ema_h1_50"].to_numpy()), True, ema_align_short)
+        df["adx_ok"]         = adx_ok
+        df["rsi_ok_long"]    = rsi_ok_long
+        df["rsi_ok_short"]   = rsi_ok_short
 
         # ── Final entry signals (spec §4 BUY/SELL MODELS) ──────────
         long_setup  = (

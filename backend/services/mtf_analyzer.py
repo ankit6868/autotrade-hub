@@ -188,14 +188,57 @@ def attach_htf_context(
     from backend.services import mtf_candles
 
     def _fetch(tf: str) -> Optional[pd.DataFrame]:
-        """Fetch + clip to historical anchor (for backtest safety)."""
+        """Fetch context bars for the given TF.
+
+        LIVE mode (historical_anchor_ts is None):
+          - Uses mtf_candles.get_candles() which fetches the LATEST N
+            bars and serves them from the in-process cache. Fast,
+            shared across bots.
+
+        BACKTEST mode (historical_anchor_ts is set):
+          - mtf_candles only returns the LATEST N bars, so for backtests
+            on old periods it returns data outside the backtest window
+            → after clipping it produces an empty DataFrame → strategies
+            silently fall back to their no-HTF code path → all signals
+            blocked. That's the bug this branch fixes.
+          - Routes through `load_futures_ohlcv(pair, tf, start_ts, end_ts)`
+            which IS historical-aware: fetches exactly the bars whose
+            close timestamp falls inside [start_ts, anchor_ts]. The window
+            width matches the backtest window plus enough warm-up for
+            the longest indicator (EMA200 on 4h = 800h ≈ 33 days).
+        """
         try:
-            tf_df = mtf_candles.get_candles(pair, tf, force_refresh=False)
+            if historical_anchor_ts is None:
+                # Live / paper / WS mode — use the cached latest-N path.
+                tf_df = mtf_candles.get_candles(pair, tf, force_refresh=False)
+            else:
+                # Backtest mode — fetch historical bars matching the
+                # backtest window. Warm-up window = 250 bars of THIS TF
+                # before the anchor, enough for EMA200 + buffer at any
+                # TF. We don't know the LTF window start here, so we
+                # fetch a generous lookback.
+                from backend.services.native_backtester import load_futures_ohlcv
+                # Resolve TF → minutes/seconds for the warm-up window
+                _tf_units = {"m":60, "h":3600, "d":86400, "w":604800}
+                if not tf or len(tf) < 2:
+                    return None
+                try:
+                    tf_secs = int(tf[:-1]) * _tf_units.get(tf[-1].lower(), 60)
+                except (ValueError, TypeError):
+                    return None
+                # 250 bars × tf_secs = warmup window before the anchor.
+                # That's 250m / 250×5m / 1041h / 41days for the common TFs.
+                # Combined with the backtest window itself it gives ample
+                # bars for all indicators.
+                warmup_secs = 250 * tf_secs
+                start_ts = historical_anchor_ts - max(warmup_secs, 14 * 24 * 3600)
+                tf_df = load_futures_ohlcv(pair, tf, start_ts, historical_anchor_ts)
+
+            # Clip to anchor as a belt-and-suspenders safety net (also
+            # required when using the cache path — cache may have bars
+            # past the anchor when the same TF was fetched after the
+            # backtest started).
             if tf_df is not None and historical_anchor_ts is not None:
-                # Backtest mode — clip so the strategy can't peek at bars
-                # whose close is in the future relative to the current
-                # backtest bar. The mtf_candles helper already trims
-                # partial bars; this is the extra historical safety net.
                 if "date" in tf_df.columns:
                     try:
                         anchor_dt = pd.Timestamp(historical_anchor_ts, unit="s", tz="UTC")
