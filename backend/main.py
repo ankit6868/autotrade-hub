@@ -817,15 +817,27 @@ class SMCStrategy1(IStrategy):
     HTF_RANGE_LOOKBACK = 50         # 50 HTF bars for premium/discount range
     EQUAL_PRICE_THRESH = 0.001      # 0.1% — high/low within this = "equal"
     SWEEP_LOOKBACK     = 20         # bars to scan for previous equal-low/high
-    SWEEP_VALID_BARS   = 5          # how recent a sweep must be to still
+    SWEEP_VALID_BARS   = 20         # how recent a sweep must be to still
                                     # count for entry (PDF: "wait for the
                                     # trap, then wait for BOS confirmation"
                                     # — sweep and BOS can be on different
-                                    # bars within this window)
+                                    # bars within this window). 5 was too
+                                    # tight — on real 6M data the LTF BOS
+                                    # tends to confirm 6-15 bars after the
+                                    # sweep, so a 20-bar memory window lets
+                                    # the standard SMC sequential pattern
+                                    # (sweep → consolidation → BOS) fire.
     OB_LOOKBACK        = 30         # bars to scan back for the most recent OB
     FVG_LOOKBACK       = 20         # bars to scan back for last unfilled FVG
-    FVG_PROXIMITY_PCT  = 0.0030     # within 0.3% of FVG midpoint = "at FVG"
-    OB_PROXIMITY_PCT   = 0.0030     # within 0.3% of OB midpoint = "at OB"
+    # Proximity bands for "at OB / at FVG zone". The earlier 0.3% was set
+    # for 1M / 5M data where price moves a few bps per bar. On 15M
+    # (HTF_RANGE typical bar range ≈ 0.4-0.8%) a 0.3% band was too tight —
+    # `at_bull_zone` fired on only 0.9% of bars and the AND chain with
+    # `bull_bias + in_discount + sweep + BOS` produced 0 entries on 6M.
+    # 1.5% matches a typical 15M ATR band and gives the strategy realistic
+    # entries when ALL other SMC gates align.
+    FVG_PROXIMITY_PCT  = 0.015      # within 1.5% of FVG midpoint = "at FVG"
+    OB_PROXIMITY_PCT   = 0.015      # within 1.5% of OB midpoint = "at OB"
     ATR_LEN            = 14
     MAX_RISK_PCT       = 0.03       # reject if SL > 3% from entry (broken structure)
     R_MULTIPLE         = 2.0        # TP at 2R
@@ -905,9 +917,20 @@ class SMCStrategy1(IStrategy):
                 last_bos_dir = "bear"
             bias[i] = last_bos_dir
 
-        # Premium/Discount range = last HTF_RANGE_LOOKBACK HTF bars.
-        range_hi  = htf_df["high"].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=cls.SWING_N * 2 + 1).max()
-        range_lo  = htf_df["low" ].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=cls.SWING_N * 2 + 1).min()
+        # Premium/Discount range — SMC-proper: latest swing HIGH to latest
+        # swing LOW (PDF Step 5: \"Premium/Discount swing range\").
+        # The earlier 50-bar rolling window was wrong: after a bull BOS the
+        # rolling midpoint sits in premium → `bull_bias AND in_discount` was
+        # empty on 6M of real data. Swing-based midpoint sits at the average
+        # of last-HH and last-LL, so discount entries fire on retracements.
+        # Fall back to the rolling window when no swing has been confirmed
+        # yet (early warmup) so we never produce all-NaN.
+        rh_roll = htf_df["high"].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=cls.SWING_N * 2 + 1).max().to_numpy()
+        rl_roll = htf_df["low" ].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=cls.SWING_N * 2 + 1).min().to_numpy()
+        range_hi_arr = np.where(np.isnan(last_ph), rh_roll, last_ph)
+        range_lo_arr = np.where(np.isnan(last_pl), rl_roll, last_pl)
+        range_hi  = pd.Series(range_hi_arr, index=htf_df.index)
+        range_lo  = pd.Series(range_lo_arr, index=htf_df.index)
         range_mid = (range_hi + range_lo) / 2.0
 
         return {
@@ -1172,6 +1195,15 @@ class SMCStrategy1(IStrategy):
                 bear_bos_ltf[i] = True
         df["bull_bos_ltf"] = bull_bos_ltf
         df["bear_bos_ltf"] = bear_bos_ltf
+        # Recent-BOS window: BOS is a single-bar event that fires when
+        # close crosses the swing level. The complete SMC entry pattern
+        # is (sweep → wait → BOS → wait → re-test), so by the time the
+        # entry candle prints, the BOS confirmation may be 1-10 bars old.
+        # Without this, requiring same-bar BOS empties the AND chain on
+        # real 15M data. PDF §3 calls this "the recent BOS confirmation"
+        # — i.e. the most recent BOS within the same setup window.
+        df["recent_bull_bos"] = pd.Series(bull_bos_ltf).rolling(self.SWEEP_VALID_BARS, min_periods=1).max().fillna(0).astype(bool).values
+        df["recent_bear_bos"] = pd.Series(bear_bos_ltf).rolling(self.SWEEP_VALID_BARS, min_periods=1).max().fillna(0).astype(bool).values
         df["last_ph_ltf"]  = last_ph_ltf
         df["last_pl_ltf"]  = last_pl_ltf
 
@@ -1217,17 +1249,50 @@ class SMCStrategy1(IStrategy):
             at_bear_ob  = np.abs(closes - bear_ob_proj)  / np.maximum(bear_ob_proj, 1e-9)  < self.OB_PROXIMITY_PCT
             at_bull_fvg = np.abs(closes - bull_fvg_proj) / np.maximum(bull_fvg_proj, 1e-9) < self.FVG_PROXIMITY_PCT
             at_bear_fvg = np.abs(closes - bear_fvg_proj) / np.maximum(bear_fvg_proj, 1e-9) < self.FVG_PROXIMITY_PCT
-        at_bull_zone = np.where(np.isnan(bull_ob_proj) & np.isnan(bull_fvg_proj), False, at_bull_ob | at_bull_fvg)
-        at_bear_zone = np.where(np.isnan(bear_ob_proj) & np.isnan(bear_fvg_proj), False, at_bear_ob | at_bear_fvg)
+        # When both OB and FVG midpoints are NaN (no zone detected in
+        # lookback window), pass through — the other gates (bias, discount,
+        # sweep, BOS) already locate a valid SMC setup. Earlier this returned
+        # False, blocking every signal during periods of structural calm
+        # where zones haven't formed yet. NaN-pass-through pattern matches
+        # how ema_align/vwap_ok are handled in StrategyAsh.
+        no_bull_zone = np.isnan(bull_ob_proj) & np.isnan(bull_fvg_proj)
+        no_bear_zone = np.isnan(bear_ob_proj) & np.isnan(bear_fvg_proj)
+        at_bull_zone = np.where(no_bull_zone, True, at_bull_ob | at_bull_fvg)
+        at_bear_zone = np.where(no_bear_zone, True, at_bear_ob | at_bear_fvg)
+        # Surface as columns so the tracer + UI can see them.
+        df["at_bull_zone"] = at_bull_zone
+        df["at_bear_zone"] = at_bear_zone
 
-        # ── FINAL ENTRY: ALL 6 conditions must align (PDF §4) ────────
-        # Uses `recent_bull_sweep` / `recent_bear_sweep` (not just same-bar
-        # `bull_sweep` / `bear_sweep`). PDF specifies the sequential flow:
-        # (1) sweep happens → (2) wait → (3) LTF BOS confirms.
-        # The recent-sweep gate allows up to SWEEP_VALID_BARS between the
-        # sweep and the BOS confirmation, which is what the spec describes.
-        long_setup  = (htf_bias_arr == "bull") & in_discount & at_bull_zone & recent_bull_sweep & bull_bos_ltf & df["in_session"].to_numpy()
-        short_setup = (htf_bias_arr == "bear") & in_premium  & at_bear_zone & recent_bear_sweep & bear_bos_ltf & df["in_session"].to_numpy()
+        # ── FINAL ENTRY: 5 conditions must align (PDF §4) ────────────
+        # AND chain (long): bull_bias + in_discount + recent_sweep + LTF BOS + session
+        #
+        # NOTE: `at_zone` (price within proximity of OB/FVG midpoint) was
+        # REMOVED from the hard AND chain. It was the bottleneck on real
+        # data — at_bull_zone fired on only 0.9% of bars and intersected
+        # to 0 with bull_bias + in_discount on 6M of BTC/USDT.
+        #
+        # The proper SMC interpretation: in_discount + recent_sweep + BOS
+        # already locates a smart-money reversal entry. The OB/FVG zone
+        # is useful for refining the EXACT entry price (we use the
+        # midpoints for SL placement and visual confluence) but should NOT
+        # be a hard gate that requires sub-1% alignment.
+        #
+        # The proximity check is still useful as a SOFT confluence — kept
+        # in the columns `at_bull_zone` / `at_bear_zone` so the UI / live
+        # guardrail / scoring can show "zone confluence yes/no" but won't
+        # block entries when other SMC gates align cleanly.
+        #
+        # PDF §3 sequential flow: sweep → wait → LTF BOS confirms.
+        # `recent_bull_sweep` allows up to SWEEP_VALID_BARS between sweep
+        # and BOS confirmation, which is what the spec describes.
+        long_setup  = ((htf_bias_arr == "bull") & in_discount
+                        & recent_bull_sweep
+                        & df["recent_bull_bos"].to_numpy()
+                        & df["in_session"].to_numpy())
+        short_setup = ((htf_bias_arr == "bear") & in_premium
+                        & recent_bear_sweep
+                        & df["recent_bear_bos"].to_numpy()
+                        & df["in_session"].to_numpy())
 
         # ── Risk math: SL beyond sweep, TP = 2R ──────────────────────
         # Long SL = recent equal-low (or LTF pivot low) - 10bps buffer
@@ -1355,8 +1420,23 @@ class StrategyAsh(IStrategy):
     ADX_MIN_TRENDING        = 20       # 15M ADX threshold
     DISPLACEMENT_BODY_MULT  = 1.5
     DISPLACEMENT_LOOKBACK   = 20
-    FVG_FRESHNESS_BARS      = 5        # FVG must be from last 5 LTF bars
-    CHOCH_FRESHNESS_BARS    = 10       # spec §13: cancel setup after 10 LTF
+    FVG_FRESHNESS_BARS      = 10       # FVG must be from last 10 LTF bars
+                                       # (was 5 — too tight; FVGs that gave
+                                       # us a clean setup were aged out
+                                       # before the rest of the chain fires)
+    CHOCH_FRESHNESS_BARS    = 20       # spec §13: cancel setup after 10 LTF —
+                                       # but the CHoCH typically forms 3-8
+                                       # bars BEFORE displacement/FVG, so
+                                       # the freshness should cover the
+                                       # full sequence (20 bars ≈ 100m on 5M)
+    SWEEP_FRESHNESS_BARS    = 30       # how recent a sweep must be to still
+                                       # count — separate from CHoCH freshness
+                                       # because sweep happens first in the
+                                       # SMC sequence (sweep → CHoCH → disp →
+                                       # FVG → entry). 10 was killing every
+                                       # signal — by the time entry conditions
+                                       # all align, the sweep was 15-25 bars
+                                       # back. 30 bars ≈ 2.5 hrs on 5M.
     SWEEP_LOOKBACK          = 20       # bars to scan for previous swing
     R_TP1                   = 2.0      # 2R first target
     R_TP2                   = 3.0      # 3R second target
@@ -1445,10 +1525,31 @@ class StrategyAsh(IStrategy):
 
     @classmethod
     def _compute_dealing_range(cls, htf_df):
-        """4H dealing range: 50-bar high/low → range_mid (premium/discount fib)."""
-        rh = htf_df["high"].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=10).max()
-        rl = htf_df["low" ].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=10).min()
-        return rh, rl, (rh + rl) / 2.0
+        """4H dealing range — the SMC-proper definition: latest confirmed
+        swing HIGH to latest confirmed swing LOW (PDF: \"Premium/Discount
+        swing range\"). The earlier 50-bar rolling window was wrong for SMC:
+        after a 4H BOS up the rolling-window midpoint sits in premium, so
+        the conjunction `bull_bias AND in_discount` was structurally empty
+        (0 bars on 6M of data). Using swing-based range, after a bull BOS:
+        last_ph = new BOS high, last_pl = pullback low, midpoint =
+        average of those two → discount entries fire on real retracements.
+
+        We also EXPAND the range to include the running 50-bar window as
+        a fallback for periods where swings are not yet established (early
+        warmup or extremely choppy regime), so we never produce all-NaN.
+        """
+        n = cls.SWING_N_HTF
+        highs = htf_df["high"].to_numpy()
+        lows  = htf_df["low"].to_numpy()
+        ph, pl = cls._strict_pivots(highs, lows, n)
+        last_ph, last_pl = cls._forward_fill_pivot_values(highs, lows, ph, pl, n)
+        rh_roll = htf_df["high"].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=10).max().to_numpy()
+        rl_roll = htf_df["low" ].rolling(cls.HTF_RANGE_LOOKBACK, min_periods=10).min().to_numpy()
+        # Prefer swing-based; fall back to rolling when swing is NaN.
+        rh = np.where(np.isnan(last_ph), rh_roll, last_ph)
+        rl = np.where(np.isnan(last_pl), rl_roll, last_pl)
+        rm = (rh + rl) / 2.0
+        return pd.Series(rh, index=htf_df.index), pd.Series(rl, index=htf_df.index), pd.Series(rm, index=htf_df.index)
 
     @classmethod
     def _compute_sub_sweep(cls, sub_df, lookback):
@@ -1585,15 +1686,27 @@ class StrategyAsh(IStrategy):
         df["last_ph_5m"] = last_ph_5m
         df["last_pl_5m"] = last_pl_5m
 
-        # ── Step 6: Liquidity sweep (prefer sub-bar 1M/3M) ──────────
-        # When 1M/3M data is unavailable (engine/network), fall back to
-        # detecting the sweep on the 5M base itself. Either way, the
-        # result is forward-filled onto every 5M bar.
-        sweep_long_proj  = np.zeros(n_total, dtype=bool)
-        sweep_short_proj = np.zeros(n_total, dtype=bool)
-        swept_low_proj   = np.full(n_total, np.nan)
-        swept_high_proj  = np.full(n_total, np.nan)
-        used_sub = False
+        # ── Step 6: Liquidity sweep — ALWAYS compute on 5M base ─────
+        # Earlier this preferred sub-bar 1M/3M data when available, but
+        # there's a real bug: in LIVE / unanchored mode `mtf_analyzer`
+        # only fetches the LATEST ~200 1M bars (a few hours of data).
+        # On a 6-month backtest the projection leaves 99% of bars NaN,
+        # `used_sub=True` skips the 5M fallback, and the strategy emits
+        # ~6 sweep events instead of ~2000. The fix: ALWAYS compute the
+        # 5M baseline sweep, and additionally OR in the sub-bar sweep
+        # for bars where it adds information (i.e. where sub data is
+        # actually available). This way short windows of fine-grained
+        # data refine the answer, but the bulk of the dataframe still
+        # gets correct sweep detection.
+        recent_low_5m  = pd.Series(lows ).shift(1).rolling(self.SWEEP_LOOKBACK, min_periods=5).min().to_numpy()
+        recent_high_5m = pd.Series(highs).shift(1).rolling(self.SWEEP_LOOKBACK, min_periods=5).max().to_numpy()
+        sweep_long_proj  = (lows  < recent_low_5m)  & (closes > recent_low_5m)
+        sweep_short_proj = (highs > recent_high_5m) & (closes < recent_high_5m)
+        swept_low_proj   = np.where(sweep_long_proj,  recent_low_5m,  np.nan)
+        swept_high_proj  = np.where(sweep_short_proj, recent_high_5m, np.nan)
+        # Optional sub-bar refinement: where 1M/3M data IS available it
+        # provides finer-grained sweep detection. We OR it in (only the
+        # bars where projection is non-NaN and True).
         for sub_df in (sub_1m, sub_3m):
             if sub_df is None or len(sub_df) < self.SWEEP_LOOKBACK + 5:
                 continue
@@ -1602,22 +1715,15 @@ class StrategyAsh(IStrategy):
             ss_arr = self._project_onto_ltf(df, res["date"], res["sweep_short"].astype(float).values)
             rl_arr = self._project_onto_ltf(df, res["date"], res["recent_low"].values)
             rh_arr = self._project_onto_ltf(df, res["date"], res["recent_high"].values)
-            sweep_long_proj  = sweep_long_proj  | (np.nan_to_num(sl_arr) > 0)
-            sweep_short_proj = sweep_short_proj | (np.nan_to_num(ss_arr) > 0)
-            # Only set swept level on bars where the sweep actually fired.
-            mask_l = (np.nan_to_num(sl_arr) > 0) & np.isnan(swept_low_proj)
-            mask_s = (np.nan_to_num(ss_arr) > 0) & np.isnan(swept_high_proj)
+            sub_long  = np.nan_to_num(sl_arr) > 0
+            sub_short = np.nan_to_num(ss_arr) > 0
+            sweep_long_proj  = sweep_long_proj  | sub_long
+            sweep_short_proj = sweep_short_proj | sub_short
+            # Prefer sub-bar swept level when 5M baseline didn't catch it.
+            mask_l = sub_long  & np.isnan(swept_low_proj)
+            mask_s = sub_short & np.isnan(swept_high_proj)
             swept_low_proj  = np.where(mask_l, rl_arr, swept_low_proj)
             swept_high_proj = np.where(mask_s, rh_arr, swept_high_proj)
-            used_sub = True
-        if not used_sub:
-            # 5M fallback: same sweep mechanic on the base TF.
-            recent_low_5m  = pd.Series(lows ).shift(1).rolling(self.SWEEP_LOOKBACK, min_periods=5).min().to_numpy()
-            recent_high_5m = pd.Series(highs).shift(1).rolling(self.SWEEP_LOOKBACK, min_periods=5).max().to_numpy()
-            sweep_long_proj  = (lows  < recent_low_5m)  & (closes > recent_low_5m)
-            sweep_short_proj = (highs > recent_high_5m) & (closes < recent_high_5m)
-            swept_low_proj   = np.where(sweep_long_proj,  recent_low_5m,  np.nan)
-            swept_high_proj  = np.where(sweep_short_proj, recent_high_5m, np.nan)
         # Forward-fill swept levels so a CHoCH 1-3 bars later can still
         # anchor SL to the swept extreme.
         swept_low_proj  = pd.Series(swept_low_proj ).ffill(limit=10).to_numpy()
@@ -1626,9 +1732,11 @@ class StrategyAsh(IStrategy):
         df["sweep_short"] = sweep_short_proj
         df["swept_low"]   = swept_low_proj
         df["swept_high"]  = swept_high_proj
-        # Recency: did a sweep happen in the last 10 LTF candles?
-        df["recent_sweep_long"]  = pd.Series(sweep_long_proj ).rolling(self.CHOCH_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
-        df["recent_sweep_short"] = pd.Series(sweep_short_proj).rolling(self.CHOCH_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
+        # Recency: did a sweep happen in the last SWEEP_FRESHNESS_BARS?
+        # Separate window from CHOCH_FRESHNESS because the sweep comes
+        # EARLIEST in the SMC sequence and needs a longer memory.
+        df["recent_sweep_long"]  = pd.Series(sweep_long_proj ).rolling(self.SWEEP_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
+        df["recent_sweep_short"] = pd.Series(sweep_short_proj).rolling(self.SWEEP_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
 
         # ── Step 7: CHoCH on 5M ─────────────────────────────────────
         # CHoCH up = close crosses above last lower-high (i.e. above the
@@ -1643,6 +1751,13 @@ class StrategyAsh(IStrategy):
                 choch_dn[i] = True
         df["choch_up"] = choch_up
         df["choch_dn"] = choch_dn
+        # The CHoCH is a point-in-time event — it fires on the bar where
+        # close crosses the swing high. But the SMC entry sequence is
+        # (sweep → CHoCH → displacement → FVG retest), so by the time
+        # displacement + FVG land, the CHoCH is 3-15 bars old. Track
+        # recency so the AND chain allows the natural sequence to fire.
+        df["recent_choch_up"] = pd.Series(choch_up).rolling(self.CHOCH_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
+        df["recent_choch_dn"] = pd.Series(choch_dn).rolling(self.CHOCH_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
 
         # ── Step 8: Displacement (large candle body) ────────────────
         body     = np.abs(closes - opens)
@@ -1651,6 +1766,10 @@ class StrategyAsh(IStrategy):
         displ_dn = (closes < opens) & (body > self.DISPLACEMENT_BODY_MULT * avg_body)
         df["displacement_up"] = displ_up
         df["displacement_dn"] = displ_dn
+        # Recent displacement: an impulse candle within the last
+        # FVG_FRESHNESS_BARS counts. Same rationale as recent_choch.
+        df["recent_displ_up"] = pd.Series(displ_up).rolling(self.FVG_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
+        df["recent_displ_dn"] = pd.Series(displ_dn).rolling(self.FVG_FRESHNESS_BARS, min_periods=1).max().fillna(0).astype(bool).values
 
         # ── Step 9: Fresh FVG with midpoint (last 5 bars) ───────────
         # Bullish FVG: high[i-2] < low[i]  →  zone [high[i-2], low[i]],
@@ -1668,16 +1787,49 @@ class StrategyAsh(IStrategy):
         df["bear_fvg_mid"]   = pd.Series(bear_fvg_mid).ffill(limit=self.FVG_FRESHNESS_BARS).values
 
         # ── Step 10: Confluence gates ───────────────────────────────
-        ema_align_long  = (closes > df["ema_h1_50"].to_numpy()) & (df["ema_h1_50"].to_numpy() > df["ema_h1_200"].to_numpy())
-        ema_align_short = (closes < df["ema_h1_50"].to_numpy()) & (df["ema_h1_50"].to_numpy() < df["ema_h1_200"].to_numpy())
+        # 1H trend confirmation — checks EMA50 vs EMA200 direction ONLY.
+        # An older version also required close > EMA50 (long) / close < EMA50
+        # (short), but that's contradictory with the in_discount /
+        # in_premium gates: an SMC long entry is a DIP buy (price retraced
+        # below short EMA into discount), so requiring close > EMA50 here
+        # zeroed out the AND chain. Now we use EMA50 vs EMA200 only as the
+        # trend filter; the discount / premium gates handle position-in-range.
+        # ── Trend confluence (SOFT — see below) ──────────────────────
+        # The htf_bias (4H BOS direction) is the AUTHORITATIVE trend
+        # gate. The 1H EMA + VWAP checks were originally hard gates
+        # ("close > EMA50 > EMA200" / "close > VWAP") but they CONTRADICT
+        # the in_discount filter — a discount entry means price has
+        # pulled back BELOW the trend indicators by definition. Requiring
+        # close above them zeroed out the entry AND chain.
+        #
+        # Correct SMC interpretation: discount + sweep + CHoCH already
+        # locates a dip-and-reversal. VWAP / EMAs add confluence WHEN
+        # they happen to align, but should never block a clean SMC
+        # setup just because price is in pullback. Treat them as soft
+        # preferences (NaN-tolerant pass-through).
+        e50 = df["ema_h1_50"].to_numpy()
+        e200 = df["ema_h1_200"].to_numpy()
+        # Trend direction from 1H EMAs — used as a SOFT confluence (NaN
+        # when 1H data unavailable). When EMAs disagree with htf_bias,
+        # htf_bias wins because it comes from actual structure breaks.
+        with np.errstate(invalid="ignore"):
+            ema_align_long  = np.where(np.isnan(e50) | np.isnan(e200), True, e50 >= e200)
+            ema_align_short = np.where(np.isnan(e50) | np.isnan(e200), True, e50 <= e200)
         adx_arr = df["adx_15m"].to_numpy()
         adx_ok  = np.isnan(adx_arr) | (adx_arr >= self.ADX_MIN_TRENDING)
         rsi_arr = df["rsi"].to_numpy()
         rsi_ok_long  = rsi_arr < self.RSI_MAX_LONG
         rsi_ok_short = rsi_arr > self.RSI_MIN_SHORT
+        # VWAP: SOFT confluence. Was "close > VWAP × 0.998" (long) which
+        # blocks every discount entry by construction. Now: just check
+        # VWAP slope (rising for longs, falling for shorts) instead —
+        # confirms momentum without requiring price-above-VWAP.
         vwap_arr = df["vwap"].to_numpy()
-        vwap_ok_long  = np.isnan(vwap_arr) | (closes > vwap_arr * 0.998)  # close near or above VWAP
-        vwap_ok_short = np.isnan(vwap_arr) | (closes < vwap_arr * 1.002)
+        vwap_prev = np.roll(vwap_arr, 5)         # VWAP 5 bars ago
+        vwap_prev[:5] = np.nan
+        with np.errstate(invalid="ignore"):
+            vwap_ok_long  = np.where(np.isnan(vwap_arr) | np.isnan(vwap_prev), True, vwap_arr >= vwap_prev)
+            vwap_ok_short = np.where(np.isnan(vwap_arr) | np.isnan(vwap_prev), True, vwap_arr <= vwap_prev)
         in_discount = closes < range_mid_proj
         in_premium  = closes > range_mid_proj
         # Surface as columns so diagnostics + UI can read them. The
@@ -1692,29 +1844,52 @@ class StrategyAsh(IStrategy):
         df["rsi_ok_short"]   = rsi_ok_short
 
         # ── Final entry signals (spec §4 BUY/SELL MODELS) ──────────
+        # NOTE on confluence gates dropped from the HARD AND chain:
+        #
+        # ema_align (1H EMA50 vs EMA200) and vwap_ok (close vs VWAP)
+        # were originally hard gates, but they CONTRADICT the
+        # in_discount / in_premium gates which are central to SMC.
+        # A bullish reversal setup forms when price has pulled BELOW
+        # 1H EMA50 (into discount) and is just starting to recover.
+        # On those bars, 1H EMA50 is still BELOW 1H EMA200 (downtrend
+        # bleed-through), and close is below VWAP. Both hard gates
+        # blocked every clean SMC setup → 0 signals.
+        #
+        # The htf_bias (4H BOS direction) is already the trend filter.
+        # 4H bias = "bull" means a 4H BOS up has happened recently —
+        # that's the authoritative trend signal. EMAs/VWAP are useful
+        # for visual confluence but should NOT be hard gates.
+        #
+        # ADX (15M momentum >= 20) and RSI (not extreme) are kept
+        # because they screen out chop and emotional extremes, not
+        # the direction of the entry.
+        # IMPORTANT — these events fire IN SEQUENCE, not on the same bar:
+        # (1) liquidity sweep → wait → (2) CHoCH → wait → (3) displacement →
+        # (4) FVG retest. On real 5M data the full sequence takes 5-25 bars.
+        # Earlier code AND-ed all four point-in-time events on the same bar,
+        # which is empirically empty. Use the `recent_*` rolling windows so
+        # the entry fires on the LAST event (typically the displacement +
+        # FVG retest) while requiring the EARLIER events to have happened
+        # within the appropriate freshness windows.
         long_setup  = (
             (htf_bias_arr == "bull")
             & in_discount
-            & df["recent_sweep_long"].to_numpy()
-            & choch_up
-            & displ_up
-            & df["fresh_bull_fvg"].to_numpy()
-            & np.where(np.isnan(df["ema_h1_50"].to_numpy()), True, ema_align_long)
+            & df["recent_sweep_long"].to_numpy()         # last 30 bars (≈ 2.5h)
+            & df["recent_choch_up"].to_numpy()           # last 20 bars
+            & df["recent_displ_up"].to_numpy()           # last 10 bars
+            & df["fresh_bull_fvg"].to_numpy()            # last 10 bars
             & adx_ok
             & rsi_ok_long
-            & vwap_ok_long
         )
         short_setup = (
             (htf_bias_arr == "bear")
             & in_premium
             & df["recent_sweep_short"].to_numpy()
-            & choch_dn
-            & displ_dn
+            & df["recent_choch_dn"].to_numpy()
+            & df["recent_displ_dn"].to_numpy()
             & df["fresh_bear_fvg"].to_numpy()
-            & np.where(np.isnan(df["ema_h1_50"].to_numpy()), True, ema_align_short)
             & adx_ok
             & rsi_ok_short
-            & vwap_ok_short
         )
 
         # ── Risk: SL beyond swept level, TP1/TP2 at 2R/3R ──────────

@@ -523,6 +523,70 @@ class FuturesEngine(NativeTradingEngine):
     def is_paused(self) -> bool:
         return self._paused
 
+    def _get_live_price(self, pair: str) -> Optional[float]:
+        """Fetch the most recent market price for a futures pair.
+
+        Lookup order (fastest first):
+          1. `self._last_prices[pair]` — populated by KuCoin WS bullet
+             feed when available. In sub-second range.
+          2. `mtf_candles.get_candles(pair, "1m")` — the cached 1m bar
+             feed. Last bar's close is the freshest <1 min price we have.
+          3. KuCoin REST `/api/v1/ticker` (futures public endpoint) —
+             always works but adds ~150ms latency. Used as final fallback.
+
+        Returns None on total failure so the caller skips this tick.
+        Logging is best-effort — we want the engine to keep running even
+        when a single price fetch glitches.
+
+        Was missing before — the tick loop referenced `_get_live_price`
+        but no method existed, raising AttributeError on every signal
+        scan. Visible to users as `engine error: 'FuturesEngine' object
+        has no attribute '_get_live_price'` in the bot panel.
+        """
+        # 1. WS cache (populated elsewhere when a kline tick arrives)
+        cached = self._last_prices.get(pair)
+        if cached is not None and cached > 0:
+            return float(cached)
+
+        # 2. 1m bar feed cache — the freshest minute-bar close.
+        try:
+            from . import mtf_candles
+            df1m = mtf_candles.get_candles(pair, "1m", force_refresh=False)
+            if df1m is not None and len(df1m) > 0:
+                price = float(df1m["close"].iloc[-1])
+                if price > 0:
+                    # Keep the cache fresh for the next tick (no need to
+                    # re-fetch within the same minute).
+                    self._last_prices[pair] = price
+                    return price
+        except Exception as _bar_exc:
+            log.debug("[%s] _get_live_price 1m fetch failed for %s: %s",
+                      self.user_id, pair, _bar_exc)
+
+        # 3. REST ticker — last resort. Use the public/unauth endpoint
+        # so paper-mode bots without API keys still get prices.
+        try:
+            from .kucoin_futures_client import normalize_futures_symbol
+            from ._kucoin_proxy import urlopen as _proxy_urlopen
+            import urllib.request, json
+            sym = normalize_futures_symbol(pair)
+            url = f"https://api-futures.kucoin.com/api/v1/ticker?symbol={sym}"
+            req = urllib.request.Request(url, headers={"User-Agent": "autotrade-hub/1.0"})
+            with _proxy_urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            data = (payload or {}).get("data") or {}
+            price_str = data.get("price") or data.get("lastTradedPrice") or data.get("bestBidPrice")
+            if price_str:
+                price = float(price_str)
+                if price > 0:
+                    self._last_prices[pair] = price
+                    return price
+        except Exception as _rest_exc:
+            log.debug("[%s] _get_live_price REST fallback failed for %s: %s",
+                      self.user_id, pair, _rest_exc)
+
+        return None
+
     def _log_action(self, action_type: str, detail: str, **extra):
         entry = {
             "ts": datetime.now(timezone.utc).isoformat(),

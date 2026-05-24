@@ -226,12 +226,27 @@ def attach_htf_context(
                     tf_secs = int(tf[:-1]) * _tf_units.get(tf[-1].lower(), 60)
                 except (ValueError, TypeError):
                     return None
-                # 250 bars × tf_secs = warmup window before the anchor.
-                # That's 250m / 250×5m / 1041h / 41days for the common TFs.
-                # Combined with the backtest window itself it gives ample
-                # bars for all indicators.
+                # Compute backtest start = first bar of the LTF dataframe
+                # being analyzed. The HTF window MUST cover the FULL backtest
+                # period plus a 250-bar warmup, otherwise HTF data is only
+                # available for the last few weeks and bars before that
+                # silently fall back to "no HTF" → strategies emit signals
+                # only for the recent window. THIS was the 6M-vs-30d
+                # identical-trades bug — for a 6M backtest the analyzer was
+                # only fetching the last ~14-42 days of HTF data.
                 warmup_secs = 250 * tf_secs
-                start_ts = historical_anchor_ts - max(warmup_secs, 14 * 24 * 3600)
+                # Backtest start (derived from the LTF df) — earliest bar
+                # the strategy will analyze. Fall back to a 14d minimum
+                # if the df is unreadable for any reason.
+                try:
+                    ltf_start_ts = int(pd.Timestamp(df["date"].iloc[0]).timestamp())
+                except Exception:
+                    ltf_start_ts = historical_anchor_ts - 14 * 24 * 3600
+                # Pull HTF data from (backtest_start - warmup) through anchor.
+                start_ts = min(
+                    ltf_start_ts - warmup_secs,
+                    historical_anchor_ts - max(warmup_secs, 14 * 24 * 3600),
+                )
                 tf_df = load_futures_ohlcv(pair, tf, start_ts, historical_anchor_ts)
 
             # Clip to anchor as a belt-and-suspenders safety net (also
