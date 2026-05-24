@@ -310,9 +310,9 @@ function FuturesBacktestInner() {
       : (PRESETS.find(p => p.label === selectedPreset)?.days ?? 0)
   );
   const isHighFreqTooLong = (
-    (timeframe === '1m'  && presetDays > 30) ||
-    (timeframe === '5m'  && presetDays > 180) ||
-    (timeframe === '15m' && presetDays > 1825)   // >5Y on 15m is borderline too
+    (timeframe === '1m'  && presetDays > 90)  ||   // ~130k candles with parallel fetch
+    (timeframe === '5m'  && presetDays > 730) ||   // 2Y on 5m, ~210k candles
+    (timeframe === '15m' && presetDays > 3650)     // >10Y on 15m
   );
 
   // Pine Script equivalents of the built-in strategies. These are
@@ -1570,7 +1570,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
               which takes more than the 5-minute Railway proxy timeout we
               have to work with. Pick a higher timeframe (try <b className="text-emerald-300">15m</b>{' '}
               or <b className="text-emerald-300">1h</b>) or a shorter period.
-              Practical limits: <b>1m</b> ≤ 30 days · <b>5m</b> ≤ 6 months ·
+              Practical limits: <b>1m</b> ≤ 90 days · <b>5m</b> ≤ 2 years ·
               <b>15m+</b> all periods.
             </div>
           </div>

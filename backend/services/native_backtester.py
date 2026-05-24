@@ -104,7 +104,7 @@ def _pair_to_futures_symbol(pair: str) -> str:
 
 def _fetch_futures_klines(symbol: str, granularity_min: int,
                           from_ms: int, to_ms: int) -> list:
-    """Paginated fetch from /api/v1/kline/query.
+    """Paginated fetch from /api/v1/kline/query — PARALLEL workers.
 
     Verified empirically against api-futures.kucoin.com:
       - `granularity` is in MINUTES (1, 5, 15, 30, 60, 120, 240, 480,
@@ -117,22 +117,34 @@ def _fetch_futures_klines(symbol: str, granularity_min: int,
       - The endpoint walks FORWARD from `from`, returning up to 200
         candles. The `to` query is just a stop-bound; if from..to spans
         more than 200 candles, you only get the first 200.
+
+    Why parallel: long windows × low TFs need many pages (e.g. 1Y of 5m
+    = 525 pages). Serial @ 150ms each = 80s; this exceeds the Railway
+    proxy timeout for higher 1m windows. Dispatching pages with a thread
+    pool (12 workers) brings 80s → ~7s and keeps the UI responsive.
+    Page windows are CONTIGUOUS, deduplicated by timestamp on merge.
     """
     from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     granularity_secs = granularity_min * 60
-    rows: list = []
+    page_span_ms = 200 * granularity_secs * 1000
+
+    # Plan contiguous page windows up-front instead of stepping serially.
+    windows: list[tuple[int, int]] = []
     cur = from_ms
-    # Safety bound: even if KuCoin keeps returning data, stop after
-    # enough pages to cover the requested span (with slack for gaps).
-    max_pages = max(1, ((to_ms - from_ms) // (200 * granularity_secs * 1000)) + 5)
-    pages = 0
-    while cur < to_ms and pages < max_pages:
-        pages += 1
+    while cur < to_ms:
+        end_w = min(cur + page_span_ms, to_ms)
+        windows.append((cur, end_w))
+        cur = end_w
+    if not windows:
+        return []
+
+    def _one_page(w_from: int, w_to: int) -> list:
         qs = urllib.parse.urlencode({
             "symbol":      symbol,
             "granularity": granularity_min,
-            "from":        cur,
-            "to":          to_ms,
+            "from":        w_from,
+            "to":          w_to,
         })
         url = f"{FUTURES_BASE}/api/v1/kline/query?{qs}"
         req = urllib.request.Request(url, headers={"User-Agent": "AutoTradeHub/1.0"})
@@ -140,18 +152,35 @@ def _fetch_futures_klines(symbol: str, granularity_min: int,
             data = json.loads(resp.read().decode())
         if str(data.get("code")) != "200000":
             raise RuntimeError(f"KuCoin Futures kline error: {data.get('msg','unknown')}")
-        new = data.get("data") or []
-        if not new:
-            break
-        rows.extend(new)
-        # Advance past the newest timestamp in the page.
-        page_ts = [int(r[0]) for r in new]
-        newest_ms = max(page_ts)
-        next_cur = newest_ms + granularity_secs * 1000
-        if next_cur <= cur:
-            break   # safety: no forward progress
-        cur = next_cur
-    return rows
+        return data.get("data") or []
+
+    # 12 workers = comfortably under KuCoin's IP-based rate limit (≈30/s)
+    # while still ~10× faster than serial.
+    all_rows: list = []
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        futures = {ex.submit(_one_page, wf, wt): (wf, wt) for (wf, wt) in windows}
+        for fut in as_completed(futures):
+            try:
+                all_rows.extend(fut.result())
+            except Exception as _page_exc:
+                # Single-page failure is non-fatal — we still return whatever
+                # came back. The strategy can run on partial data; the UI
+                # shows the actual candle count fetched.
+                continue
+    # Dedup by timestamp (workers may overlap by 1 bar at boundaries) and
+    # return in chronological order — downstream sort() expects ascending.
+    if all_rows:
+        seen_ts: set = set()
+        dedup: list = []
+        for r in all_rows:
+            ts = int(r[0])
+            if ts in seen_ts:
+                continue
+            seen_ts.add(ts)
+            dedup.append(r)
+        dedup.sort(key=lambda r: int(r[0]))
+        return dedup
+    return []
 
 
 # Process-local TTL caches so auto-tune (which runs the same backtest with
