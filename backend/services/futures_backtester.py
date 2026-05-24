@@ -606,6 +606,16 @@ def run_futures_backtest(
                         f"{df.attrs.get('class_stoploss_pct')}% / "
                         f"{df.attrs.get('class_take_profit_pct')}% — ignored)"
                     )
+                # Pick up the strategy's opt-in max-hold gate. When set,
+                # any position open longer than this gets force-closed in
+                # the per-bar loop — matches the live/paper engine's
+                # behaviour so backtest results reflect what the bot
+                # actually does in production. Strategies that don't
+                # declare class_max_hold_candles see no change.
+                class_max_hold = df.attrs.get("class_max_hold_candles")
+                pair_max_hold_candles = int(class_max_hold) if class_max_hold else 0
+                if pair_max_hold_candles > 0:
+                    data_diagnostics[pair]["max_hold_candles"] = pair_max_hold_candles
                 signal_fn = make_signal_fn_from_df(
                     df, leverage, stoploss_pct, take_profit_pct,
                 )
@@ -1131,7 +1141,20 @@ def run_futures_backtest(
                 tp2 = pos.get("tp2")
                 has_tp2 = tp2 is not None and not pos["tp1_hit"]
 
-                if direction == "long" and lo <= liq_price:
+                # ── max_hold force-exit (strategy-declared) ──────────────
+                # When a strategy declares class_max_hold_candles, any
+                # position open longer than that gets closed at THIS bar's
+                # open. Matches the live engine's behaviour so backtest
+                # results agree with what the bot actually does in paper /
+                # live mode. Checked BEFORE liq/SL/TP so a max-hold exit
+                # takes precedence on an ambiguous bar (the institutional
+                # thesis has expired regardless of where price ends up).
+                if (pair_max_hold_candles > 0
+                        and pos["candles_held"] >= pair_max_hold_candles):
+                    raw_exit_p = bar_o
+                    exit_rsn = "max_hold_expired"
+                    exit_slippage_bps = SLIPPAGE_BPS_STOP
+                elif direction == "long" and lo <= liq_price:
                     raw_exit_p = liq_price
                     liquidated = True
                     exit_slippage_bps = SLIPPAGE_BPS_LIQ

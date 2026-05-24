@@ -806,6 +806,11 @@ class SMCStrategy1(IStrategy):
     # ── Engine integration ─────────────────────────────────────────────
     timeframe = "15m"                  # LTF execution clock
     bias_timeframes = ["1h", "4h"]     # MTF + HTF context (mtf_analyzer)
+    # NOTE on max_hold_candles: SMC trades on 15M typically need 3-5
+    # days to fully play out (institutional unwind takes time). A 96-bar
+    # (24h) max-hold was tried and dropped P&L by 3-5% net because
+    # winning positions force-closed at bar-open before reaching TP.
+    # Leaving max_hold unset is the right call — SL/TP run their course.
     minimal_roi = {"0": 100}           # exits via engine SL/TP only
     stoploss = -0.99                   # disable Freqtrade global SL
     can_short = True
