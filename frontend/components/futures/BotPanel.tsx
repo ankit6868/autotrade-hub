@@ -1636,7 +1636,7 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
             className={`flex-1 py-2 text-[11px] font-medium capitalize ${
               tab === t ? 'text-white bg-white/[0.06]' : 'text-slate-400 hover:text-white'
             }`}>
-            {t === 'signals' ? `Signals (${actionLog.length})` : t === 'positions' ? `Open (${openPositions.length})` : `Trades (${closedTrades.length})`}
+            {t === 'signals' ? `Events (${actionLog.length})` : t === 'positions' ? `Open (${openPositions.length})` : `Trades (${closedTrades.length})`}
           </button>
         ))}
       </div>
@@ -1663,7 +1663,14 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
               </div>
             )}
             {actionLog.length === 0 && (
-              <p className="text-slate-500 text-xs text-center py-4">No signals yet — bot is scanning...</p>
+              <p className="text-slate-500 text-xs text-center py-4">Nothing logged yet — bot is scanning every 60s.</p>
+            )}
+            {actionLog.length > 0 && (data.signal_count || 0) === 0 && (
+              <p className="text-amber-400/70 text-[10px] text-center pb-2 px-2 leading-snug">
+                Bot is healthy ({data.ticks || 0} ticks scanned) but no entry signals have fired yet —
+                SMC strategies are deliberately selective (3-15 trades per month on 15M).
+                Events below are engine lifecycle (compile / pause / resume).
+              </p>
             )}
             {[...actionLog].reverse().map((log: any, i: number) => (
               <div key={i} className="p-2 rounded bg-[#131722] border border-white/[0.03]">
