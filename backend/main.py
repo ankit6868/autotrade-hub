@@ -2496,14 +2496,10 @@ class BollingerBandsStrategy(IStrategy):
     startup_candle_count = 30
     process_only_new_candles = True
 
-    # Tunable parameters
+    # Tunable parameters — EXACTLY match TV's built-in (no extra filters)
     BB_LEN     = 20
     BB_MULT    = 2.0
-    VOL_LEN    = 20         # volume SMA for quality filter
-    SQUEEZE_LKB = 100       # bars to compute median BB width
-    SQUEEZE_PCT = 0.7       # skip when BB width < 70% of median (chop)
-    TP_R       = 1.0        # TP at 1.0× risk distance (close hits midline)
-    SL_BUFFER  = 0.005      # SL = 0.5% beyond opposite-band (rarely hit; mostly exit via stop-and-reverse)
+    SL_BUFFER  = 0.02       # 2% SL fallback (TV has no SL; we need one for engine safety)
 
     def populate_indicators(self, df: pd.DataFrame, metadata: dict) -> pd.DataFrame:
         n_total = len(df)
@@ -2517,16 +2513,11 @@ class BollingerBandsStrategy(IStrategy):
         df["bb_upper"] = (basis + self.BB_MULT * dev).values
         df["bb_lower"] = (basis - self.BB_MULT * dev).values
 
-        # ── Quality filters (added to lift TV's 58% WR + breakeven into
-        #    profitable territory after slippage on real exchange) ──────
-        # 1. Volume filter — only trade on above-average volume bars
-        vol_sma = df["vol"].rolling(self.VOL_LEN, min_periods=5).mean()
-        vol_ok  = df["vol"] > vol_sma
-        # 2. BB squeeze filter — skip low-volatility chop where mean
-        #    reversion fails and oscillates around the bands
-        bb_width = (df["bb_upper"] - df["bb_lower"])
-        bb_width_median = bb_width.rolling(self.SQUEEZE_LKB, min_periods=20).median()
-        not_squeeze = bb_width > self.SQUEEZE_PCT * bb_width_median
+        # PURE TV LOGIC — no extra filters. Earlier versions added volume
+        # and BB-squeeze filters which improved per-trade WR but cut
+        # trade count by ~50% (TV's 207 → our 99) and the missing trades
+        # were actually winners — net P&L dropped. TV's built-in fires
+        # on EVERY crossover, period.
 
         # Crossover detection
         closes      = df["close"].to_numpy()
@@ -2540,17 +2531,16 @@ class BollingerBandsStrategy(IStrategy):
             cross_up_lower   = (closes > bb_lower) & (prev_closes <= prev_lower)
             cross_dn_upper   = (closes < bb_upper) & (prev_closes >= prev_upper)
 
-        long_signal  = cross_up_lower  & ~np.isnan(bb_lower) & vol_ok.to_numpy() & not_squeeze.to_numpy()
-        short_signal = cross_dn_upper  & ~np.isnan(bb_upper) & vol_ok.to_numpy() & not_squeeze.to_numpy()
+        long_signal  = cross_up_lower  & ~np.isnan(bb_lower)
+        short_signal = cross_dn_upper  & ~np.isnan(bb_upper)
 
         # Risk math:
-        # SL = 0.5% beyond the OPPOSITE band (very wide — designed so that
-        #     stop-and-reverse on opposite signal closes most trades,
-        #     not the SL itself. Matches TV's no-SL behaviour while
-        #     keeping the engine's mandatory SL protection for liquidation)
-        # TP = BB midline (basis) — classic mean-reversion target.
-        sl_long  = bb_lower * (1.0 - self.SL_BUFFER)
-        sl_short = bb_upper * (1.0 + self.SL_BUFFER)
+        # SL = 2% from entry (engine-mandatory; TV has no SL)
+        # TP = BB midline (basis) — classic mean-reversion target
+        # Most exits happen via stop-and-reverse on opposite signal,
+        # not SL/TP — matches TV's strategy.entry() OCA behaviour.
+        sl_long  = closes * (1.0 - self.SL_BUFFER)
+        sl_short = closes * (1.0 + self.SL_BUFFER)
         tp_long  = basis.values
         tp_short = basis.values
         df["sl_price"] = np.where(long_signal,  sl_long,

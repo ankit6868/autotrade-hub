@@ -1628,10 +1628,11 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         </div>
 
         {/* ── KuCoin VIP fee tier + maker-only entry mode ────────────────
-            Scalping-critical: fees dominate per-trade cost at 1m. The
-            default VIP0 taker (0.06%) is wrong for any trader with real
-            volume. Maker-only mode cuts entry fees ~3x but adds realistic
-            non-fill simulation (limits don't always get hit). */}
+            Only shown when "Include real trading costs" is ON — these
+            settings have NO effect in TV-equivalent (zero-friction) mode
+            so showing them was confusing the user. When user wants to
+            simulate real exchange execution, this panel exposes the knobs. */}
+        {deductCosts && (
         <div className="mb-5 border border-[#2a3a52] rounded-lg p-3">
           <div className="text-xs font-semibold text-slate-200 mb-3">
             💰 Fees &amp; execution model
@@ -1696,6 +1697,16 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
             </div>
           </div>
         </div>
+        )}
+        {!deductCosts && (
+        <div className="mb-5 border border-emerald-500/30 bg-emerald-500/5 rounded-lg p-3 text-[11px] text-slate-300">
+          <span className="text-emerald-300 font-medium">✓ Pure-strategy mode active.</span>{' '}
+          Fees, slippage, and funding are <b>not</b> deducted — backtest output
+          matches TradingView's default (commission=0, slippage=0). Enable
+          <b className="text-amber-300 mx-1">Include real trading costs</b>
+          above to also configure KuCoin VIP fee tier and maker/taker mode.
+        </div>
+        )}
 
         {/* ── Futures-specific config ─────────────────────────────────── */}
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
