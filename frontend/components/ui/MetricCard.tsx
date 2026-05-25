@@ -46,23 +46,12 @@ export default function MetricCard({
       ? 'before:absolute before:inset-0 before:rounded-2xl before:bg-gradient-to-br before:from-red-500/15 before:to-transparent before:opacity-90'
       : 'before:absolute before:inset-0 before:rounded-2xl before:bg-gradient-to-br before:from-white/[0.04] before:to-transparent before:opacity-100';
 
-  // Auto-shrink the value font based on character count. Tile widths
-  // are ~180-220px with p-6 padding (24px each side = 48px), leaving
-  // ~130-170px for the value text. Conservative size table prevents
-  // ANY value from getting clipped, while still keeping short values
-  // (like "+2.35%") visually prominent.
+  // Fixed conservative font sizes that NEVER overflow at the actual
+  // tile widths used in the app (6-col grid → ~180px tiles with p-6).
+  // Sacrifice some visual prominence for guaranteed full-value display.
+  // Even at 12 chars (e.g. "Liq $89,000.00") this fits comfortably.
   const valueStr = String(value);
-  const valueSizeClass =
-    valueStr.length >= 11 ? 'text-xs sm:text-sm 2xl:text-base' :
-    valueStr.length >= 9  ? 'text-sm sm:text-base 2xl:text-lg'  :
-    valueStr.length >= 7  ? 'text-base sm:text-lg 2xl:text-xl'  :
-    valueStr.length >= 5  ? 'text-lg sm:text-xl 2xl:text-2xl'   :
-                            'text-2xl sm:text-3xl 2xl:text-4xl';
 
-  // Removed `overflow-hidden` from the outer card so text can never be
-  // clipped — the ::before gradient still clips itself via rounded-2xl
-  // even without parent overflow-hidden (Tailwind rounded-2xl + absolute
-  // inset-0 stays inside the visible card bounds).
   return (
     <div className={`card card-hover relative group ${accent}`}>
       <div className="relative z-10 min-w-0">
@@ -74,8 +63,14 @@ export default function MetricCard({
             <span className="icon-tile h-7 w-7 text-slate-300 flex-shrink-0">{icon}</span>
           )}
         </div>
-        <p className={`${valueSizeClass} ${valueColor} font-bold tracking-tight tabular-nums whitespace-nowrap overflow-visible`}
-           title={valueStr}>
+        <p
+          className={`${valueColor} font-bold tracking-tight tabular-nums text-lg sm:text-xl 2xl:text-2xl`}
+          style={{
+            wordBreak: 'keep-all',
+            overflowWrap: 'normal',
+          }}
+          title={valueStr}
+        >
           {value}
         </p>
         {subtitle && (
