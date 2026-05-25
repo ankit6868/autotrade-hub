@@ -323,6 +323,48 @@ function FuturesBacktestInner() {
   // default; ours runs commission-free unless user enables real costs)
   // but signal-bar counts and trade WR should match within a few percent.
   function pineScriptFor(strategyName: string | undefined): string {
+    if (strategyName === 'Bollinger Bands Strategy') {
+      return `//@version=5
+// Bollinger Bands Strategy — port matching TradingView's built-in
+// Mean-reversion: LONG when close crosses BACK ABOVE lower band,
+// SHORT when close crosses BACK BELOW upper band.
+strategy("Bollinger Bands Strategy — port from autotrade-hub",
+     overlay = true,
+     pyramiding = 0,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 90,           // TV default
+     commission_type = strategy.commission.percent,
+     commission_value = 0.0,           // TV default = 0
+     process_orders_on_close = false,
+     calc_on_every_tick = false)
+
+// ── Inputs (match TV's built-in) ──────────────────────────────────────
+length = input.int(20,  "Length", minval = 1)
+mult   = input.float(2.0, "Mult",  minval = 0.001, maxval = 50.0)
+src    = close
+
+// ── Bollinger Bands ───────────────────────────────────────────────────
+basis = ta.sma(src, length)
+dev   = mult * ta.stdev(src, length)
+upper = basis + dev
+lower = basis - dev
+
+// ── Entries: mean-reversion crossover ─────────────────────────────────
+longEntry  = ta.crossover (src, lower)
+shortEntry = ta.crossunder(src, upper)
+
+if longEntry
+    strategy.entry("L", strategy.long)
+if shortEntry
+    strategy.entry("S", strategy.short)
+
+plot(basis, "BB Basis", color = color.orange)
+plot(upper, "BB Upper", color = color.purple)
+plot(lower, "BB Lower", color = color.purple)
+plotshape(longEntry,  title = "Long",  style = shape.triangleup,   location = location.belowbar, color = color.green, size = size.tiny)
+plotshape(shortEntry, title = "Short", style = shape.triangledown, location = location.abovebar, color = color.red,   size = size.tiny)
+`;
+    }
     if (strategyName === 'SMC Strategy (5min)') {
       return `//@version=5
 // SMC Strategy (5min) — exact port of autotrade-hub's SMCScalper5m.
