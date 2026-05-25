@@ -2338,22 +2338,42 @@ def partial_close_futures_position(
     if mode not in ("paper", "live"):
         return {"error": "mode must be 'paper' or 'live'"}
 
-    eng = futures_engine_registry.for_user(user_id)
+    # Search BOTH the main user engine AND all per-bot engines for the
+    # position. The old code only checked the main engine, which fails
+    # when the position belongs to a per-bot engine (the multi-bot
+    # architecture introduced after the main-engine refactor). Without
+    # this, the 25%/50%/75% partial-close buttons on the Positions panel
+    # always errored 'No open position' for any bot-owned position.
+    candidate_engines = []
+    main_eng = futures_engine_registry.for_user(user_id)
+    if main_eng is not None:
+        candidate_engines.append(main_eng)
+    try:
+        for _key, _eng in futures_engine_registry.user_bot_engines(user_id):
+            if _eng is not None:
+                candidate_engines.append(_eng)
+    except Exception:
+        pass
 
-    # Find the open position for this pair.
+    eng = None
     pos = None
     trade_key = None
-    for k, p in eng.positions.items():
-        if p.pair == pair:
-            pos = p
-            trade_key = k
+    for _eng in candidate_engines:
+        # Only consider engines matching the requested mode so a paper
+        # close request can't accidentally hit a live position.
+        if getattr(_eng, "_mode", None) != mode:
+            continue
+        for k, p in _eng.positions.items():
+            if p.pair == pair:
+                eng = _eng
+                pos = p
+                trade_key = k
+                break
+        if pos is not None:
             break
 
     if pos is None:
         return {"error": f"No open position for {pair} in {mode} mode"}
-
-    if mode != eng._mode:
-        return {"error": f"Position is in {eng._mode} mode, request asked for {mode}"}
 
     close_fraction = close_pct / 100.0
     # Use the engine's last-known price as the partial-fill reference.
