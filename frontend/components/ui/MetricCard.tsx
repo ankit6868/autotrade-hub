@@ -46,19 +46,26 @@ export default function MetricCard({
       ? 'before:absolute before:inset-0 before:rounded-2xl before:bg-gradient-to-br before:from-red-500/15 before:to-transparent before:opacity-90'
       : 'before:absolute before:inset-0 before:rounded-2xl before:bg-gradient-to-br before:from-white/[0.04] before:to-transparent before:opacity-100';
 
-  // Auto-shrink the value font when the rendered string is long so
-  // numbers like "$1024.65" don't truncate to "$102..." Previously
-  // `truncate` was clipping anything wider than the tile.
+  // Auto-shrink the value font based on character count. Tile widths
+  // are ~180-220px with p-6 padding (24px each side = 48px), leaving
+  // ~130-170px for the value text. Conservative size table prevents
+  // ANY value from getting clipped, while still keeping short values
+  // (like "+2.35%") visually prominent.
   const valueStr = String(value);
   const valueSizeClass =
-    valueStr.length >= 12 ? 'text-base sm:text-lg 2xl:text-xl' :
-    valueStr.length >= 9  ? 'text-lg sm:text-xl 2xl:text-2xl' :
-    valueStr.length >= 7  ? 'text-xl sm:text-2xl 2xl:text-3xl' :
+    valueStr.length >= 11 ? 'text-xs sm:text-sm 2xl:text-base' :
+    valueStr.length >= 9  ? 'text-sm sm:text-base 2xl:text-lg'  :
+    valueStr.length >= 7  ? 'text-base sm:text-lg 2xl:text-xl'  :
+    valueStr.length >= 5  ? 'text-lg sm:text-xl 2xl:text-2xl'   :
                             'text-2xl sm:text-3xl 2xl:text-4xl';
 
+  // Removed `overflow-hidden` from the outer card so text can never be
+  // clipped — the ::before gradient still clips itself via rounded-2xl
+  // even without parent overflow-hidden (Tailwind rounded-2xl + absolute
+  // inset-0 stays inside the visible card bounds).
   return (
-    <div className={`card card-hover relative overflow-hidden group ${accent}`}>
-      <div className="relative z-10">
+    <div className={`card card-hover relative group ${accent}`}>
+      <div className="relative z-10 min-w-0">
         <div className="flex items-start justify-between gap-2 mb-1.5">
           <p className="text-[11px] xs:text-xs sm:text-sm text-slate-400 uppercase tracking-wider font-medium truncate">
             {title}
@@ -67,7 +74,7 @@ export default function MetricCard({
             <span className="icon-tile h-7 w-7 text-slate-300 flex-shrink-0">{icon}</span>
           )}
         </div>
-        <p className={`${valueSizeClass} ${valueColor} font-bold tracking-tight tabular-nums whitespace-nowrap`}
+        <p className={`${valueSizeClass} ${valueColor} font-bold tracking-tight tabular-nums whitespace-nowrap overflow-visible`}
            title={valueStr}>
           {value}
         </p>
