@@ -106,18 +106,41 @@ def get_candles(symbol_pair: str, tf: str, *, force_refresh: bool = False) -> Op
             return cached["df"]
 
     # Cache miss / stale — fetch fresh.
+    # Use FUTURES endpoint so HTF data matches the bot's actual trading
+    # surface. Earlier this fell back to _fetch_candles which hits the
+    # SPOT endpoint — basis between spot and perp can be 0.5-2% on BTC
+    # and bigger on alts, so the bot's HTF bias / dealing range was
+    # computed off WRONG prices. Affects every paper + live bot.
     try:
-        candles = _fetch_candles(sym_kc, tf)
+        from .native_backtester import load_futures_ohlcv
+        # Fetch the last ~250 bars so EWM(200) has data + buffer.
+        # That's the same warmup the backtester uses for HTF.
+        end_ts   = int(time.time())
+        tf_secs  = _tf_seconds(tf)
+        start_ts = end_ts - 250 * tf_secs
+        df = load_futures_ohlcv(symbol_pair, tf, start_ts, end_ts)
+        if df is None or df.empty:
+            # Final fallback to spot if futures fetch returns nothing
+            # (avoid leaving caller with None on transient outage).
+            candles = _fetch_candles(sym_kc, tf)
+            if not candles:
+                return None
+            df = _build_df(candles)
     except Exception as e:
-        log.warning("mtf_candles: fetch %s/%s failed: %s", sym_kc, tf, e)
-        # Return stale cache if we have one — better than nothing.
-        with _LOCK:
-            cached = _CACHE.get(key)
-            return cached["df"] if cached else None
-    if not candles:
-        return None
+        log.warning("mtf_candles: futures fetch %s/%s failed: %s — trying spot fallback",
+                    sym_kc, tf, e)
+        try:
+            candles = _fetch_candles(sym_kc, tf)
+        except Exception as e2:
+            log.warning("mtf_candles: spot fallback also failed: %s", e2)
+            # Return stale cache if we have one — better than nothing.
+            with _LOCK:
+                cached = _CACHE.get(key)
+                return cached["df"] if cached else None
+        if not candles:
+            return None
+        df = _build_df(candles)
 
-    df = _build_df(candles)
     df = _trim_partial_bar(df, tf)
     with _LOCK:
         _CACHE[key] = {"df": df, "last_fetch_ts": now}
