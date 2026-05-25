@@ -3460,7 +3460,13 @@ def list_futures_bots(
     # Refresh engine list after potential resumes
     bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
 
-    # Count trades from DB per strategy for fallback
+    # Count trades from DB per BOT INSTANCE for fallback.
+    # Bug fix: was counting ALL trades with the same strategy_id, which
+    # double-counts trades from PREVIOUS bot instances of the same
+    # strategy template (e.g. starting/stopping a Bollinger Bands bot
+    # 3 times made each new instance inherit the 3 historical trades).
+    # Now filters to trades that opened AFTER the current instance's
+    # created_at, so each instance's count is unique to its lifetime.
     from sqlalchemy import func
     db_trade_counts = {}
     for i in instances:
@@ -3469,6 +3475,8 @@ def list_futures_bots(
                 Trade.user_id == user_id,
                 Trade.market_type == "futures",
                 Trade.strategy_id == i.strategy_id,
+                Trade.mode == i.mode,
+                Trade.entry_time >= i.created_at,
             )
         ).scalar() or 0
         db_trade_counts[i.id] = count
