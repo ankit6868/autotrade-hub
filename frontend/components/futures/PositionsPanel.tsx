@@ -1106,11 +1106,41 @@ function AssetsTab({ account }: { account: any }) {
 
 function BotsTab({ bots, mainEngine }: { bots: any[]; mainEngine: any }) {
   const hasContent = bots.length > 0 || mainEngine;
+  const [recovering, setRecovering] = useState(false);
   if (!hasContent) {
     return (
-      <div className="text-center py-8">
-        <p className="text-slate-500 text-sm mb-2">No trading algorithms</p>
-        <p className="text-slate-600 text-xs">Create a bot from the Bot panel on the right to start automated trading.</p>
+      <div className="text-center py-8 px-6">
+        <p className="text-slate-500 text-sm mb-2">No trading algorithms in this mode</p>
+        <p className="text-slate-600 text-xs mb-4 leading-relaxed">
+          This shows ACTIVE BOT INSTANCES. If you previously started bots and they're not showing here,
+          they may have been stopped by a backend redeploy. The right sidebar's "My Strategies" section
+          shows TEMPLATES you can deploy — that's different from running bots.
+        </p>
+        <button
+          onClick={async () => {
+            setRecovering(true);
+            try {
+              // Hit /api/futures/bots which has auto-resume baked in for
+              // DB-running but engine-dead bots
+              await api.futures.bots.list(undefined as any); // both modes
+              await new Promise(r => setTimeout(r, 1500));
+              window.location.reload();
+            } catch (e) {
+              alert(`Recovery failed: ${e}`);
+            } finally {
+              setRecovering(false);
+            }
+          }}
+          disabled={recovering}
+          className="text-[11px] font-medium px-3 py-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 disabled:opacity-40"
+          title="Triggers auto-resume for any DB-marked-running bots and refreshes the page."
+        >
+          {recovering ? 'Recovering…' : '🔄 Resume any stopped bots'}
+        </button>
+        <p className="text-[10px] text-slate-600 mt-3 leading-relaxed">
+          Or create a new bot from the <b className="text-slate-400">Bot panel</b> on the right.
+          Pick a strategy → set TF/leverage/risk → click "Start Bot".
+        </p>
       </div>
     );
   }
