@@ -2194,12 +2194,82 @@ async def _background_startup():
         log.error("seed strategies failed: %s", e)
 
     # ── Auto-resume futures bots ───────────────────────────────────────
-    # Each persisted StrategyInstance row gets its engine restarted via
-    # GET /api/futures/bots' built-in resume path (the bot list endpoint
-    # restarts any DB-running but engine-dead bots on first call). No
-    # explicit resume here — keeps startup lean. The futures bot DB rows
-    # carry their own ARM + cooldown + DD config so the engine spins back
-    # up identically to before the restart.
+    # Previously this relied on the user hitting GET /api/futures/bots to
+    # trigger resume. Problem: if the user wasn't on the page when Railway
+    # redeployed (e.g. overnight), bots stayed dead — DB marked them
+    # running but no engine thread existed, so they missed every signal
+    # until the user opened the panel hours later. That's the
+    # \"my bots show 0 trades since yesterday\" complaint.
+    #
+    # Now we proactively spin up every DB-marked-running bot at startup,
+    # without waiting for a request. Restores ARM + overrides + cooldown
+    # config off the same StrategyInstance row used by the API resume path.
+    try:
+        from sqlalchemy import select, desc
+        from backend.models.trade import StrategyInstance
+        from backend.models.user import Config
+        from backend.services.futures_engine import futures_engine_registry
+        from backend.utils.encryption import decrypt
+        with SessionLocal() as db:
+            rows = db.execute(
+                select(StrategyInstance)
+                .where(StrategyInstance.is_running == True)
+                .order_by(desc(StrategyInstance.created_at))
+            ).scalars().all()
+            log.info("auto-resume: found %d bot(s) marked running in DB", len(rows))
+            creds_cache: dict[str, tuple[str,str,str]] = {}
+            for i in rows:
+                if not i.engine_key:
+                    continue
+                eng = futures_engine_registry.for_bot(i.user_id, i.engine_key)
+                if eng.is_running:
+                    continue
+                # Decrypt KuCoin creds once per user — live bots need them,
+                # paper bots ignore them (empty strings are fine).
+                if i.user_id not in creds_cache:
+                    cfg = db.execute(
+                        select(Config).where(Config.user_id == i.user_id).limit(1)
+                    ).scalar_one_or_none()
+                    kk = ks = kp = ""
+                    if cfg:
+                        try:
+                            kk = decrypt(cfg.kucoin_key_enc or "", i.user_id)
+                            ks = decrypt(cfg.kucoin_secret_enc or "", i.user_id)
+                            kp = decrypt(cfg.kucoin_passphrase_enc or "", i.user_id)
+                        except Exception:
+                            pass
+                    creds_cache[i.user_id] = (kk, ks, kp)
+                kk, ks, kp = creds_cache[i.user_id]
+                pairs = [p.strip() for p in (i.pairs or "BTC/USDT").split(",")]
+                try:
+                    eng.start_futures(
+                        strategy_name=i.strategy_name, pairs=pairs,
+                        leverage=i.leverage or 10,
+                        mode=i.mode or "paper",
+                        timeframe=i.timeframe or "15m",
+                        stoploss=i.stoploss or -0.03, wallet=i.wallet or 1000,
+                        take_profit_pct=(i.takeprofit or 0.015) * 100,
+                        max_position_pct=(i.risk_pct or 5.0),
+                        strategy_id=i.strategy_id,
+                        kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
+                        arm_enabled       = bool(getattr(i, "arm_enabled", False) or False),
+                        arm_tp1_close_pct = float(getattr(i, "arm_tp1_close_pct", 50.0) or 50.0),
+                        arm_be_mode       = str(getattr(i, "arm_be_mode", "leverage") or "leverage"),
+                        arm_be_buffer_pct = float(getattr(i, "arm_be_buffer_pct", 1.0) or 1.0),
+                        arm_trail_to_tp1  = bool(getattr(i, "arm_trail_to_tp1", True)
+                                                  if i.arm_trail_to_tp1 is not None else True),
+                        session_start_hr_utc = getattr(i, "session_start_hr_utc", None),
+                        session_end_hr_utc   = getattr(i, "session_end_hr_utc", None),
+                        equal_price_thresh   = getattr(i, "equal_price_thresh", None),
+                    )
+                    log.info("auto-resume: spun up %s (%s) for user %s",
+                             i.strategy_name, i.engine_key, i.user_id)
+                except Exception as resume_exc:
+                    log.warning("auto-resume failed for %s: %s",
+                                i.engine_key, resume_exc)
+    except Exception as auto_resume_exc:
+        log.warning("auto-resume scan failed (bots will resume on first GET /api/futures/bots): %s",
+                    auto_resume_exc)
     log.info("Background startup complete. (futures-only — no spot stack)")
 
 
