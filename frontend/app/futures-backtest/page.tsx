@@ -323,6 +323,180 @@ function FuturesBacktestInner() {
   // default; ours runs commission-free unless user enables real costs)
   // but signal-bar counts and trade WR should match within a few percent.
   function pineScriptFor(strategyName: string | undefined): string {
+    if (strategyName === 'SMC Strategy (5min)') {
+      return `//@version=5
+// SMC Strategy (5min) — exact port of autotrade-hub's SMCScalper5m.
+// Multi-TF: HTF(1h) bias + MTF(15m) dealing range + LTF(5m) execution.
+// 10-gate AND chain: htf_bias + zone + sweep + CHoCH + displacement +
+// EMA confluence + RSI + ADX + ATR vol filter + entry-zone retest.
+// Risk: max(structural SL beyond swept extreme + 5bps, 1.2x ATR), TP=2R.
+strategy("SMC Strategy (5min) — port from autotrade-hub",
+     overlay = true,
+     pyramiding = 0,                  // single position (TV-default)
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 5,           // matches our 5% margin/trade
+     commission_type = strategy.commission.percent,
+     commission_value = 0.06,         // KuCoin Futures taker
+     process_orders_on_close = false, // entry at NEXT bar open
+     calc_on_every_tick = false)
+
+// ── Inputs (match the Python strategy class attrs) ────────────────────
+htfEmaLen    = input.int(200, "HTF (1h) EMA length", minval = 50)
+mtfRangeLkb  = input.int(30,  "MTF (15m) range lookback", minval = 10)
+ltfSwingN    = input.int(5,   "LTF (5m) pivot N", minval = 2)
+sweepLkb     = input.int(20,  "LTF sweep lookback", minval = 5)
+sweepValid   = input.int(8,   "Sweep freshness bars", minval = 1)
+chochValid   = input.int(15,  "CHoCH freshness bars", minval = 1)
+displValid   = input.int(5,   "Displacement freshness bars", minval = 1)
+emaFastLen   = input.int(21,  "EMA fast", minval = 5)
+emaSlowLen   = input.int(50,  "EMA slow", minval = 10)
+rsiLen       = input.int(14,  "RSI length")
+rsiMaxLong   = input.int(72,  "RSI max for long")
+rsiMinShort  = input.int(28,  "RSI min for short")
+adxLen       = input.int(14,  "ADX length")
+adxMin       = input.int(20,  "ADX min")
+displLkb     = input.int(20,  "Displacement avg body lookback")
+displMult    = input.float(1.5, "Displacement body multiplier", step=0.1)
+atrLen       = input.int(14,  "ATR length")
+slAtrMult    = input.float(1.2, "SL = max(structural, ATR × this)", step=0.1)
+maxAtrPct    = input.float(0.008, "Skip if ATR/price > this (vol filter)", step=0.001)
+slBufBps     = input.float(5.0, "SL buffer beyond swept extreme (bps)", step=0.5)
+rMultiple    = input.float(2.0, "R multiple for TP", step=0.1)
+maxSlPct     = input.float(0.01, "Max SL distance (fraction)", step=0.001)
+zoneEntryPct = input.float(0.012, "Entry zone band (within X of swept ext)", step=0.001)
+sessStart    = input.int(0,  "Session start hour UTC", minval=0, maxval=23)
+sessEnd      = input.int(23, "Session end hour UTC", minval=0, maxval=23)
+
+// ── HTF (1h) EMA200 bias — uses request.security ──────────────────────
+htf1hClose = request.security(syminfo.tickerid, "60", close, lookahead = barmerge.lookahead_off)
+htf1hEma   = ta.ema(htf1hClose, htfEmaLen)
+isBull = htf1hClose > htf1hEma
+isBear = htf1hClose < htf1hEma
+
+// ── MTF (15m) dealing range → discount/premium midpoint ───────────────
+mtf15High = request.security(syminfo.tickerid, "15", high, lookahead = barmerge.lookahead_off)
+mtf15Low  = request.security(syminfo.tickerid, "15", low,  lookahead = barmerge.lookahead_off)
+rangeHi = ta.highest(mtf15High, mtfRangeLkb)
+rangeLo = ta.lowest (mtf15Low,  mtfRangeLkb)
+rangeMd = (rangeHi + rangeLo) / 2.0
+inDiscount = close < rangeMd
+inPremium  = close > rangeMd
+
+// ── LTF (5m) liquidity sweep ──────────────────────────────────────────
+recentLow  = ta.lowest (low [1], sweepLkb)
+recentHigh = ta.highest(high[1], sweepLkb)
+sweepLong  = low  < recentLow  and close > recentLow
+sweepShort = high > recentHigh and close < recentHigh
+// Rolling-window flag: sweep within last N bars
+recentSweepLong  = ta.barssince(sweepLong)  <= sweepValid - 1
+recentSweepShort = ta.barssince(sweepShort) <= sweepValid - 1
+// Carry the swept level forward over the recency window
+var float sweptLowFfill  = na
+var float sweptHighFfill = na
+var int   sweptLowAge    = 999
+var int   sweptHighAge   = 999
+if sweepLong
+    sweptLowFfill := recentLow
+    sweptLowAge := 0
+else
+    sweptLowAge := sweptLowAge + 1
+    if sweptLowAge > sweepValid
+        sweptLowFfill := na
+if sweepShort
+    sweptHighFfill := recentHigh
+    sweptHighAge := 0
+else
+    sweptHighAge := sweptHighAge + 1
+    if sweptHighAge > sweepValid
+        sweptHighFfill := na
+
+// ── LTF (5m) CHoCH via pivot break ────────────────────────────────────
+ph = ta.pivothigh(high, ltfSwingN, ltfSwingN)
+pl = ta.pivotlow (low,  ltfSwingN, ltfSwingN)
+var float lastPh = na
+var float lastPl = na
+if not na(ph)
+    lastPh := ph
+if not na(pl)
+    lastPl := pl
+chochUp = not na(lastPh) and close > lastPh and close[1] <= lastPh
+chochDn = not na(lastPl) and close < lastPl and close[1] >= lastPl
+recentChochUp = ta.barssince(chochUp) <= chochValid - 1
+recentChochDn = ta.barssince(chochDn) <= chochValid - 1
+
+// ── LTF (5m) Displacement (large body candle) ─────────────────────────
+body    = math.abs(close - open)
+avgBody = ta.sma(body, displLkb)
+displUp = (close > open) and (body > displMult * avgBody)
+displDn = (close < open) and (body > displMult * avgBody)
+recentDisplUp = ta.barssince(displUp) <= displValid - 1
+recentDisplDn = ta.barssince(displDn) <= displValid - 1
+
+// ── LTF (5m) EMA21/50 confluence (SOFT, NaN-tolerant in Python) ───────
+emaFast = ta.ema(close, emaFastLen)
+emaSlow = ta.ema(close, emaSlowLen)
+emaAlignLong  = emaFast >= emaSlow * 0.998
+emaAlignShort = emaFast <= emaSlow * 1.002
+
+// ── Quality gates: RSI + ADX ──────────────────────────────────────────
+rsiVal = ta.rsi(close, rsiLen)
+rsiOkLong  = rsiVal < rsiMaxLong
+rsiOkShort = rsiVal > rsiMinShort
+[plusDi, minusDi, adxVal] = ta.dmi(adxLen, adxLen)
+adxOk = adxVal >= adxMin
+
+// ── ATR + volatility filter ───────────────────────────────────────────
+atrVal  = ta.atr(atrLen)
+atrPct  = atrVal / math.max(close, 0.000001)
+volOk   = atrPct <= maxAtrPct
+
+// ── Session filter (UTC hours) ────────────────────────────────────────
+hourUtc = hour(time, "UTC")
+inSession = hourUtc >= sessStart and hourUtc <= sessEnd
+
+// ── Entry-zone: price within X of the swept extreme (retest) ──────────
+inLongZone  = not na(sweptLowFfill)  and math.abs(close - sweptLowFfill)  / close < zoneEntryPct
+inShortZone = not na(sweptHighFfill) and math.abs(close - sweptHighFfill) / close < zoneEntryPct
+
+// ── FINAL ENTRY (10-gate AND chain — matches Python exactly) ──────────
+longSetup = isBull and inDiscount and recentSweepLong and recentChochUp and recentDisplUp
+        and inLongZone and emaAlignLong and rsiOkLong and adxOk and volOk and inSession
+shortSetup = isBear and inPremium and recentSweepShort and recentChochDn and recentDisplDn
+        and inShortZone and emaAlignShort and rsiOkShort and adxOk and volOk and inSession
+
+// ── Risk: SL = max(structural, 1.2× ATR) ──────────────────────────────
+buf = slBufBps / 10000.0
+slLongStruct  = not na(sweptLowFfill)  ? sweptLowFfill  * (1.0 - buf) : (not na(lastPl) ? lastPl * (1.0 - buf) : na)
+slShortStruct = not na(sweptHighFfill) ? sweptHighFfill * (1.0 + buf) : (not na(lastPh) ? lastPh * (1.0 + buf) : na)
+slLongAtr  = close - atrVal * slAtrMult
+slShortAtr = close + atrVal * slAtrMult
+slLong  = na(slLongStruct)  ? slLongAtr  : math.min(slLongStruct,  slLongAtr)
+slShort = na(slShortStruct) ? slShortAtr : math.max(slShortStruct, slShortAtr)
+riskLong  = close - slLong
+riskShort = slShort - close
+maxDist   = close * maxSlPct
+badLong   = riskLong  <= 0 or riskLong  > maxDist or na(slLong)
+badShort  = riskShort <= 0 or riskShort > maxDist or na(slShort)
+tpLong  = close + rMultiple * riskLong
+tpShort = close - rMultiple * riskShort
+
+longEntry  = longSetup  and not badLong
+shortEntry = shortSetup and not badShort
+
+if longEntry
+    strategy.entry("L", strategy.long)
+    strategy.exit("L-exit", "L", stop = slLong,  limit = tpLong)
+if shortEntry
+    strategy.entry("S", strategy.short)
+    strategy.exit("S-exit", "S", stop = slShort, limit = tpShort)
+
+plot(emaFast, "EMA21",  color = color.orange)
+plot(emaSlow, "EMA50",  color = color.purple)
+plot(rangeMd, "MTF Range Mid", color = color.gray, style = plot.style_linebr)
+plotshape(longSetup,  title = "Long Setup",  style = shape.triangleup,   location = location.belowbar, color = color.green, size = size.tiny)
+plotshape(shortSetup, title = "Short Setup", style = shape.triangledown, location = location.abovebar, color = color.red,   size = size.tiny)
+`;
+    }
     if (strategyName === 'SMCStrategyTV') {
       return `//@version=5
 strategy("SMCStrategyTV — port from autotrade-hub",
