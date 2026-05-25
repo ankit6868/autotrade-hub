@@ -89,6 +89,12 @@ SLIPPAGE_BPS_LIQ   = 15   # 15 bps on liquidation — books are typically thin
 SLIPPAGE_BPS_ENTRY = 2    # 2 bps on entry (market fill)
 SLIPPAGE_BPS_FLIP  = 5    # 5 bps when force-closing on new signal (market exit)
 
+# When the user UNCHECKS "Include real trading costs" they want a PURE
+# strategy backtest — matches TradingView's default (commission=0,
+# slippage=0). The same constants apply when deduct_real_costs=False;
+# they get overridden to 0 in run_futures_backtest. This way the user
+# sees the strategy's THEORETICAL edge without execution drag.
+
 # Fallback funding fee per settlement if KuCoin's history endpoint
 # returns no data for the range. Real applied rate comes from
 # /api/v1/contract/funding-rates per settlement.
@@ -429,6 +435,21 @@ def run_futures_backtest(
 
     Returns a dict matching the shape expected by the frontend results component.
     """
+    # ── ZERO-FRICTION MODE for pure-strategy backtests ──────────────────
+    # When the user UNCHECKS "Include real trading costs" they want a
+    # backtest that matches TradingView's default (commission=0, slippage=0)
+    # so they can see the strategy's theoretical edge without execution
+    # drag eating profits. This shadows the module-level SLIPPAGE_BPS_*
+    # constants for the duration of THIS backtest call only.
+    global SLIPPAGE_BPS_STOP, SLIPPAGE_BPS_TP, SLIPPAGE_BPS_LIQ, SLIPPAGE_BPS_ENTRY, SLIPPAGE_BPS_FLIP
+    _saved_slip = (SLIPPAGE_BPS_STOP, SLIPPAGE_BPS_TP, SLIPPAGE_BPS_LIQ, SLIPPAGE_BPS_ENTRY, SLIPPAGE_BPS_FLIP)
+    if not deduct_real_costs:
+        SLIPPAGE_BPS_STOP = 0
+        SLIPPAGE_BPS_TP   = 0
+        SLIPPAGE_BPS_LIQ  = 0
+        SLIPPAGE_BPS_ENTRY = 0
+        SLIPPAGE_BPS_FLIP = 0
+
     # ── Parse timerange ───────────────────────────────────────────────────
     try:
         parts = timerange.split("-")
@@ -1786,6 +1807,10 @@ def run_futures_backtest(
     )
     net_ev_per_trade_pct = ev_per_trade_pct - cost_drag_per_trade_pct
     is_negative_ev_after_costs = net_ev_per_trade_pct < 0
+
+    # Restore slippage constants so other backtests (with deduct_real_costs=True)
+    # still see the realistic execution drag.
+    SLIPPAGE_BPS_STOP, SLIPPAGE_BPS_TP, SLIPPAGE_BPS_LIQ, SLIPPAGE_BPS_ENTRY, SLIPPAGE_BPS_FLIP = _saved_slip
 
     return {
         "metrics": {

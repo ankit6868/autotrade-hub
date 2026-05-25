@@ -1418,15 +1418,15 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
             />
             <span>Include real trading costs</span>
             <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-slate-700/60 text-slate-300"
-                  title="When ON: KuCoin taker (0.06%) / maker (0.02%) fees + funding (every 8h at real KuCoin rates) deduct from the simulated balance. Trade P&L reflects what you'd actually net on KuCoin. When OFF (default): pure strategy P&L — only price action × leverage, no fees/funding deducted."
+                  title="When ON: KuCoin taker (0.06%) / maker (0.02%) fees + funding + 2-15 bps slippage deduct from balance. Production-grade simulation. When OFF: TradingView-equivalent pure backtest — ZERO fees, ZERO slippage, ZERO funding. Shows the strategy's theoretical edge in isolation."
             >
-              {deductCosts ? 'realistic mode' : 'pure P&L mode'}
+              {deductCosts ? 'realistic mode' : 'TV-equivalent (0% fees, 0 slippage)'}
             </span>
           </label>
           <span className="text-[11px] text-slate-400 leading-snug max-w-lg">
             {deductCosts
-              ? <>Trade P&L is <b className="text-amber-300">net of KuCoin fees + funding</b> — production-grade.</>
-              : <>Trade P&L is <b className="text-emerald-300">pure price action × leverage</b> — no fees or funding deducted.</>}
+              ? <>Trade P&L is <b className="text-amber-300">net of KuCoin fees + funding + slippage</b> — production-grade.</>
+              : <>Trade P&L is <b className="text-emerald-300">pure price action × leverage</b> — matches TradingView's default (commission=0, slippage=0).</>}
           </span>
         </div>
 
