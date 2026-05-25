@@ -2373,7 +2373,57 @@ def partial_close_futures_position(
             break
 
     if pos is None:
-        return {"error": f"No open position for {pair} in {mode} mode"}
+        # ── Orphan-DB fallback ─────────────────────────────────────────
+        # Position not in any running engine, but might be an ORPHAN row
+        # in the trades table (engine was killed/restarted leaving the
+        # Trade row marked status='open' with no engine to manage it).
+        # Partial-close needs an engine to track remaining_pct, so the
+        # only sensible recovery for an orphan is a FULL close. Convert
+        # the request into a force-close + tell the user.
+        orphan = db.execute(
+            select(Trade).where(
+                Trade.user_id    == user_id,
+                Trade.pair       == pair,
+                Trade.market_type == "futures",
+                Trade.mode       == mode,
+                Trade.status     == "open",
+            ).order_by(desc(Trade.entry_time)).limit(1)
+        ).scalar_one_or_none()
+        if orphan is None:
+            return {"error": f"No open position for {pair} in {mode} mode"}
+        # Force-close the orphan at the current mark price.
+        from datetime import timezone as _tz
+        exit_p = _futures_ticker_price(pair) or orphan.entry_price
+        now_dt = datetime.now(_tz.utc)
+        orphan.exit_price = exit_p
+        orphan.exit_time  = now_dt
+        orphan.exit_reason = "manual_partial_close_orphan_full"
+        orphan.status     = "closed"
+        side = getattr(orphan, "side", "long") or "long"
+        if side == "short":
+            orphan.profit_pct = round(
+                (orphan.entry_price - exit_p) / orphan.entry_price * 100 * (orphan.leverage or 1), 4
+            )
+        else:
+            orphan.profit_pct = round(
+                (exit_p - orphan.entry_price) / orphan.entry_price * 100 * (orphan.leverage or 1), 4
+            )
+        orphan.profit_abs = round((orphan.amount or 0) * orphan.profit_pct / 100, 4)
+        db.commit()
+        return {
+            "ok": True,
+            "pair": pair,
+            "mode": mode,
+            "fill_price": exit_p,
+            "close_pct": 100.0,
+            "warning": (
+                "Position was orphaned (no engine tracking it). Partial "
+                "close requires an engine, so we did a FULL close at "
+                f"{exit_p:.2f} instead. Realised P&L "
+                f"{orphan.profit_pct:+.2f}% / {orphan.profit_abs:+.2f} USDT."
+            ),
+            "trade_id": orphan.id,
+        }
 
     close_fraction = close_pct / 100.0
     # Use the engine's last-known price as the partial-fill reference.
