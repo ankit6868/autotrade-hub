@@ -222,6 +222,22 @@ body > * {
     border-color: rgba(27, 111, 245, 0.55);
     box-shadow: 0 0 0 3px rgba(27, 111, 245, 0.20);
   }
+  /* Native <select> options inherit the OS theme by default (white on
+     light OS, ugly against our dark app). Force dark to match. Chrome
+     and Firefox respect this; Safari ignores it (Safari users see OS
+     default — acceptable degradation). */
+  select.input option,
+  select.input optgroup {
+    background-color: #0d1424;
+    color: #e2e8f0;
+  }
+  select.input option:hover,
+  select.input option:focus,
+  select.input option:active,
+  select.input option:checked {
+    background-color: #1a2236;
+    color: #ffffff;
+  }
 
   .label {
     @apply block text-sm font-medium text-slate-300 mb-1.5;

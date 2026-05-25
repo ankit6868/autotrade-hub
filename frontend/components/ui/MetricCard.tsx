@@ -46,6 +46,16 @@ export default function MetricCard({
       ? 'before:absolute before:inset-0 before:rounded-2xl before:bg-gradient-to-br before:from-red-500/15 before:to-transparent before:opacity-90'
       : 'before:absolute before:inset-0 before:rounded-2xl before:bg-gradient-to-br before:from-white/[0.04] before:to-transparent before:opacity-100';
 
+  // Auto-shrink the value font when the rendered string is long so
+  // numbers like "$1024.65" don't truncate to "$102..." Previously
+  // `truncate` was clipping anything wider than the tile.
+  const valueStr = String(value);
+  const valueSizeClass =
+    valueStr.length >= 12 ? 'text-base sm:text-lg 2xl:text-xl' :
+    valueStr.length >= 9  ? 'text-lg sm:text-xl 2xl:text-2xl' :
+    valueStr.length >= 7  ? 'text-xl sm:text-2xl 2xl:text-3xl' :
+                            'text-2xl sm:text-3xl 2xl:text-4xl';
+
   return (
     <div className={`card card-hover relative overflow-hidden group ${accent}`}>
       <div className="relative z-10">
@@ -57,7 +67,10 @@ export default function MetricCard({
             <span className="icon-tile h-7 w-7 text-slate-300 flex-shrink-0">{icon}</span>
           )}
         </div>
-        <p className={`stat-lg ${valueColor} truncate`}>{value}</p>
+        <p className={`${valueSizeClass} ${valueColor} font-bold tracking-tight tabular-nums whitespace-nowrap`}
+           title={valueStr}>
+          {value}
+        </p>
         {subtitle && (
           <p className="text-[11px] sm:text-xs text-slate-500 mt-1 truncate">{subtitle}</p>
         )}
