@@ -71,13 +71,15 @@ function FuturesBacktestInner() {
   const [leverage,        setLeverage]        = useState(10);
   const [stoploss,        setStoploss]        = useState(1.5);   // SL ≤ TP for positive R:R
   const [takeProfit,      setTakeProfit]      = useState(3.0);   // TP should be ≥ SL (2:1 R:R)
-  // Position model is locked to Single (TradingView default pyramiding=0).
-  // User explicitly asked for TV-only behaviour — "no need of concurrent
-  // trade, just follow like the trading view, that's the correct approach".
-  // Concurrent mode was the previous default but caused clustered same-day
-  // trades that didn't match how a TV strategy would actually execute.
-  // Kept as a constant (not state) so it can't be accidentally changed
-  // via React DevTools or future UI regressions.
+  // Position model: 'single' (TV-default stop-and-reverse) or 'hedge'
+  // (LONG + SHORT coexist independently per pair). Hedge mode is
+  // strongly recommended for mean-reversion strategies (BB) where
+  // stop-and-reverse exits were killing trades mid-range. SMC and
+  // trend-following strategies typically want 'single'.
+  const [positionMode, setPositionMode] = useState<'single' | 'hedge'>('single');
+  // max_concurrent_positions is locked to 1 (per direction) in both
+  // modes. In hedge mode this means 1 long + 1 short = 2 positions max.
+  // In single mode it means 1 total position with stop-and-reverse.
   const pyramiding = 1;
   // Margin per trade as % of current balance. 5% = $50 margin on $1000
   // balance — gives you 20 losing trades before wipeout at 100% SL hit
@@ -872,6 +874,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         stoploss_pct:     stoploss,
         take_profit_pct:  takeProfit,
         max_concurrent_positions: pyramiding,
+        position_mode: positionMode,
         risk_per_trade_pct: riskPerTrade,
         // sltpMode === 'slider' → tell backend to ignore strategy's
         // structural levels and use slider values instead.
@@ -1765,20 +1768,39 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
           </div>
         </div>
 
-        {/* ── Position model: locked to Single (TV mode) ───────────────────
-            Per user feedback, this is no longer a choice — every backtest
-            runs in TradingView-parity single-position mode. Shown as a
-            static label so users still see what's happening without being
-            able to break it by picking concurrent. */}
+        {/* ── Position model: Single (TV) | Hedge ─────────────────────────
+            Single = TV-default stop-and-reverse (opposite signal force-
+            closes the existing position).
+            Hedge = LONG + SHORT can coexist on same pair, each runs to
+            its own SL/TP/ARM. Recommended for mean-reversion strategies
+            (Bollinger Bands) where stop-and-reverse was killing trades
+            mid-range before TP1 could hit. */}
         <div className="mb-5 flex items-center gap-2 flex-wrap text-[12px]">
           <span className="text-slate-500 uppercase tracking-wider text-[10px]">Position model:</span>
-          <span className="font-semibold text-sky-300">Single position (TradingView mode)</span>
-          <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-sky-500/15 text-sky-300 border border-sky-500/30"
-                title="One open position per direction at a time. Same-direction signals while in trade are skipped (counted under 'in-trade'). Opposite-direction signals always open a new trade. Matches TradingView's strategy.entry behaviour with pyramiding=0.">
-            TV parity
-          </span>
-          <span className="text-slate-400 leading-snug">
-            · while in a position, new same-direction signals are skipped (TV-default behaviour)
+          <div className="inline-flex rounded-lg border border-[#2a3a52] overflow-hidden">
+            <button type="button"
+              onClick={() => setPositionMode('single')}
+              className={`px-3 py-1.5 text-[11px] font-medium transition-colors ${
+                positionMode === 'single'
+                  ? 'bg-sky-500/30 text-sky-200'
+                  : 'bg-[#1a2236] text-slate-400 hover:text-white'}`}
+              title="TV-default: one position per pair. Opposite signal closes existing AND opens new (stop-and-reverse).">
+              Single (TV mode)
+            </button>
+            <button type="button"
+              onClick={() => setPositionMode('hedge')}
+              className={`px-3 py-1.5 text-[11px] font-medium transition-colors border-l border-[#2a3a52] ${
+                positionMode === 'hedge'
+                  ? 'bg-purple-500/30 text-purple-200'
+                  : 'bg-[#1a2236] text-slate-400 hover:text-white'}`}
+              title="LONG + SHORT both open simultaneously on same pair. No stop-and-reverse. Each position runs to its own SL/TP/ARM. Best for mean-reversion strategies (BB) where stop-and-reverse was killing trades.">
+              Hedge (LONG + SHORT)
+            </button>
+          </div>
+          <span className="text-slate-400 leading-snug max-w-md">
+            {positionMode === 'hedge'
+              ? '· both directions coexist — opposite signals open NEW positions, not stop-and-reverse'
+              : '· while in a position, new same-direction signals are skipped (TV-default behaviour)'}
           </span>
         </div>
 

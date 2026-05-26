@@ -357,6 +357,19 @@ def run_futures_backtest(
                                         # earlier "concurrent" mode (∞) inflated trade counts
                                         # because the same condition firing 4 bars in a row
                                         # would open 4 separate positions instead of 1.
+    position_mode: str = "single",      # "single" | "hedge" | "concurrent"
+                                        # - "single": TV-default. One position per pair.
+                                        #   Opposite signal triggers stop-and-reverse
+                                        #   (close existing + open new, both at bar open).
+                                        # - "hedge": Up to 1 LONG + 1 SHORT open per pair
+                                        #   simultaneously. No stop-and-reverse — each
+                                        #   position runs to its own SL/TP/ARM independently.
+                                        #   Useful for mean-reversion strategies (BB) where
+                                        #   opposite signals fire often and stop-and-reverse
+                                        #   was killing trades mid-range. NOT TV-compatible
+                                        #   (Pine doesn't model this).
+                                        # - "concurrent": legacy pyramiding mode. Use
+                                        #   max_concurrent_positions to set the cap.
     deduct_real_costs: bool = False,    # When True, funding fees + KuCoin taker/maker fees
                                         # are deducted from the simulated balance — gives a
                                         # production-grade net P&L. When False (default), the
@@ -808,7 +821,11 @@ def run_futures_backtest(
             # the pending entries — that way the SHORT exits at bar_o and
             # the new LONG opens at bar_o (same price for both fills), and
             # the SHORT doesn't get a chance to hit its own SL on this bar.
-            if max_concurrent_positions == 1 and open_positions and pending_entries:
+            # HEDGE MODE: skip stop-and-reverse entirely. Both directions
+            # coexist on the same pair — each position runs independently
+            # to its own SL/TP/ARM. Stop-and-reverse only applies in
+            # "single" mode (the TV-default behaviour).
+            if position_mode == "single" and max_concurrent_positions == 1 and open_positions and pending_entries:
                 pending_dirs = {pe[0] for pe in pending_entries}
                 still_open_after_reversal: list[dict] = []
                 for opp in open_positions:
@@ -1646,8 +1663,10 @@ def run_futures_backtest(
             "taker": round(taker_fee_rate * 100, 5),
         }
         data_diagnostics[pair]["max_concurrent_positions"]  = max_concurrent_positions
+        data_diagnostics[pair]["position_mode"]              = position_mode
         data_diagnostics[pair]["position_model"] = (
-            "single" if max_concurrent_positions == 1
+            "hedge (long + short independent)" if position_mode == "hedge"
+            else "single" if max_concurrent_positions == 1
             else f"pyramiding_{max_concurrent_positions}"
         )
         data_diagnostics[pair]["trades_still_open_at_end"]  = trades_still_open_at_end

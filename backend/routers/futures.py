@@ -364,6 +364,14 @@ def run_futures_backtest(
     # the two extremes, but we still accept arbitrary integers for
     # power-users hitting the API directly.
     max_concurrent   = max(1, min(1000, int(req.get("max_concurrent_positions", 999))))
+    # Position mode: "single" (TV-default stop-and-reverse) | "hedge"
+    # (LONG + SHORT can coexist on same pair, no stop-and-reverse) |
+    # "concurrent" (legacy pyramiding stack same-direction). Hedge mode
+    # is the recommended choice for mean-reversion strategies like
+    # Bollinger Bands where stop-and-reverse was killing trades mid-range.
+    position_mode    = str(req.get("position_mode", "single")).lower()
+    if position_mode not in ("single", "hedge", "concurrent"):
+        position_mode = "single"
     # Margin (risk) per trade as fraction of current balance. Default 5%
     # = $50 margin on $1000 balance. Clamped 1..50% (above 50% is
     # essentially "all-in" and would liquidate the account on the first
@@ -448,6 +456,7 @@ def run_futures_backtest(
         take_profit_pct  = take_profit_pct,
         generated_code   = generated_code,
         max_concurrent_positions = max_concurrent,
+        position_mode    = position_mode,
         risk_per_trade   = risk_per_trade,
         force_slider_sltp = force_slider,
         deduct_real_costs = deduct_costs,
