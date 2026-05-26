@@ -3065,12 +3065,9 @@ def _seed_builtin_strategies(db):
                            "trade count, ±3pp WR. With leverage and proper risk "
                            "management can yield 15-25% monthly returns.",
             "code": _BBANDS_STRATEGY_CODE,
-            # Was -0.02 / 0.01 (INVERTED — TP < SL = guaranteed losses).
-            # Fixed to 1.1% SL / 2.5% TP = 2.27:1 R:R which is profitable
-            # at this strategy's ~51% WR. User can override via sliders.
-            "stoploss": -0.011,
-            "take_profit": 0.025,
-            "leverage": 5,
+            "stoploss": -0.02,
+            "take_profit": 0.01,
+            "leverage": 10,
             "timeframe": "5m",
         },
         {
