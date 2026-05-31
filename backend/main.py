@@ -3173,72 +3173,127 @@ async def _background_startup():
     # without waiting for a request. Restores ARM + overrides + cooldown
     # config off the same StrategyInstance row used by the API resume path.
     try:
-        from sqlalchemy import select, desc
-        from backend.models.trade import StrategyInstance
-        from backend.models.user import Config
-        from backend.services.futures_engine import futures_engine_registry
-        from backend.utils.encryption import decrypt
-        with SessionLocal() as db:
-            rows = db.execute(
-                select(StrategyInstance)
-                .where(StrategyInstance.is_running == True)
-                .order_by(desc(StrategyInstance.created_at))
-            ).scalars().all()
-            log.info("auto-resume: found %d bot(s) marked running in DB", len(rows))
-            creds_cache: dict[str, tuple[str,str,str]] = {}
-            for i in rows:
-                if not i.engine_key:
-                    continue
-                eng = futures_engine_registry.for_bot(i.user_id, i.engine_key)
-                if eng.is_running:
-                    continue
-                # Decrypt KuCoin creds once per user — live bots need them,
-                # paper bots ignore them (empty strings are fine).
-                if i.user_id not in creds_cache:
-                    cfg = db.execute(
-                        select(Config).where(Config.user_id == i.user_id).limit(1)
-                    ).scalar_one_or_none()
-                    kk = ks = kp = ""
-                    if cfg:
-                        try:
-                            kk = decrypt(cfg.kucoin_key_enc or "", i.user_id)
-                            ks = decrypt(cfg.kucoin_secret_enc or "", i.user_id)
-                            kp = decrypt(cfg.kucoin_passphrase_enc or "", i.user_id)
-                        except Exception:
-                            pass
-                    creds_cache[i.user_id] = (kk, ks, kp)
-                kk, ks, kp = creds_cache[i.user_id]
-                pairs = [p.strip() for p in (i.pairs or "BTC/USDT").split(",")]
-                try:
-                    eng.start_futures(
-                        strategy_name=i.strategy_name, pairs=pairs,
-                        leverage=i.leverage or 10,
-                        mode=i.mode or "paper",
-                        timeframe=i.timeframe or "15m",
-                        stoploss=i.stoploss or -0.03, wallet=i.wallet or 1000,
-                        take_profit_pct=(i.takeprofit or 0.015) * 100,
-                        max_position_pct=(i.risk_pct or 5.0),
-                        strategy_id=i.strategy_id,
-                        kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
-                        arm_enabled       = bool(getattr(i, "arm_enabled", False) or False),
-                        arm_tp1_close_pct = float(getattr(i, "arm_tp1_close_pct", 50.0) or 50.0),
-                        arm_be_mode       = str(getattr(i, "arm_be_mode", "leverage") or "leverage"),
-                        arm_be_buffer_pct = float(getattr(i, "arm_be_buffer_pct", 1.0) or 1.0),
-                        arm_trail_to_tp1  = bool(getattr(i, "arm_trail_to_tp1", True)
-                                                  if i.arm_trail_to_tp1 is not None else True),
-                        session_start_hr_utc = getattr(i, "session_start_hr_utc", None),
-                        session_end_hr_utc   = getattr(i, "session_end_hr_utc", None),
-                        equal_price_thresh   = getattr(i, "equal_price_thresh", None),
-                    )
-                    log.info("auto-resume: spun up %s (%s) for user %s",
-                             i.strategy_name, i.engine_key, i.user_id)
-                except Exception as resume_exc:
-                    log.warning("auto-resume failed for %s: %s",
-                                i.engine_key, resume_exc)
+        _resume_dead_bots(log_label="auto-resume")
     except Exception as auto_resume_exc:
         log.warning("auto-resume scan failed (bots will resume on first GET /api/futures/bots): %s",
                     auto_resume_exc)
     log.info("Background startup complete. (futures-only — no spot stack)")
+
+
+def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
+    """Scan DB for is_running=True bots and resume any whose engine thread
+    has died. Shared by:
+      • _background_startup (one-shot at boot)
+      • _bot_watchdog       (periodic, every 60s while the app is up)
+
+    Returns the number of bots actually resumed (useful for logging).
+
+    The auto-resume in /api/futures/bots is still kept so a user pulling
+    the panel right after a freshly-deployed instance gets an instant
+    resume even before the watchdog's first tick.
+    """
+    import logging
+    log = logging.getLogger(log_label)
+    from sqlalchemy import select, desc
+    from backend.models.trade import StrategyInstance
+    from backend.models.user import Config
+    from backend.services.futures_engine import futures_engine_registry
+    from backend.utils.encryption import decrypt
+
+    resumed = 0
+    with SessionLocal() as db:
+        rows = db.execute(
+            select(StrategyInstance)
+            .where(StrategyInstance.is_running == True)  # noqa: E712
+            .order_by(desc(StrategyInstance.created_at))
+        ).scalars().all()
+        if not rows:
+            return 0
+        creds_cache: dict[str, tuple[str, str, str]] = {}
+        for i in rows:
+            if not i.engine_key:
+                continue
+            eng = futures_engine_registry.for_bot(i.user_id, i.engine_key)
+            if eng.is_running:
+                continue
+            # Decrypt KuCoin creds once per user — live bots need them,
+            # paper bots ignore them (empty strings are fine).
+            if i.user_id not in creds_cache:
+                cfg = db.execute(
+                    select(Config).where(Config.user_id == i.user_id).limit(1)
+                ).scalar_one_or_none()
+                kk = ks = kp = ""
+                if cfg:
+                    try:
+                        kk = decrypt(cfg.kucoin_key_enc or "", i.user_id)
+                        ks = decrypt(cfg.kucoin_secret_enc or "", i.user_id)
+                        kp = decrypt(cfg.kucoin_passphrase_enc or "", i.user_id)
+                    except Exception:
+                        pass
+                creds_cache[i.user_id] = (kk, ks, kp)
+            kk, ks, kp = creds_cache[i.user_id]
+            pairs = [p.strip() for p in (i.pairs or "BTC/USDT").split(",")]
+            try:
+                eng.start_futures(
+                    strategy_name=i.strategy_name, pairs=pairs,
+                    leverage=i.leverage or 10,
+                    mode=i.mode or "paper",
+                    timeframe=i.timeframe or "15m",
+                    stoploss=i.stoploss or -0.03, wallet=i.wallet or 1000,
+                    take_profit_pct=(i.takeprofit or 0.015) * 100,
+                    max_position_pct=(i.risk_pct or 5.0),
+                    strategy_id=i.strategy_id,
+                    kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
+                    arm_enabled       = bool(getattr(i, "arm_enabled", False) or False),
+                    arm_tp1_close_pct = float(getattr(i, "arm_tp1_close_pct", 50.0) or 50.0),
+                    arm_be_mode       = str(getattr(i, "arm_be_mode", "leverage") or "leverage"),
+                    arm_be_buffer_pct = float(getattr(i, "arm_be_buffer_pct", 1.0) or 1.0),
+                    arm_trail_to_tp1  = bool(getattr(i, "arm_trail_to_tp1", True)
+                                              if i.arm_trail_to_tp1 is not None else True),
+                    session_start_hr_utc = getattr(i, "session_start_hr_utc", None),
+                    session_end_hr_utc   = getattr(i, "session_end_hr_utc", None),
+                    equal_price_thresh   = getattr(i, "equal_price_thresh", None),
+                )
+                resumed += 1
+                log.info("%s: spun up %s (%s) for user %s",
+                         log_label, i.strategy_name, i.engine_key, i.user_id)
+            except Exception as resume_exc:
+                log.warning("%s: resume failed for %s: %s",
+                            log_label, i.engine_key, resume_exc)
+        if resumed:
+            log.info("%s: resumed %d dead bot(s)", log_label, resumed)
+    return resumed
+
+
+async def _bot_watchdog():
+    """Periodic watchdog — revives engines that died between user UI polls.
+
+    Without this, a bot that crashes (or whose process was the source of
+    a Railway redeploy + the user wasn't on the panel) stays dead until
+    someone hits GET /api/futures/bots. For a 24/7 trading app that's
+    not acceptable — the user expects "start once, run forever."
+
+    Fires every 60s. Cheap: typically 0 bots to resume, just a quick DB
+    scan. If a bot was auto-stopped via the compile-failure breaker its
+    is_running flag is now False (see _persist_auto_stop), so we don't
+    keep resurrecting broken strategies in a hot loop.
+    """
+    import logging
+    log = logging.getLogger("watchdog")
+    INTERVAL = 60.0
+    # Wait one full interval before the first scan so _background_startup's
+    # initial auto-resume gets a chance to finish first (avoids double-start
+    # races where both try to spin up the same engine).
+    await asyncio.sleep(INTERVAL)
+    log.info("Bot watchdog started — checking every %ds", int(INTERVAL))
+    while True:
+        try:
+            n = _resume_dead_bots(log_label="watchdog")
+            if n > 0:
+                log.info("Watchdog tick resumed %d bot(s)", n)
+        except Exception as exc:
+            log.warning("Watchdog tick failed: %s", exc)
+        await asyncio.sleep(INTERVAL)
 
 
 @asynccontextmanager
@@ -3246,6 +3301,11 @@ async def lifespan(app: FastAPI):
     # Fire heavy work in the background — Uvicorn starts serving immediately,
     # so the Railway healthcheck passes in <3 seconds instead of ~40 seconds.
     asyncio.create_task(_background_startup())
+    # Watchdog: revives dead bot engines every 60s while the app is up.
+    # Required for true 24/7 operation — the user expects "start once,
+    # run forever" and the old code only resumed on backend boot or when
+    # the UI polled the bots endpoint.
+    asyncio.create_task(_bot_watchdog())
     yield
     # Stop all futures bot engines on shutdown so KuCoin gets a clean
     # disconnect instead of phantom orders timing out.

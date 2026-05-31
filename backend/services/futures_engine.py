@@ -609,6 +609,43 @@ class FuturesEngine(NativeTradingEngine):
         if len(self.action_log) > self.MAX_ACTION_LOG:
             self.action_log = self.action_log[-self.MAX_ACTION_LOG:]
 
+    def _persist_auto_stop(self, *, reason: str) -> None:
+        """Flip StrategyInstance.is_running=False in the DB so the
+        watchdog stops resurrecting this engine. Used when the bot
+        decides to permanently exit (e.g. compile-failure circuit breaker
+        hit its threshold). Best-effort — if the DB write fails the
+        engine still stops in memory; the watchdog will resurrect once,
+        the next compile fails immediately, and we'll try the persist
+        again. Safe to call multiple times.
+        """
+        try:
+            from backend.models.database import SessionLocal
+            from backend.models.trade import StrategyInstance
+            from sqlalchemy import update as sql_update
+            with SessionLocal() as db:
+                # We don't have the StrategyInstance.id on the engine, but
+                # the (user_id, strategy_id, is_running=True) tuple uniquely
+                # identifies the row — at most one such record per running
+                # bot. Falling back to user_id+strategy_name covers the rare
+                # case where strategy_id is missing (legacy templates).
+                where_clauses = [
+                    StrategyInstance.user_id == self.user_id,
+                    StrategyInstance.is_running == True,  # noqa: E712
+                ]
+                if self._strategy_id is not None:
+                    where_clauses.append(StrategyInstance.strategy_id == self._strategy_id)
+                else:
+                    where_clauses.append(StrategyInstance.strategy_name == self._strategy)
+                db.execute(
+                    sql_update(StrategyInstance)
+                    .where(*where_clauses)
+                    .values(is_running=False)
+                )
+                db.commit()
+                log.info("[%s] Persisted auto-stop (reason=%s) to DB", self.user_id, reason)
+        except Exception as exc:
+            log.warning("[%s] Failed to persist auto-stop to DB: %s", self.user_id, exc)
+
     # ── Start ───────────────────────────────────────────────────────────
 
     def start_futures(
@@ -1201,6 +1238,11 @@ class FuturesEngine(NativeTradingEngine):
                     _notifier.notify_compile_failed(
                         self.user_id, strategy=self._strategy, error=str(e),
                     )
+                    # Persist the auto-stop to DB. Without this, the
+                    # watchdog (in main.py) would keep resurrecting a
+                    # bot whose strategy can never compile — infinite
+                    # crash/restart loop with notification spam.
+                    self._persist_auto_stop(reason="compile_failures")
                     # Tell the run loop to exit — bot transitions to !is_running
                     # which the UI surfaces in the active-bots list.
                     self._stop_evt.set()
