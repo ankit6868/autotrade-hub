@@ -2982,7 +2982,7 @@ def futures_account(
 
     # Paper mode: skip KuCoin, return paper engine balance directly
     if mode == "paper":
-        return _paper_account(eng)
+        return _paper_account(eng, user_id)
 
     # Live mode: try to fetch live data from KuCoin Futures account
     cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
@@ -3038,33 +3038,348 @@ def futures_account(
             log.warning("Failed to fetch KuCoin lead trading account for %s: %s", user_id, exc)
 
     # Fallback: paper account from engine state (no KuCoin keys configured)
-    return _paper_account(eng)
+    return _paper_account(eng, user_id)
 
 
-def _paper_account(eng):
-    """Return paper engine balance as account overview."""
-    open_positions = eng.get_open_positions() if eng.is_running else []
-    total_unrealized = sum(p.get("unrealized_pnl", 0) for p in open_positions)
-    total_margin = sum(p.get("stake", 0) for p in open_positions)
+def _paper_account(eng, user_id: str = None):
+    """Return AGGREGATED paper account overview across all user paper engines.
+
+    Was previously eng.balance from MAIN engine only — but the user's
+    bots each run on their OWN per-bot engine with independent balance.
+    So when a bot made trades, the bot engine balance updated but the
+    main engine stayed at the default $1000 → user saw 'balance never
+    updates'.
+
+    Fix: sum balance + open-position metrics across:
+      • main user engine (used by manual orders)
+      • every per-bot engine in paper mode
+    Live bots are excluded from this aggregate so paper/live don't mix.
+    """
+    engines = []
+    if eng is not None and getattr(eng, "_mode", "paper") == "paper":
+        engines.append(eng)
+    # Add all per-bot PAPER engines for this user
+    if user_id:
+        try:
+            for _key, _bot_eng in futures_engine_registry.user_bot_engines(user_id):
+                if _bot_eng is None or _bot_eng is eng:
+                    continue
+                if getattr(_bot_eng, "_mode", "paper") == "paper":
+                    engines.append(_bot_eng)
+        except Exception:
+            pass
+
+    total_balance = 0.0
+    total_unrealized = 0.0
+    total_margin = 0.0
+    total_open_positions = 0
+    for _e in engines:
+        try:
+            total_balance += float(_e.balance or 0)
+            if _e.is_running:
+                pos_list = _e.get_open_positions()
+                total_unrealized += sum(p.get("unrealized_pnl", 0) for p in pos_list)
+                total_margin += sum(p.get("stake", 0) for p in pos_list)
+                total_open_positions += len(pos_list)
+        except Exception:
+            continue
 
     return {
         "mode": "paper",
-        "source": "paper_engine",
-        "balance": round(eng.balance, 4),
-        "margin_balance": round(eng.balance, 4),
-        "equity": round(eng.balance + total_unrealized, 4),
-        "available_balance": round(eng.balance, 4),
-        "available_margin": round(eng.balance - total_margin, 4),
+        "source": "paper_engine_aggregate",
+        "engine_count": len(engines),
+        "balance": round(total_balance, 4),
+        "margin_balance": round(total_balance, 4),
+        "equity": round(total_balance + total_unrealized, 4),
+        "available_balance": round(total_balance, 4),
+        "available_margin": round(total_balance - total_margin, 4),
         "unrealized_pnl": round(total_unrealized, 4),
         "used_margin": round(total_margin, 4),
         "order_margin": 0,
         "margin_mode": "Isolated",
         "frozen_funds": 0,
-        "risk_ratio": round(total_margin / max(eng.balance, 0.01) * 100, 2) if total_margin > 0 else 0,
-        "max_withdraw": round(eng.balance, 4),
-        "position_count": len(open_positions),
+        "risk_ratio": round(total_margin / max(total_balance, 0.01) * 100, 2) if total_margin > 0 else 0,
+        "max_withdraw": round(total_balance, 4),
+        "position_count": total_open_positions,
         "currency": "USDT",
     }
+
+
+# ── Paper Account Funding ────────────────────────────────────────────────
+
+@router.post("/paper/add-funds")
+def paper_add_funds(
+    req: dict,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Add (or reset) virtual USDT on the user's MAIN paper engine.
+
+    Body: { "amount": float, "reset": bool (optional, default false) }
+    """
+    amount = req.get("amount")
+    reset  = bool(req.get("reset", False))
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return {"error": "amount must be a number"}
+    if not (0.01 <= amount <= 1_000_000):
+        return {"error": "amount must be between 0.01 and 1,000,000 USDT"}
+
+    eng = futures_engine_registry.for_user(user_id)
+    if eng is None:
+        return {"error": "no engine for user"}
+    if getattr(eng, "_mode", "paper") == "live":
+        return {"error": "Cannot add virtual funds to a LIVE engine. "
+                         "Deposit on KuCoin directly for live trading."}
+
+    with eng._lock:
+        prev_balance = float(eng.balance or 0)
+        new_balance = amount if reset else prev_balance + amount
+        eng.balance = new_balance
+        try:
+            eng._log_action("paper_funds_added",
+                f"{'RESET' if reset else 'ADDED'} {amount:.2f} USDT "
+                f"(was {prev_balance:.2f}, now {new_balance:.2f})",
+                amount=amount, reset=reset)
+        except Exception:
+            pass
+    return {"ok": True, "mode": "paper",
+            "action": "reset" if reset else "add",
+            "prev_balance": round(prev_balance, 4),
+            "new_balance":  round(new_balance, 4)}
+
+
+@router.post("/paper/bot/{bot_id}/add-funds")
+def paper_bot_add_funds(
+    bot_id: int,
+    req: dict,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Add (or reset) virtual USDT on a specific paper BOT engine."""
+    amount = req.get("amount")
+    reset  = bool(req.get("reset", False))
+    try:
+        amount = float(amount)
+    except (TypeError, ValueError):
+        return {"error": "amount must be a number"}
+    if not (0.01 <= amount <= 1_000_000):
+        return {"error": "amount must be between 0.01 and 1,000,000 USDT"}
+
+    instance = db.execute(
+        select(StrategyInstance).where(
+            StrategyInstance.id == bot_id, StrategyInstance.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if instance is None or instance.mode != "paper":
+        return {"error": "Paper bot not found"}
+    if not instance.engine_key:
+        return {"error": "Bot has no engine_key"}
+    eng = futures_engine_registry.for_bot(user_id, instance.engine_key)
+    if eng is None:
+        return {"error": "Engine not running — start the bot first"}
+
+    with eng._lock:
+        prev_balance = float(eng.balance or 0)
+        new_balance  = amount if reset else prev_balance + amount
+        eng.balance  = new_balance
+        instance.wallet = new_balance
+        db.commit()
+        try:
+            eng._log_action("paper_funds_added",
+                f"{'RESET' if reset else 'ADDED'} {amount:.2f} USDT "
+                f"(was {prev_balance:.2f}, now {new_balance:.2f})",
+                amount=amount, reset=reset)
+        except Exception:
+            pass
+    return {"ok": True, "bot_id": bot_id, "mode": "paper",
+            "action": "reset" if reset else "add",
+            "prev_balance": round(prev_balance, 4),
+            "new_balance":  round(new_balance, 4)}
+
+
+# ── Position Margin Management (Add / Reduce Margin) ─────────────────────
+
+def _find_position_across_engines(user_id: str, pair: str, mode: str):
+    """Search main engine + all per-bot engines (mode-filtered) for an
+    open position on `pair`. Returns (engine, position, trade_key) or
+    (None, None, None) if not found.
+    """
+    candidates = []
+    main_eng = futures_engine_registry.for_user(user_id)
+    if main_eng is not None and getattr(main_eng, "_mode", None) == mode:
+        candidates.append(main_eng)
+    try:
+        for _key, _bot_eng in futures_engine_registry.user_bot_engines(user_id):
+            if _bot_eng is not None and getattr(_bot_eng, "_mode", None) == mode:
+                candidates.append(_bot_eng)
+    except Exception:
+        pass
+    for _e in candidates:
+        for _k, p in _e.positions.items():
+            if p.pair == pair:
+                return _e, p, _k
+    return None, None, None
+
+
+def _recompute_liq_price(pos, prev_margin: float, new_margin: float):
+    """Recompute the position's liquidation_price based on the new
+    effective leverage after a margin add/reduce."""
+    try:
+        old_lev = float(getattr(pos, "leverage", 1) or 1)
+        new_eff_lev = (prev_margin * old_lev) / max(new_margin, 0.01)
+        if pos.direction == "long":
+            pos.liquidation_price = pos.entry * (1.0 - 1.0 / max(new_eff_lev, 1.0))
+        else:
+            pos.liquidation_price = pos.entry * (1.0 + 1.0 / max(new_eff_lev, 1.0))
+        return old_lev, new_eff_lev
+    except Exception:
+        return None, None
+
+
+@router.post("/position/add-margin")
+def position_add_margin(
+    req: dict,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Add margin to an open futures position (paper or live)."""
+    pair   = req.get("pair")
+    mode   = req.get("mode", "paper")
+    try:
+        amount = float(req.get("amount"))
+    except (TypeError, ValueError):
+        return {"error": "amount must be a number"}
+    if not pair:
+        return {"error": "pair is required"}
+    if mode not in ("paper", "live"):
+        return {"error": "mode must be 'paper' or 'live'"}
+    if not (0.01 <= amount <= 1_000_000):
+        return {"error": "amount must be between 0.01 and 1,000,000 USDT"}
+
+    eng, pos, _ = _find_position_across_engines(user_id, pair, mode)
+    if pos is None:
+        return {"error": f"No open position for {pair} in {mode} mode"}
+
+    if mode == "paper":
+        with eng._lock:
+            if eng.balance < amount:
+                return {"error": f"Insufficient paper balance "
+                                 f"({eng.balance:.2f} USDT)"}
+            prev_margin = float(getattr(pos, "size", 0) or 0)
+            new_margin = prev_margin + amount
+            pos.size = new_margin
+            eng.balance -= amount
+            old_lev, new_eff_lev = _recompute_liq_price(pos, prev_margin, new_margin)
+            try:
+                eng._log_action("margin_added",
+                    f"Added {amount:.2f} USDT to {pair} {pos.direction} "
+                    f"(margin {prev_margin:.2f} → {new_margin:.2f})",
+                    pair=pair, amount=amount,
+                    prev_margin=prev_margin, new_margin=new_margin)
+            except Exception:
+                pass
+        return {"ok": True, "mode": "paper", "pair": pair,
+                "amount_added": amount,
+                "prev_margin": round(prev_margin, 4),
+                "new_margin": round(new_margin, 4),
+                "prev_leverage": round(old_lev or 0, 2),
+                "new_effective_leverage": round(new_eff_lev or 0, 2),
+                "new_liquidation_price": round(pos.liquidation_price or 0, 4),
+                "remaining_balance": round(eng.balance, 4)}
+
+    # LIVE: call KuCoin Futures /api/v1/position/margin-deposit
+    try:
+        from backend.services.native_trading_engine import _kucoin_post_signed
+        from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+        from backend.services.kucoin_futures_client import normalize_futures_symbol
+        from backend.utils.encryption import decrypt
+        cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+        if not cfg:
+            return {"error": "No KuCoin credentials configured"}
+        kk = decrypt(cfg.kucoin_key_enc or "", user_id)
+        ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
+        kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+        if not (kk and ks and kp):
+            return {"error": "KuCoin credentials missing"}
+        sym = normalize_futures_symbol(pair)
+        biz_no = f"add-margin-{user_id[-8:]}-{int(_time.time() * 1000)}"
+        result = _kucoin_post_signed(
+            "/api/v1/position/margin-deposit", kk, ks, kp,
+            body={"symbol": sym, "margin": amount, "bizNo": biz_no},
+            base_url=KUCOIN_FUTURES_BASE,
+        )
+        if str(result.get("code")) != "200000":
+            return {"error": f"KuCoin rejected: {result.get('msg', 'unknown')}"}
+        # Mirror locally so engine PNL math stays correct
+        try:
+            with eng._lock:
+                prev_margin = float(getattr(pos, "size", 0) or 0)
+                pos.size = prev_margin + amount
+        except Exception:
+            pass
+        return {"ok": True, "mode": "live", "pair": pair,
+                "amount_added": amount,
+                "kucoin_response": result.get("data")}
+    except Exception as exc:
+        return {"error": f"KuCoin margin deposit failed: {exc}"}
+
+
+@router.post("/position/reduce-margin")
+def position_reduce_margin(
+    req: dict,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Withdraw margin from an open paper futures position.
+    Live reduce-margin is more complex (requires risk-limit-level change
+    on KuCoin) — for now use partial-close for live positions instead.
+    """
+    pair = req.get("pair")
+    mode = req.get("mode", "paper")
+    try:
+        amount = float(req.get("amount"))
+    except (TypeError, ValueError):
+        return {"error": "amount must be a number"}
+    if not pair:
+        return {"error": "pair is required"}
+    if mode != "paper":
+        return {"error": "Reduce margin on LIVE positions is not yet "
+                         "supported. Use partial-close instead."}
+    if not (0.01 <= amount <= 1_000_000):
+        return {"error": "amount must be between 0.01 and 1,000,000 USDT"}
+
+    eng, pos, _ = _find_position_across_engines(user_id, pair, "paper")
+    if pos is None:
+        return {"error": f"No open paper position for {pair}"}
+
+    with eng._lock:
+        prev_margin = float(getattr(pos, "size", 0) or 0)
+        min_margin = max(0.5, prev_margin * 0.10)
+        if (prev_margin - amount) < min_margin:
+            return {"error": f"Cannot reduce below {min_margin:.2f} USDT "
+                             f"(10% safety floor)"}
+        new_margin = prev_margin - amount
+        pos.size = new_margin
+        eng.balance += amount
+        old_lev, new_eff_lev = _recompute_liq_price(pos, prev_margin, new_margin)
+        try:
+            eng._log_action("margin_reduced",
+                f"Reduced {amount:.2f} USDT from {pair} {pos.direction} "
+                f"(margin {prev_margin:.2f} → {new_margin:.2f})",
+                pair=pair, amount=amount,
+                prev_margin=prev_margin, new_margin=new_margin)
+        except Exception:
+            pass
+    return {"ok": True, "mode": "paper", "pair": pair,
+            "amount_reduced": amount,
+            "prev_margin": round(prev_margin, 4),
+            "new_margin": round(new_margin, 4),
+            "prev_leverage": round(old_lev or 0, 2),
+            "new_effective_leverage": round(new_eff_lev or 0, 2),
+            "new_liquidation_price": round(pos.liquidation_price or 0, 4),
+            "new_balance": round(eng.balance, 4)}
 
 
 # ── Position TP/SL Management ────────────────────────────────────────────
