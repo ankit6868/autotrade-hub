@@ -2820,8 +2820,14 @@ class BollingerBandsStrategy(IStrategy):
         # not SL/TP — matches TV's strategy.entry() OCA behaviour.
         sl_long  = closes * (1.0 - self.SL_BUFFER)
         sl_short = closes * (1.0 + self.SL_BUFFER)
-        tp_long  = basis.values
-        tp_short = basis.values
+        # TP at OPPOSITE band — full BB-width target. Previous version
+        # used basis.values (midline) which gave ~1:1 RR — barely above
+        # breakeven at 51% WR (the user's live bot showed TP=76681 vs
+        # SL=76262 = 0.27% TP vs 0.27% SL = 1.04:1 = losing math after
+        # fees). Opposite-band TP gives 2-3× the R, matching the
+        # mean-reversion thesis (price oscillates between bands).
+        tp_long  = df["bb_upper"].values
+        tp_short = df["bb_lower"].values
         df["sl_price"] = np.where(long_signal,  sl_long,
                           np.where(short_signal, sl_short, np.nan))
         df["tp_price"] = np.where(long_signal,  tp_long,

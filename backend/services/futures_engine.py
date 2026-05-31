@@ -528,24 +528,28 @@ class FuturesEngine(NativeTradingEngine):
 
         Lookup order (fastest first):
           1. `self._last_prices[pair]` — populated by KuCoin WS bullet
-             feed when available. In sub-second range.
+             feed when available. ONLY trusted if < 15s old, otherwise
+             treated as stale (previous bug: cache was returned forever
+             without TTL → all paper trades had entry=exit=cached_value
+             → PNL=0 stop_and_reverse loop).
           2. `mtf_candles.get_candles(pair, "1m")` — the cached 1m bar
              feed. Last bar's close is the freshest <1 min price we have.
           3. KuCoin REST `/api/v1/ticker` (futures public endpoint) —
              always works but adds ~150ms latency. Used as final fallback.
 
         Returns None on total failure so the caller skips this tick.
-        Logging is best-effort — we want the engine to keep running even
-        when a single price fetch glitches.
-
-        Was missing before — the tick loop referenced `_get_live_price`
-        but no method existed, raising AttributeError on every signal
-        scan. Visible to users as `engine error: 'FuturesEngine' object
-        has no attribute '_get_live_price'` in the bot panel.
         """
-        # 1. WS cache (populated elsewhere when a kline tick arrives)
+        import time as _time
+        now = _time.time()
+
+        # 1. WS cache (only if fresh — within 15s).
+        # In LIVE mode the KuCoin WS feed pushes price updates to
+        # `_last_prices`, so values stay <1s fresh. In PAPER mode (no WS),
+        # the cache is only populated by THIS method's fallback paths
+        # below, so we need to invalidate it ourselves after the TTL.
         cached = self._last_prices.get(pair)
-        if cached is not None and cached > 0:
+        cached_ts = self._last_prices_ts.get(pair, 0.0)
+        if cached is not None and cached > 0 and (now - cached_ts) < 15.0:
             return float(cached)
 
         # 2. 1m bar feed cache — the freshest minute-bar close.
@@ -555,9 +559,8 @@ class FuturesEngine(NativeTradingEngine):
             if df1m is not None and len(df1m) > 0:
                 price = float(df1m["close"].iloc[-1])
                 if price > 0:
-                    # Keep the cache fresh for the next tick (no need to
-                    # re-fetch within the same minute).
                     self._last_prices[pair] = price
+                    self._last_prices_ts[pair] = now
                     return price
         except Exception as _bar_exc:
             log.debug("[%s] _get_live_price 1m fetch failed for %s: %s",
@@ -580,11 +583,19 @@ class FuturesEngine(NativeTradingEngine):
                 price = float(price_str)
                 if price > 0:
                     self._last_prices[pair] = price
+                    self._last_prices_ts[pair] = now
                     return price
         except Exception as _rest_exc:
             log.debug("[%s] _get_live_price REST fallback failed for %s: %s",
                       self.user_id, pair, _rest_exc)
 
+        # Final fallback: return the stale cached value if we have one
+        # (better than None — engine continues tick, but PNL math will
+        # be inaccurate). Logged so debugging shows it.
+        if cached is not None and cached > 0:
+            log.debug("[%s] _get_live_price all fetches failed, returning STALE cache %.2f (age=%.1fs)",
+                      self.user_id, cached, now - cached_ts)
+            return float(cached)
         return None
 
     def _log_action(self, action_type: str, detail: str, **extra):

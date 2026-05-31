@@ -519,6 +519,12 @@ class NativeTradingEngine:
         self.last_action: str              = ""
         self.started_at: Optional[datetime] = None
         self._last_prices: dict[str, float] = {}  # pair → last known live price
+        # Companion dict: epoch-seconds when each _last_prices entry was
+        # set. Used by FuturesEngine._get_live_price for a 15s TTL —
+        # without this, paper-mode bots return a stuck price forever
+        # (no WS feed to refresh it) → entry=exit=cached_value → PNL=0
+        # stop_and_reverse loop visible to users in Trade History.
+        self._last_prices_ts: dict[str, float] = {}
 
     # ── public API ──────────────────────────────────────────────────────
 

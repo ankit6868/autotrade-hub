@@ -1559,7 +1559,16 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
 
   const actionLog = data.action_log || [];
   const openPositions = data.open_positions_detail || [];
-  const closedTrades = data.closed_trades_detail || data.trades || [];
+  // closedTrades: prefer the engine's in-memory list (most recent, full
+  // detail), but fall back to the DB-fetched `trades` array when the
+  // engine list is empty (engine restarted, lost in-memory history).
+  // Previously was `data.closed_trades_detail || data.trades || []`
+  // — but empty array `[]` is TRUTHY in JS, so the fallback never
+  // triggered. User saw card "Trades: 13" but inner tab "Trades (0)"
+  // because the engine's empty array was preferred over the DB list.
+  const engineTrades = data.closed_trades_detail || [];
+  const dbTrades = data.trades || [];
+  const closedTrades = engineTrades.length > 0 ? engineTrades : dbTrades;
 
   return (
     <div className="flex flex-col h-full">

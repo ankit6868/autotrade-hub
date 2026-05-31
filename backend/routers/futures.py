@@ -4015,7 +4015,11 @@ def futures_bot_performance(
     if not instance:
         return {"error": "Bot not found"}
 
-    # Only fetch trades belonging to THIS bot's strategy, created after the bot was started
+    # Only fetch trades belonging to THIS bot's strategy + mode, created
+    # after the bot was started. The mode filter is CRITICAL — without it,
+    # a paper bot's performance panel would also include any LIVE trades
+    # made by other instances of the same strategy template (and vice
+    # versa) → counts and PNL leak across paper/live boundary.
     trade_filter = [
         Trade.user_id == user_id, Trade.market_type == "futures",
         Trade.status == "closed",
@@ -4024,6 +4028,8 @@ def futures_bot_performance(
         trade_filter.append(Trade.strategy_id == instance.strategy_id)
     if instance.created_at:
         trade_filter.append(Trade.entry_time >= instance.created_at)
+    if instance.mode in ("paper", "live"):
+        trade_filter.append(Trade.mode == instance.mode)
 
     trades = db.execute(
         select(Trade).where(*trade_filter).order_by(desc(Trade.exit_time)).limit(100)
