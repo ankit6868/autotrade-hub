@@ -32,7 +32,12 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
       api.futures.bots.list(mode).catch(() => ({ bots: [] })),
       api.futures.status().catch(() => null),
     ]);
-    setPositions(pos.trades || []);
+    // Show ONLY manual positions in the Positions tab. Bot-owned positions
+    // appear in the Bots tab — keeping them separate prevents the user
+    // from accidentally closing a bot trade from the manual UI and stops
+    // the paper-bot → manual-paper leak the user flagged.
+    const allTrades = pos.trades || [];
+    setPositions(allTrades.filter((t: any) => (t.source ?? 'manual') === 'manual'));
     setOpenOrders(orders.orders || []);
     setTradeHistory(history.trades || []);
     if (acct) setAccount(acct);

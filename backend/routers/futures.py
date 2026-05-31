@@ -921,18 +921,23 @@ def futures_open_positions(
 
     user_eng = futures_engine_registry.for_user(user_id)
     # Collect every futures engine owned by this user — the manual-trading
-    # `for_user` engine PLUS one per running bot. Without this, bot
-    # positions only show up via the DB fallback and miss the rich live
-    # ARM state (tp1_price, tp1_hit, partial_exits, trailed_to_tp1, etc.).
-    bot_engines = [e for _, e in futures_engine_registry.user_bot_engines(user_id)]
-    all_engines = [user_eng] + bot_engines
+    # `for_user` engine PLUS one per running bot. Each engine is tagged with
+    # its source ('manual' for the user engine, 'bot' + bot_key for bot
+    # engines) so the frontend Positions tab can show ONLY manual entries
+    # and bot positions live exclusively in the Bots tab. Without this tag,
+    # a paper bot trade was leaking into the manual Positions tab.
+    bot_engines_kv = futures_engine_registry.user_bot_engines(user_id)
+    engines_with_meta = [
+        ("manual", None, user_eng),
+        *[("bot", bot_key, e) for bot_key, e in bot_engines_kv],
+    ]
 
     # Throttled live-position reconciliation: catches manual closes done
     # via the KuCoin UI, missed liquidations, and post-fill risk-engine
     # rollbacks. Bot engines run this inside _run_loop already; the
     # user-shared manual-trade engine doesn't have a loop, so we trigger
     # it here on every UI poll (capped to once per 30s per engine).
-    for _eng in all_engines:
+    for _src, _key, _eng in engines_with_meta:
         try:
             _eng.maybe_reconcile_live_positions(throttle_secs=30)
         except Exception:
@@ -941,16 +946,18 @@ def futures_open_positions(
     # Build positions list filtered by mode.
     # Each position may have a _mode tag (manual trades), otherwise use engine mode.
     native_positions = []
-    seen_keys: set[tuple[str, str, str]] = set()    # de-dupe across engines
-    for eng in all_engines:
+    seen_keys: set[tuple[str, str, str, str]] = set()    # de-dupe across engines
+    for _src, _bot_key, eng in engines_with_meta:
         with eng._lock:
             for p in eng.positions.values():
                 pos_mode = getattr(p, "_mode", eng._mode or "paper")
                 if mode is not None and pos_mode != mode:
                     continue
-                # De-dupe by (pair, direction, mode) — two engines could
-                # theoretically claim the same position via reconciliation race.
-                k = (p.pair, p.direction, pos_mode)
+                # De-dupe by (pair, direction, mode, source). Manual and
+                # bot positions on the same pair/direction are distinct —
+                # the bot engine owns its position independently of any
+                # manual order the user placed.
+                k = (p.pair, p.direction, pos_mode, _src + (_bot_key or ""))
                 if k in seen_keys:
                     continue
                 seen_keys.add(k)
@@ -967,6 +974,8 @@ def futures_open_positions(
                 "leverage":          lev,
                 "liquidation_price": round(liq, 6) if liq else None,
                 "_pos_mode":         pos_mode,
+                "_source":           _src,
+                "bot_key":           _bot_key,
                 "exchange_order_id": getattr(p, "exchange_order_id", None),
                 # UX#14: Phase-3 ARM state surfaced so the UI shows
                 # partial-close history per position.
@@ -1017,6 +1026,12 @@ def futures_open_positions(
             "exchange_order_id": p.get("exchange_order_id"),
             "market_type":       "futures",
             "unrealized_pnl":    round(lev_pnl, 4),
+            # NEW: 'manual' vs 'bot' tag so the UI can keep the
+            # Positions tab clean (manual only) and route bot
+            # positions to the Bots tab. Without this, paper bot
+            # entries were polluting the manual Positions table.
+            "source":            p.get("_source", "manual"),
+            "bot_key":           p.get("bot_key"),
         })
 
     # DB open futures positions
@@ -1062,6 +1077,10 @@ def futures_open_positions(
             "mode":              t.mode,
             "market_type":       "futures",
             "unrealized_pnl":    unreal,
+            # DB-fallback trades have no engine-side bot tag,
+            # so they're treated as manual.
+            "source":            "manual",
+            "bot_key":           None,
         })
 
     merged = native_trades + [t for t in db_trades if t["pair"] not in pairs_in_native]
@@ -1117,6 +1136,12 @@ def futures_open_positions(
                         "market_type":       "futures",
                         "unrealized_pnl":    round(unreal, 4),
                         "_source":           "kucoin",
+                        # KuCoin-only positions (placed outside the app
+                        # or filled limit orders) — surface them as
+                        # manual so they still appear in the Positions
+                        # tab and never get hidden.
+                        "source":            "manual",
+                        "bot_key":           None,
                     })
         except Exception as e:
             log.warning("[%s] KuCoin position reconcile failed: %s", user_id, e)

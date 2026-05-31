@@ -156,12 +156,28 @@ async def test_kucoin(
         )
         if str(data.get("code")) == "200000":
             acct = data.get("data", {}) or {}
+            # Response shape MUST match what setup/page.tsx reads —
+            # previous version returned `balance`/`equity`/`source`
+            # but the UI reads `account_type`/`usdt_balance`/
+            # `available_balance`/`position_margin`/`unrealised_pnl`.
+            # Mismatch caused "Connected! Spot USDT Balance: NaN"
+            # because Number(undefined).toFixed(2) === 'NaN' AND the
+            # UI's account_type check fell to the spot-branch fallback.
             return {
-                "connected": True,
-                "balance":   float(acct.get("availableBalance", 0) or 0),
-                "equity":    float(acct.get("accountEquity", 0) or 0),
-                "currency":  "USDT",
-                "source":    "futures",
+                "connected":         True,
+                "account_type":      "futures",
+                "currency":          "USDT",
+                "usdt_balance":      float(acct.get("accountEquity",   0) or 0),
+                "available_balance": float(acct.get("availableBalance",0) or 0),
+                "position_margin":   float(acct.get("positionMargin",  0) or 0),
+                "order_margin":      float(acct.get("orderMargin",     0) or 0),
+                "unrealised_pnl":    float(acct.get("unrealisedPNL",   0) or 0),
+                "frozen_funds":      float(acct.get("frozenFunds",     0) or 0),
+                # Kept for backwards-compat with any callers expecting
+                # the old field names.
+                "balance":           float(acct.get("availableBalance",0) or 0),
+                "equity":            float(acct.get("accountEquity",   0) or 0),
+                "source":            "futures",
             }
         return {"connected": False, "error": data.get("msg", "Unknown KuCoin error")}
     except Exception as e:
