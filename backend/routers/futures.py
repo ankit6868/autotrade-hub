@@ -3164,65 +3164,62 @@ def futures_account(
 
 
 def _paper_account(eng, user_id: str = None):
-    """Return AGGREGATED paper account overview across all user paper engines.
+    """Return paper account overview for the user's MAIN paper engine only.
 
-    Was previously eng.balance from MAIN engine only — but the user's
-    bots each run on their OWN per-bot engine with independent balance.
-    So when a bot made trades, the bot engine balance updated but the
-    main engine stayed at the default $1000 → user saw 'balance never
-    updates'.
+    Earlier version summed balance across the main engine + every per-bot
+    engine to fix "main balance never updates when a bot trades". But that
+    caused a worse bug: each new bot's $1000 starter wallet was added to
+    the global Asset Overview the moment the bot was created, so the
+    user's "Lead Trading Connected • X USDT" number kept inflating with
+    every bot they spun up.
 
-    Fix: sum balance + open-position metrics across:
-      • main user engine (used by manual orders)
-      • every per-bot engine in paper mode
-    Live bots are excluded from this aggregate so paper/live don't mix.
+    Now: Asset Overview = manual-trading wallet only (one source of truth).
+    Per-bot wallets + P&L live on each bot card (where they belong). If a
+    user wants to take the main wallet up after bot trades drained it,
+    /paper/add-funds is the explicit knob for that.
     """
-    engines = []
-    if eng is not None and getattr(eng, "_mode", "paper") == "paper":
-        engines.append(eng)
-    # Add all per-bot PAPER engines for this user
-    if user_id:
-        try:
-            for _key, _bot_eng in futures_engine_registry.user_bot_engines(user_id):
-                if _bot_eng is None or _bot_eng is eng:
-                    continue
-                if getattr(_bot_eng, "_mode", "paper") == "paper":
-                    engines.append(_bot_eng)
-        except Exception:
-            pass
+    if eng is None or getattr(eng, "_mode", "paper") != "paper":
+        # No paper engine for this user — return an empty-balance shape so
+        # the UI still renders fields without `?? 0` defaults everywhere.
+        return {
+            "mode": "paper", "source": "paper_engine_main", "engine_count": 0,
+            "balance": 0.0, "margin_balance": 0.0, "equity": 0.0,
+            "available_balance": 0.0, "available_margin": 0.0,
+            "unrealized_pnl": 0.0, "used_margin": 0.0, "order_margin": 0,
+            "margin_mode": "Isolated", "frozen_funds": 0, "risk_ratio": 0,
+            "max_withdraw": 0.0, "position_count": 0, "currency": "USDT",
+        }
 
-    total_balance = 0.0
-    total_unrealized = 0.0
-    total_margin = 0.0
-    total_open_positions = 0
-    for _e in engines:
-        try:
-            total_balance += float(_e.balance or 0)
-            if _e.is_running:
-                pos_list = _e.get_open_positions()
-                total_unrealized += sum(p.get("unrealized_pnl", 0) for p in pos_list)
-                total_margin += sum(p.get("stake", 0) for p in pos_list)
-                total_open_positions += len(pos_list)
-        except Exception:
-            continue
+    main_balance = float(eng.balance or 0)
+    unrealized = 0.0
+    used_margin = 0.0
+    open_count = 0
+    try:
+        if eng.is_running:
+            pos_list = eng.get_open_positions()
+            unrealized = sum(p.get("unrealized_pnl", 0) for p in pos_list)
+            used_margin = sum(p.get("stake", 0) for p in pos_list)
+            open_count = len(pos_list)
+    except Exception:
+        pass
 
     return {
         "mode": "paper",
-        "source": "paper_engine_aggregate",
-        "engine_count": len(engines),
-        "balance": round(total_balance, 4),
-        "margin_balance": round(total_balance, 4),
-        "equity": round(total_balance + total_unrealized, 4),
-        "available_balance": round(total_balance, 4),
-        "available_margin": round(total_balance - total_margin, 4),
-        "unrealized_pnl": round(total_unrealized, 4),
-        "used_margin": round(total_margin, 4),
+        "source": "paper_engine_main",
+        "engine_count": 1,
+        "balance": round(main_balance, 4),
+        "margin_balance": round(main_balance, 4),
+        "equity": round(main_balance + unrealized, 4),
+        "available_balance": round(main_balance, 4),
+        "available_margin": round(main_balance - used_margin, 4),
+        "unrealized_pnl": round(unrealized, 4),
+        "used_margin": round(used_margin, 4),
         "order_margin": 0,
         "margin_mode": "Isolated",
         "frozen_funds": 0,
-        "risk_ratio": round(total_margin / max(total_balance, 0.01) * 100, 2) if total_margin > 0 else 0,
-        "max_withdraw": round(total_balance, 4),
-        "position_count": total_open_positions,
+        "risk_ratio": round(used_margin / max(main_balance, 0.01) * 100, 2) if used_margin > 0 else 0,
+        "max_withdraw": round(main_balance, 4),
+        "position_count": open_count,
         "currency": "USDT",
     }
 
