@@ -3863,6 +3863,14 @@ def list_futures_bots(
     # created_at, so each instance's count is unique to its lifetime.
     from sqlalchemy import func
     db_trade_counts = {}
+    # Also compute SUM(profit_abs) per instance — same scope as the count,
+    # so the bot card's P&L number matches what's in the trades list.
+    # Previously total_pnl came from engine_status.realized_pnl, which
+    # is 0.0 after a Railway redeploy (engine restarted, in-memory state
+    # lost). Python's .get(key, default) returns the value if the key
+    # EXISTS even when it's 0, so the fallback never triggered. Result:
+    # bot card showed P&L = +0.00 forever despite N closed trades in DB.
+    db_pnl_sums: dict[int, float] = {}
     for i in instances:
         count = db.execute(
             select(func.count(Trade.id)).where(
@@ -3874,6 +3882,17 @@ def list_futures_bots(
             )
         ).scalar() or 0
         db_trade_counts[i.id] = count
+        pnl_sum = db.execute(
+            select(func.coalesce(func.sum(Trade.profit_abs), 0.0)).where(
+                Trade.user_id == user_id,
+                Trade.market_type == "futures",
+                Trade.strategy_id == i.strategy_id,
+                Trade.mode == i.mode,
+                Trade.entry_time >= i.created_at,
+                Trade.status == "closed",
+            )
+        ).scalar() or 0.0
+        db_pnl_sums[i.id] = float(pnl_sum)
 
     bots = []
     for i in instances:
@@ -3898,7 +3917,15 @@ def list_futures_bots(
             "engine_running": engine_running,
             "total_trades": eng_total or db_count or i.total_trades or 0,
             "closed_trades": (engine_status or {}).get("total_trades", i.total_trades or 0),
-            "total_pnl": (engine_status or {}).get("realized_pnl", i.total_pnl or 0),
+            # Prefer DB-summed P&L (always authoritative across restarts)
+            # over engine_status.realized_pnl which is 0 after each Railway
+            # redeploy. Engine value is used only as a sanity check.
+            "total_pnl": round(
+                db_pnl_sums.get(i.id, 0.0)
+                or (engine_status or {}).get("realized_pnl", 0.0)
+                or float(i.total_pnl or 0.0),
+                4,
+            ),
             "open_positions": (engine_status or {}).get("open_trades", 0),
             "ticks": (engine_status or {}).get("ticks", 0),
             "signals": (engine_status or {}).get("signal_count", 0),
@@ -4346,13 +4373,29 @@ def futures_bot_performance(
     if instance.mode in ("paper", "live"):
         trade_filter.append(Trade.mode == instance.mode)
 
+    # Fetch the LATEST 100 trades for display, but compute total_pnl and
+    # win_rate from ALL trades so the inner panel matches the bot card
+    # (which uses DB sums across the bot's full lifetime). Before this,
+    # bots with >100 trades had inconsistent P&L between card and detail.
     trades = db.execute(
         select(Trade).where(*trade_filter).order_by(desc(Trade.exit_time)).limit(100)
     ).scalars().all()
-
-    total_pnl = sum(t.profit_abs or 0 for t in trades)
-    wins = sum(1 for t in trades if (t.profit_abs or 0) > 0)
-    win_rate = round(wins / len(trades) * 100, 1) if trades else 0
+    pnl_row = db.execute(
+        select(
+            func.coalesce(func.sum(Trade.profit_abs), 0.0),
+            func.count(Trade.id),
+            func.sum(
+                func.case(
+                    (Trade.profit_abs > 0, 1),
+                    else_=0,
+                )
+            ),
+        ).where(*trade_filter)
+    ).one()
+    total_pnl = float(pnl_row[0] or 0)
+    total_trade_count = int(pnl_row[1] or 0)
+    wins = int(pnl_row[2] or 0)
+    win_rate = round(wins / total_trade_count * 100, 1) if total_trade_count else 0
 
     engine_data = {}
     winding_down = False
@@ -4380,7 +4423,7 @@ def futures_bot_performance(
     return {
         "bot_id": bot_id,
         "strategy_name": instance.strategy_name,
-        "total_trades": len(trades),
+        "total_trades": total_trade_count,
         "total_pnl": round(total_pnl, 4),
         "win_rate": win_rate,
         "is_running": instance.is_running,
