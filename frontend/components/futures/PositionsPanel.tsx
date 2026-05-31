@@ -218,10 +218,10 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
           <OrderHistoryTab mode={mode} />
         )}
         {tab === 'trade_history' && (
-          <TradeHistoryTab trades={tradeHistory} />
+          <TradeHistoryTab trades={tradeHistory} mode={mode} onRefresh={refreshAll} />
         )}
         {tab === 'position_history' && (
-          <TradeHistoryTab trades={tradeHistory} />
+          <TradeHistoryTab trades={tradeHistory} mode={mode} onRefresh={refreshAll} />
         )}
         {tab === 'assets' && (
           <AssetsTab account={account} />
@@ -1063,11 +1063,57 @@ function OrderHistoryTab({ mode }: { mode: 'paper' | 'live' }) {
   );
 }
 
-function TradeHistoryTab({ trades }: { trades: any[] }) {
+function TradeHistoryTab({ trades, mode, onRefresh }: { trades: any[]; mode?: 'paper' | 'live'; onRefresh?: () => void }) {
+  const [cleaning, setCleaning] = useState(false);
+  // Detect "broken" trades (entry == exit, profit_abs == 0) — artifacts
+  // of the stale-cache bug fixed in ed1e7c7. Show a banner offering one-
+  // click cleanup so the user can purge the noise.
+  const brokenCount = trades.filter(t =>
+    Number(t.entry_price ?? 0) === Number(t.exit_price ?? 0) &&
+    Math.abs(Number(t.profit_abs ?? 0)) < 0.0001
+  ).length;
+  const showCleanupBanner = brokenCount > 0;
+
+  async function runCleanup() {
+    if (!confirm(`Delete ${brokenCount} broken trades (entry == exit, PNL = 0)?\n\nThese are artifacts of an old bug, not real trade results. Cleanup is paper/live-scoped.`)) return;
+    setCleaning(true);
+    try {
+      const res = await api.futures.cleanupBrokenTrades(mode);
+      alert(`Cleaned up ${res?.deleted ?? 0} broken trades.`);
+      onRefresh?.();
+    } catch (e: any) {
+      alert(`Cleanup failed: ${e?.message || e}`);
+    } finally {
+      setCleaning(false);
+    }
+  }
+
   if (trades.length === 0) {
     return <div className="text-center text-slate-500 py-8 text-sm">No trade history</div>;
   }
   return (
+    <div>
+      {showCleanupBanner && (
+        <div className="mb-2 mx-2 p-2.5 rounded-lg bg-amber-500/8 border border-amber-500/30 flex items-start gap-3">
+          <span className="text-amber-400 text-base leading-none mt-0.5">⚠</span>
+          <div className="flex-1">
+            <p className="text-[11px] text-amber-200 font-medium">
+              {brokenCount} broken trade{brokenCount === 1 ? '' : 's'} detected
+            </p>
+            <p className="text-[10px] text-slate-400 mt-0.5 leading-relaxed">
+              These show entry == exit (e.g. 76468.30 → 76468.30) with PNL = 0 — artifacts of a stale price-cache bug that's now fixed.
+              They drag your average P&L toward zero. Delete them to clean up the history.
+            </p>
+          </div>
+          <button
+            onClick={runCleanup}
+            disabled={cleaning}
+            className="shrink-0 text-[10px] font-semibold px-3 py-1.5 rounded-md bg-amber-500/20 text-amber-200 hover:bg-amber-500/30 border border-amber-500/40 disabled:opacity-50"
+          >
+            {cleaning ? 'Cleaning…' : `Delete ${brokenCount}`}
+          </button>
+        </div>
+      )}
     <table className="w-full text-xs">
       <thead>
         <tr className="text-slate-500 text-[10px]">
@@ -1106,6 +1152,7 @@ function TradeHistoryTab({ trades }: { trades: any[] }) {
         ))}
       </tbody>
     </table>
+    </div>
   );
 }
 

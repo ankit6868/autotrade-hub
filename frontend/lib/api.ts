@@ -401,6 +401,12 @@ export const api = {
       request<any>('/api/futures/paper/add-funds', { method: 'POST', body: JSON.stringify(data) }),
     paperBotAddFunds: (botId: number, data: { amount: number; reset?: boolean }) =>
       request<any>(`/api/futures/paper/bot/${botId}/add-funds`, { method: 'POST', body: JSON.stringify(data) }),
+    // Cleanup endpoint — removes trades with entry==exit and profit_abs==0
+    // (artifacts of the stale-price-cache bug fixed in ed1e7c7).
+    cleanupBrokenTrades: (mode?: 'paper' | 'live') => {
+      const q = mode ? `?mode=${mode}` : '';
+      return request<any>(`/api/futures/cleanup-broken-trades${q}`, { method: 'DELETE' });
+    },
     // Phase 6 — cancel-all endpoints
     cancelAllOrders: (params?: { mode?: 'paper' | 'live'; symbol?: string }) => {
       const q = new URLSearchParams();

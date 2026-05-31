@@ -632,6 +632,54 @@ def cleanup_test_trades(
     return {"deleted": result.rowcount, "user_id": user_id}
 
 
+@router.delete("/cleanup-broken-trades")
+def cleanup_broken_trades(
+    mode: str | None = None,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Delete trades created by the stale _last_prices cache bug (fixed in
+    ed1e7c7). Those trades have entry_price == exit_price == cached_value
+    and profit_abs == 0 — they're not "real" zero-PNL trades, they're
+    artifacts of the engine returning a frozen price from the cache.
+
+    Filtering:
+      - User-scoped (only this user's trades)
+      - Optional mode filter ('paper' or 'live'); omit to clean both
+      - Only deletes CLOSED futures trades
+      - Only deletes trades where entry_price == exit_price (the bug
+        signature) AND profit_abs == 0
+
+    Safe to call repeatedly. Returns rowcount of deleted records.
+    """
+    from sqlalchemy import delete as sql_delete, or_
+    where_clauses = [
+        Trade.user_id == user_id,
+        Trade.market_type == "futures",
+        Trade.status == "closed",
+        Trade.entry_price == Trade.exit_price,
+        or_(
+            Trade.profit_abs == 0,
+            Trade.profit_abs.is_(None),
+        ),
+    ]
+    if mode in ("paper", "live"):
+        where_clauses.append(Trade.mode == mode)
+    result = db.execute(sql_delete(Trade).where(*where_clauses))
+    db.commit()
+    return {
+        "deleted": result.rowcount,
+        "mode_filter": mode or "both",
+        "user_id": user_id,
+        "explanation": (
+            "Removed trades where entry==exit and profit_abs==0 — "
+            "artifacts of the stale price-cache bug fixed in ed1e7c7. "
+            "Genuine zero-PNL trades (entry != exit, profit_abs == 0) "
+            "are NOT deleted by this cleanup."
+        ),
+    }
+
+
 # ── Balance ──────────────────────────────────────────────────────────────────
 
 @router.get("/balance")
