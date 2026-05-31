@@ -1372,6 +1372,25 @@ def futures_manual_entry(
     )
     pos.db_id = db_id
 
+    # ── Live mode: push TP/SL to KuCoin so the stops actually fire ───
+    # Without this, the sl/tp values on the position object are local-
+    # only decoration — KuCoin doesn't know about them and only the
+    # exchange's liquidation level protects the user. Bot live entries
+    # already do this at futures_engine.py:_push_live_tp_sl; this brings
+    # manual live entries to parity.
+    if mode == "live":
+        try:
+            kc_symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+            eng._push_live_tp_sl(
+                kc_symbol, sl_price, tp_price,
+                label="manual_entry", pos=pos,
+            )
+        except Exception as tpsl_exc:
+            log.warning("[%s] Manual entry TP/SL push to KuCoin failed: %s "
+                        "(position is open, stops are local-only — user can "
+                        "re-push via the TP/SL editor on the Positions tab)",
+                        user_id, tpsl_exc)
+
     log_event(db, user_id, "futures.manual_entry", request, payload={
         "pair": pair, "direction": direction, "entry": entry_price,
         "leverage": leverage, "mode": mode, "exchange_order_id": exchange_order_id,

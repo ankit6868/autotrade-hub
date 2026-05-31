@@ -1700,6 +1700,103 @@ class FuturesEngine(NativeTradingEngine):
                 pass
         return ok, err
 
+    def tick_manual_position_management(self) -> int:
+        """Process liq + TP/SL exits for PAPER positions on this engine
+        WITHOUT running the full signal-scan loop.
+
+        Why this exists
+        ---------------
+        The MAIN user engine (futures_engine_registry.for_user) has no
+        strategy configured and `_run_loop` is never started for it. So a
+        position opened via /api/futures/manual-entry sits with sl/tp
+        values on the FuturesPosition object but NO thread checking them.
+        Liquidation, take-profit and stop-loss would never auto-trigger.
+
+        This method does the minimal subset of _tick_continuous needed for
+        manual positions: liquidation check + check_exit(). Skips ARM
+        partial-close and stop-and-reverse — those are bot-only flows.
+
+        Safety
+        ------
+        LIVE positions are deliberately SKIPPED — those must only close
+        via a real KuCoin order, otherwise our local state would diverge
+        from KuCoin (we'd think it's closed, KuCoin would still have
+        margin locked). Live manual positions are protected by the TP/SL
+        we pushed to KuCoin in /manual-entry (Bug B fix) plus the 30s
+        reconcile from maybe_reconcile_live_positions.
+
+        Returns the number of positions that were closed this tick.
+        Safe to call when self.positions is empty (cheap no-op).
+        """
+        if not self.positions:
+            return 0
+        closed = 0
+        now = datetime.now(timezone.utc)
+        # Snapshot pairs so we don't iterate a dict that mutates under us.
+        pairs = list({p.pair for p in self.positions.values()})
+        for pair in pairs:
+            live_price = self._get_live_price(pair)
+            if live_price is None:
+                continue
+            with self._lock:
+                # Re-fetch keys inside the lock — another thread (or this
+                # method's own previous iteration) might have removed them.
+                trade_keys = [k for k, p in self.positions.items() if p.pair == pair]
+                for trade_key in trade_keys:
+                    pos = self.positions.get(trade_key)
+                    if pos is None:
+                        continue
+                    # Skip LIVE positions — only KuCoin should close those.
+                    # The per-position _mode tag is authoritative; engine
+                    # _mode is a misleading default for the main user engine.
+                    pos_mode = getattr(pos, "_mode", self._mode)
+                    if pos_mode != "paper":
+                        continue
+                    # 1. Liquidation
+                    if isinstance(pos, FuturesPosition) and pos.check_liquidation(live_price):
+                        pos.close(live_price, "liquidated", now)
+                        self.balance += pos.pnl_abs
+                        self.closed_trades.append(pos)
+                        del self.positions[trade_key]
+                        self.last_action = (
+                            f"LIQUIDATED (manual) {pair} @ {live_price:.4f} "
+                            f"liq={pos.liquidation_price:.4f} P&L={pos.pnl_abs:+.2f}"
+                        )
+                        self._log_action("liquidated", self.last_action,
+                            pair=pair, price=live_price, pnl=pos.pnl_abs,
+                            direction=pos.direction)
+                        log.warning("[%s] %s", self.user_id, self.last_action)
+                        # Pass the per-position mode tag, not self._mode —
+                        # the main user engine defaults to "paper" but the
+                        # position was tagged at entry time with the user's
+                        # actual choice.
+                        _persist_closed_trade(self.user_id, pos, pos_mode,
+                                              self._strategy_id, getattr(pos, "db_id", None))
+                        closed += 1
+                        continue
+                    # 2. Standard TP/SL exit. Trail update is harmless on
+                    # manual positions (they don't use trail config).
+                    pos.update_trail(live_price)
+                    exit_info = pos.check_exit(live_price, live_price)
+                    if exit_info:
+                        exit_price, reason = exit_info
+                        pos.close(exit_price, reason, now)
+                        self.balance += pos.pnl_abs
+                        self.closed_trades.append(pos)
+                        del self.positions[trade_key]
+                        self.last_action = (
+                            f"EXIT (manual) {pair} {pos.direction.upper()} "
+                            f"@ {exit_price:.4f} reason={reason} P&L={pos.pnl_abs:+.2f}"
+                        )
+                        self._log_action("manual_exit", self.last_action,
+                            pair=pair, price=exit_price, reason=reason,
+                            pnl=pos.pnl_abs, direction=pos.direction)
+                        log.info("[%s] %s", self.user_id, self.last_action)
+                        _persist_closed_trade(self.user_id, pos, pos_mode,
+                                              self._strategy_id, getattr(pos, "db_id", None))
+                        closed += 1
+        return closed
+
     def maybe_reconcile_live_positions(self, *, throttle_secs: int = 30) -> bool:
         """Throttled wrapper around _reconcile_live_positions, safe to call
         from HTTP endpoints that don't have a run loop (e.g. the user-

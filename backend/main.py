@@ -3265,6 +3265,43 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
     return resumed
 
 
+async def _manual_position_watchdog():
+    """Tick TP/SL/liquidation on manual-paper positions every 5s.
+
+    Manual positions live on the MAIN user engine (for_user) whose
+    `_run_loop` is never started (no strategy configured). Without this
+    task, TP/SL/liq on a /manual-entry paper position would never fire —
+    the user would have to click Close themselves.
+
+    Cheap: skips users with no open positions. Mirrors the bot loop's
+    5s fast-tick when positions are open.
+    """
+    import logging
+    log = logging.getLogger("manual-watchdog")
+    INTERVAL = 5.0
+    await asyncio.sleep(10.0)  # let startup finish first
+    log.info("Manual-position watchdog started — checking every %ds", int(INTERVAL))
+    while True:
+        try:
+            from backend.services.futures_engine import futures_engine_registry
+            # Snapshot the user-engine dict outside the lock so the loop
+            # itself doesn't block any incoming requests.
+            with futures_engine_registry._lock:
+                engines = list(futures_engine_registry._engines.values())
+            for eng in engines:
+                if not eng.positions:
+                    continue
+                try:
+                    n = eng.tick_manual_position_management()
+                    if n > 0:
+                        log.info("[%s] manual-watchdog closed %d position(s)", eng.user_id, n)
+                except Exception as exc:
+                    log.warning("[%s] manual-watchdog tick failed: %s", eng.user_id, exc)
+        except Exception as outer_exc:
+            log.warning("Manual-position watchdog outer failure: %s", outer_exc)
+        await asyncio.sleep(INTERVAL)
+
+
 async def _bot_watchdog():
     """Periodic watchdog — revives engines that died between user UI polls.
 
@@ -3306,6 +3343,10 @@ async def lifespan(app: FastAPI):
     # run forever" and the old code only resumed on backend boot or when
     # the UI polled the bots endpoint.
     asyncio.create_task(_bot_watchdog())
+    # Manual-position watchdog: ticks TP/SL/liq on /manual-entry positions
+    # every 5s. Without this, the main user engine (which has no run loop)
+    # would never auto-close manual paper positions on hitting stops.
+    asyncio.create_task(_manual_position_watchdog())
     yield
     # Stop all futures bot engines on shutdown so KuCoin gets a clean
     # disconnect instead of phantom orders timing out.
