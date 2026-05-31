@@ -84,8 +84,22 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
   const [mainEngine, setMainEngine] = useState<any>(null);
   // Collapse toggles — when the user is focused on Active Bots they don't
   // want Recent Bots + the strategy library taking up half the panel.
+  // Library defaults to collapsed because most users come back to monitor
+  // bots they've already started — the conditional layout below switches
+  // it to EXPANDED at the top when no active bots exist (otherwise the
+  // panel would be a wall of empty space with one tiny chevron).
   const [recentCollapsed, setRecentCollapsed] = useState(false);
-  const [libraryCollapsed, setLibraryCollapsed] = useState(false);
+  const [libraryCollapsed, setLibraryCollapsed] = useState(true);
+  // Derived: do we have anything to show in the Active Bots area?
+  const hasActiveContent = runningBots.filter(b => b.is_running).length > 0 || !!mainEngine;
+  // When the panel first mounts with no active bots, force-expand the
+  // library so the user can immediately pick a strategy to start. Once
+  // they start one, hasActiveContent flips true and we leave the user's
+  // collapse choice alone (don't re-collapse on every state change).
+  useEffect(() => {
+    if (!hasActiveContent) setLibraryCollapsed(false);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const refreshBots = useCallback(() => {
     api.futures.bots.list(mode).then(d => setRunningBots(d.bots || [])).catch(() => {});
@@ -416,11 +430,11 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
         </div>
       )}
 
-      {/* Spacer — pushes Recent Bots + Strategy Library to the bottom when
-          there are no active bots (otherwise the active-bots flex-1 handles
-          the fill). Without this the footer sections would sit just below
-          the header with empty space below them. */}
-      {runningBots.filter(b => b.is_running).length === 0 && !mainEngine && (
+      {/* Spacer — only when there are no active bots AND the library is
+          collapsed. Otherwise either Active Bots (flex-1) or the expanded
+          library (flex-1 below) fills the space, so we don't want a spacer
+          double-pushing things off-screen. */}
+      {!hasActiveContent && libraryCollapsed && (
         <div className="flex-1 min-h-0" />
       )}
 
@@ -501,9 +515,13 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
       </div>
       )}
 
-      {/* Section labels + Bot cards */}
+      {/* Section labels + Bot cards.
+          flex-1 when there are no active bots (library fills the panel,
+          which is the "first-time / nothing-running" experience).
+          max-h capped when active bots exist so the library scroll area
+          stays modest and doesn't squish the running-bots cards. */}
       {!libraryCollapsed && (
-      <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1">
+      <div className={`${hasActiveContent ? 'max-h-[40vh]' : 'flex-1'} overflow-y-auto px-3 py-2 space-y-1`}>
         {/* User's own strategies first */}
         {userStrategyCards.length > 0 && (category === 'all' || category === 'ai') && (
           <>

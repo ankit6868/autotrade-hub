@@ -18,10 +18,21 @@ _engine_kwargs: dict = {"echo": False, "future": True}
 if url.drivername.startswith("sqlite"):
     _engine_kwargs["connect_args"] = {"check_same_thread": False}
 else:
-    # Sensible production defaults for Postgres. Override via env if needed.
-    _engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "10"))
-    _engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "5"))
+    # Pool was 10+5=15. With 5 bot engines doing tick work, plus 6
+    # UI-polling endpoints firing every 8s, plus reconcile + audit
+    # writes, 15 connections gets blown in seconds → "QueuePool limit
+    # reached" errors that show up as "engine error" in the bot panel.
+    # 30+20=50 comfortably covers up to ~10 bots on a normal Postgres
+    # plan (most managed DBs allow 100+ concurrent connections).
+    _engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "30"))
+    _engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "20"))
     _engine_kwargs["pool_pre_ping"] = True
+    # Recycle connections every 30min so stale ones from a Postgres
+    # idle-timeout drop don't block forever waiting for a half-dead conn.
+    _engine_kwargs["pool_recycle"] = int(os.getenv("DB_POOL_RECYCLE", "1800"))
+    # Timeout waiting for a free connection — fail fast (10s) instead
+    # of hanging 30s and surfacing as "engine error" in the UI.
+    _engine_kwargs["pool_timeout"] = int(os.getenv("DB_POOL_TIMEOUT", "10"))
 
 engine = create_engine(url, **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
