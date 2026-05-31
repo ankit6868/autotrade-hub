@@ -4380,21 +4380,25 @@ def futures_bot_performance(
     trades = db.execute(
         select(Trade).where(*trade_filter).order_by(desc(Trade.exit_time)).limit(100)
     ).scalars().all()
-    pnl_row = db.execute(
+    # Compute totals + wins via TWO simple queries — `func.case(...)` was
+    # tried earlier but `else_` is a keyword on `sqlalchemy.case`, not on
+    # `func.case`, so it errored with
+    #   TypeError: Function.__init__() got an unexpected keyword argument 'else_'
+    # visible in the UI as "Failed to load bot details".
+    # Two queries are simpler and equally fast at this scale.
+    agg_row = db.execute(
         select(
             func.coalesce(func.sum(Trade.profit_abs), 0.0),
             func.count(Trade.id),
-            func.sum(
-                func.case(
-                    (Trade.profit_abs > 0, 1),
-                    else_=0,
-                )
-            ),
         ).where(*trade_filter)
     ).one()
-    total_pnl = float(pnl_row[0] or 0)
-    total_trade_count = int(pnl_row[1] or 0)
-    wins = int(pnl_row[2] or 0)
+    total_pnl = float(agg_row[0] or 0)
+    total_trade_count = int(agg_row[1] or 0)
+    wins = db.execute(
+        select(func.count(Trade.id)).where(
+            *trade_filter, Trade.profit_abs > 0,
+        )
+    ).scalar() or 0
     win_rate = round(wins / total_trade_count * 100, 1) if total_trade_count else 0
 
     engine_data = {}
