@@ -2509,16 +2509,21 @@ def partial_close_futures_position(
     pos = None
     trade_key = None
     for _eng in candidate_engines:
-        # Only consider engines matching the requested mode so a paper
-        # close request can't accidentally hit a live position.
-        if getattr(_eng, "_mode", None) != mode:
-            continue
         for k, p in _eng.positions.items():
-            if p.pair == pair:
-                eng = _eng
-                pos = p
-                trade_key = k
-                break
+            if p.pair != pair:
+                continue
+            # Filter by POSITION mode tag, not engine mode. The main user
+            # engine defaults to _mode='paper' even when it holds a
+            # manual LIVE position (tagged at /manual-entry). Filtering
+            # by engine mode would skip the main engine for live mode
+            # and fail to find live manual positions.
+            pos_mode = getattr(p, "_mode", getattr(_eng, "_mode", "paper"))
+            if pos_mode != mode:
+                continue
+            eng = _eng
+            pos = p
+            trade_key = k
+            break
         if pos is not None:
             break
 
@@ -3340,24 +3345,34 @@ def paper_bot_add_funds(
 # ── Position Margin Management (Add / Reduce Margin) ─────────────────────
 
 def _find_position_across_engines(user_id: str, pair: str, mode: str):
-    """Search main engine + all per-bot engines (mode-filtered) for an
-    open position on `pair`. Returns (engine, position, trade_key) or
-    (None, None, None) if not found.
+    """Search main engine + all per-bot engines for an open position on
+    `pair` whose per-position mode tag matches `mode`. Returns
+    (engine, position, trade_key) or (None, None, None) if not found.
+
+    Filters by POSITION._mode rather than ENGINE._mode: the main user
+    engine always has _mode='paper' by default, even when it holds a
+    manual LIVE position (the position is tagged at /manual-entry with
+    the user's actual choice). Filtering by engine mode would skip the
+    main engine for live mode and fail to find live manual positions.
     """
     candidates = []
     main_eng = futures_engine_registry.for_user(user_id)
-    if main_eng is not None and getattr(main_eng, "_mode", None) == mode:
+    if main_eng is not None:
         candidates.append(main_eng)
     try:
         for _key, _bot_eng in futures_engine_registry.user_bot_engines(user_id):
-            if _bot_eng is not None and getattr(_bot_eng, "_mode", None) == mode:
+            if _bot_eng is not None:
                 candidates.append(_bot_eng)
     except Exception:
         pass
     for _e in candidates:
         for _k, p in _e.positions.items():
-            if p.pair == pair:
-                return _e, p, _k
+            if p.pair != pair:
+                continue
+            pos_mode = getattr(p, "_mode", getattr(_e, "_mode", "paper"))
+            if pos_mode != mode:
+                continue
+            return _e, p, _k
     return None, None, None
 
 
