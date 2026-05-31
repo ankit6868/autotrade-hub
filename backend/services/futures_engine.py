@@ -2162,7 +2162,11 @@ class FuturesEngine(NativeTradingEngine):
                 "pair": t.pair, "direction": t.direction,
                 "entry": t.entry, "exit": t.exit_price,
                 "pnl": round(t.pnl_abs, 4), "pnl_pct": round(t.pnl_pct, 2),
-                "reason": t.reason,
+                # Position.close() writes `exit_reason`, not `reason` — the
+                # old key broke status() with AttributeError, which cascaded
+                # into the Bot panel "Recovery failed" error and made every
+                # bot disappear from the UI.
+                "reason": getattr(t, "exit_reason", None),
                 "opened_at": str(t.opened_at) if t.opened_at else None,
                 "closed_at": str(t.closed_at) if t.closed_at else None,
                 "leverage": getattr(t, "leverage", self._leverage),

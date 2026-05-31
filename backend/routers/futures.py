@@ -1410,11 +1410,19 @@ async def futures_force_close(
     from sqlalchemy import update as sql_update
     from datetime import timezone as _tz
 
-    # Parse optional JSON body for mode
+    # Parse optional JSON body for mode + direction
     req_mode = None
+    req_direction = None
     try:
         body = await request.json()
-        req_mode = body.get("mode") if isinstance(body, dict) else None
+        if isinstance(body, dict):
+            req_mode = body.get("mode")
+            # Optional — when present, close only the matching long OR short.
+            # Without it the legacy behaviour (close every position on the
+            # pair) is kept for backwards compat with old callers.
+            d = body.get("direction")
+            if d in ("long", "short"):
+                req_direction = d
     except Exception:
         pass
 
@@ -1438,7 +1446,9 @@ async def futures_force_close(
     with eng._lock:
         matching = [
             (k, p) for k, p in eng.positions.items()
-            if p.pair == pair and getattr(p, "_mode", eng._mode or "paper") == mode
+            if p.pair == pair
+            and getattr(p, "_mode", eng._mode or "paper") == mode
+            and (req_direction is None or p.direction == req_direction)
         ]
 
     # ── Step 2: place close orders on KuCoin Lead Trading ────────────────
@@ -1565,6 +1575,10 @@ async def futures_force_close(
     )
     if mode:
         orphan_query = orphan_query.where(Trade.mode == mode)
+    # Same direction filter as engine matching — without it a user closing a
+    # LONG would also wipe their orphaned SHORT row from the DB.
+    if req_direction:
+        orphan_query = orphan_query.where(Trade.side == req_direction)
     orphan_trades = db.execute(orphan_query).scalars().all()
 
     for t in orphan_trades:
@@ -1615,12 +1629,19 @@ async def futures_force_close(
                 qty = 0
                 if str(pos_resp.get("code")) == "200000":
                     for _p in (pos_resp.get("data") or []):
-                        if (_p.get("symbol") or "").upper() == kc_symbol.upper():
-                            _q = int(_p.get("currentQty", 0) or 0)
-                            if _q != 0:
-                                pdata = _p
-                                qty = _q
-                                break
+                        if (_p.get("symbol") or "").upper() != kc_symbol.upper():
+                            continue
+                        _q = int(_p.get("currentQty", 0) or 0)
+                        if _q == 0:
+                            continue
+                        # Respect direction filter — qty > 0 is long, < 0 is short.
+                        if req_direction == "long" and _q < 0:
+                            continue
+                        if req_direction == "short" and _q > 0:
+                            continue
+                        pdata = _p
+                        qty = _q
+                        break
                 if qty != 0:
                     direction = "long" if qty > 0 else "short"
                     side          = "sell" if direction == "long" else "buy"
@@ -2183,12 +2204,25 @@ def cancel_futures_order(
     # KuCoin Lead Trading). Engine mode is unreliable here because the user
     # may have placed the order in live mode then this request comes through
     # before any bot was ever started.
+    #
+    # Lookup falls back to the numeric DB id because the /orders LIST returns
+    # `o.client_oid or str(o.id)`, and any row with a NULL client_oid was
+    # uncancellable before — the previous query filtered on client_oid only,
+    # the DB UPDATE further down did the same, so the cancel silently no-op'd
+    # for legacy paper orders.
     db_order = db.execute(
         select(FuturesOrder).where(
             FuturesOrder.client_oid == order_id,
             FuturesOrder.user_id == user_id,
         )
     ).scalar_one_or_none()
+    if db_order is None and order_id.isdigit():
+        db_order = db.execute(
+            select(FuturesOrder).where(
+                FuturesOrder.id == int(order_id),
+                FuturesOrder.user_id == user_id,
+            )
+        ).scalar_one_or_none()
     is_live_order = bool(db_order and db_order.exchange_order_id)
 
     # Track whether the KuCoin DELETE actually succeeded. Previously the
@@ -2250,12 +2284,27 @@ def cancel_futures_order(
             "kucoin_cancelled": False,
         }
 
-    result = eng.cancel_pending_order(order_id)
+    # If engine has the order, drop it. Use the actual client_oid from the
+    # DB row when available so we hit the right key in pending_orders even
+    # when the caller passed the numeric DB id.
+    eng_key = (db_order.client_oid if db_order and db_order.client_oid else order_id)
+    result = eng.cancel_pending_order(eng_key)
+    # Don't treat "not found in engine" as an error for the user — engine
+    # restarts wipe in-memory pending orders but the DB row is still the
+    # source of truth, and the DB UPDATE below will mark it cancelled.
+    if result and result.get("error", "").startswith("Order ") and "not found" in result.get("error", ""):
+        result = {"cancelled": True, "order_id": eng_key, "engine_note": "not in engine memory (cleared on restart)"}
 
     from sqlalchemy import update as sql_update
+    # Same fallback: when client_oid is NULL on the row, the WHERE never
+    # matched and the row stayed pending forever. Match by id when present.
+    if db_order is not None:
+        upd_where = (FuturesOrder.id == db_order.id, FuturesOrder.user_id == user_id)
+    else:
+        upd_where = (FuturesOrder.client_oid == order_id, FuturesOrder.user_id == user_id)
     db.execute(
         sql_update(FuturesOrder)
-        .where(FuturesOrder.client_oid == order_id, FuturesOrder.user_id == user_id)
+        .where(*upd_where)
         .values(status="cancelled", cancelled_at=datetime.utcnow())
     )
     db.commit()

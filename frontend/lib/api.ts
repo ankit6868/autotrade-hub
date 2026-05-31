@@ -336,10 +336,14 @@ export const api = {
       history: (limit = 20) =>
         request<any>(`/api/futures/backtest/history?limit=${limit}`),
     },
-    forceClose: (pair: string, mode?: 'paper' | 'live') =>
+    forceClose: (pair: string, mode?: 'paper' | 'live', direction?: 'long' | 'short') =>
       request<any>(`/api/futures/force-close/${pair}`, {
         method: 'POST',
-        body: JSON.stringify({ mode }),
+        // direction is OPTIONAL — when present the backend closes only the
+        // long OR the short on that pair. Without it the old behaviour closes
+        // every position on the pair, which was wiping hedge-mode pairs in
+        // one click.
+        body: JSON.stringify({ mode, ...(direction ? { direction } : {}) }),
       }),
     manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5, leverage?: number, mode?: 'paper' | 'live', costUsdt?: number) =>
       request<any>('/api/futures/manual-entry', {

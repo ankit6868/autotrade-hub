@@ -58,10 +58,13 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
     }
   }, [refreshTrigger, refreshAll]);
 
-  async function closePosition(pair: string) {
+  async function closePosition(pair: string, direction?: 'long' | 'short') {
     setClosingPair(pair);
     try {
-      const res = await api.futures.forceClose(pair, mode);
+      // Pass direction so backend closes ONLY this row's position. Without
+      // it, hedge-mode pairs (long + short on the same symbol) close in one
+      // click — the user's "closed one and all closed" bug.
+      const res = await api.futures.forceClose(pair, mode, direction);
       // Backend returns { error } when KuCoin refuses the close — show it
       // so the user understands why the position is still visible and can
       // act on the real reason (e.g. margin-mode mismatch, lot size).
@@ -138,8 +141,8 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
 
   async function closeAllPositions() {
     for (const p of positions) {
-      // Pass explicit mode so backend force-closes only the matching side.
-      await api.futures.forceClose(p.pair, mode);
+      // Pass direction so each row closes its own side — hedge-mode safe.
+      await api.futures.forceClose(p.pair, mode, (p.side || p.direction) as 'long' | 'short');
     }
     refreshAll();
     onRefresh?.();
@@ -241,7 +244,7 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
 
 function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialClose, onRefresh, mode, account, refreshAll }: {
   positions: any[]; closingPair: string | null;
-  onClose: (pair: string) => void; onCloseAll: () => void;
+  onClose: (pair: string, direction?: 'long' | 'short') => void; onCloseAll: () => void;
   // Phase 6: optional partial-close callback. When provided, the
   // "Close" button gains a dropdown for 25/50/75% partial close.
   onPartialClose?: (pair: string, pct: number) => void;
@@ -430,10 +433,10 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                       Margin
                     </button>
                     <button
-                      onClick={() => onClose(p.pair)}
+                      onClick={() => onClose(p.pair, (p.side || p.direction) as 'long' | 'short')}
                       disabled={closingPair === p.pair}
                       className="px-2 py-1 rounded bg-red-500/20 text-red-400 text-[10px] hover:bg-red-500/30"
-                      title="Market close 100% of the position"
+                      title="Market close 100% of this position only (won't touch other directions on the same pair)"
                     >
                       Close
                     </button>
