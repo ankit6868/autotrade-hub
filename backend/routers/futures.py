@@ -3411,7 +3411,10 @@ def position_add_margin(
                 "new_liquidation_price": round(pos.liquidation_price or 0, 4),
                 "remaining_balance": round(eng.balance, 4)}
 
-    # LIVE: call KuCoin Futures /api/v1/position/margin-deposit
+    # LIVE: call KuCoin Futures /api/v1/position/margin/deposit-margin
+    # (the current canonical path — the old /api/v1/position/margin-deposit
+    # is deprecated. kucoin_futures_client.py:286 already uses the new path,
+    # this brings the router in line.)
     try:
         from backend.services.native_trading_engine import _kucoin_post_signed
         from backend.services.futures_engine import KUCOIN_FUTURES_BASE
@@ -3428,7 +3431,7 @@ def position_add_margin(
         sym = normalize_futures_symbol(pair)
         biz_no = f"add-margin-{user_id[-8:]}-{int(_time.time() * 1000)}"
         result = _kucoin_post_signed(
-            "/api/v1/position/margin-deposit", kk, ks, kp,
+            "/api/v1/position/margin/deposit-margin", kk, ks, kp,
             body={"symbol": sym, "margin": amount, "bizNo": biz_no},
             base_url=KUCOIN_FUTURES_BASE,
         )
