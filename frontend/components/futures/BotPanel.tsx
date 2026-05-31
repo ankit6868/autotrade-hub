@@ -195,12 +195,43 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
         )}
       </div>
 
-      {/* Running Bots — scrollable so 6+ bots don't overflow */}
+      {/* Running Bots — flex-1 so it takes ALL space between the header and
+          the collapsed footer sections (Recent Bots + Strategy Library).
+          User asked for Active Bots to be the primary thing they see. */}
       {(runningBots.filter(b => b.is_running).length > 0 || mainEngine) && (
-        <div className="px-3 py-2 border-b border-white/[0.06] flex flex-col max-h-[320px]">
+        <div className="px-3 py-2 border-b border-white/[0.06] flex flex-col flex-1 min-h-0">
           <div className="flex items-center justify-between mb-1.5 shrink-0">
             <p className="text-[10px] text-emerald-400 font-bold">Active Bots ({runningBots.filter(b => b.is_running).length + (mainEngine ? 1 : 0)})</p>
-            <button onClick={refreshBots} className="text-[9px] text-slate-500 hover:text-white">Refresh</button>
+            <div className="flex items-center gap-2">
+              {mode === 'paper' && (
+                <button
+                  onClick={async () => {
+                    const input = window.prompt(
+                      "Add virtual USDT to your paper wallet.\nEnter amount (1 to 1,000,000):",
+                      "1000",
+                    );
+                    if (!input) return;
+                    const amt = Number(input);
+                    if (!Number.isFinite(amt) || amt < 0.01 || amt > 1_000_000) {
+                      alert("Amount must be between 0.01 and 1,000,000 USDT");
+                      return;
+                    }
+                    try {
+                      const res = await api.futures.paperAddFunds({ amount: amt });
+                      if (res?.error) { alert(res.error); return; }
+                      refreshBots();
+                    } catch (e) {
+                      alert(`Add funds failed: ${e}`);
+                    }
+                  }}
+                  className="text-[9px] text-emerald-400 hover:text-emerald-300 px-1.5 py-0.5 rounded border border-emerald-500/30 hover:bg-emerald-500/10"
+                  title="Top up your paper wallet (paper mode only — not a real deposit)"
+                >
+                  + Funds
+                </button>
+              )}
+              <button onClick={refreshBots} className="text-[9px] text-slate-500 hover:text-white">Refresh</button>
+            </div>
           </div>
           <div className="overflow-y-auto flex-1 pr-0.5 space-y-1.5">
           {/* Main futures engine (started from Futures Paper/Live pages) */}
@@ -385,9 +416,17 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
         </div>
       )}
 
-      {/* Stopped Bots (recent) */}
+      {/* Spacer — pushes Recent Bots + Strategy Library to the bottom when
+          there are no active bots (otherwise the active-bots flex-1 handles
+          the fill). Without this the footer sections would sit just below
+          the header with empty space below them. */}
+      {runningBots.filter(b => b.is_running).length === 0 && !mainEngine && (
+        <div className="flex-1 min-h-0" />
+      )}
+
+      {/* Stopped Bots (recent) — collapsed footer section */}
       {runningBots.filter(b => !b.is_running).length > 0 && (
-        <div className="px-3 py-2 border-b border-white/[0.06]">
+        <div className="px-3 py-2 border-b border-white/[0.06] shrink-0">
           <button
             onClick={() => setRecentCollapsed(v => !v)}
             className="flex items-center justify-between w-full mb-1.5 group"

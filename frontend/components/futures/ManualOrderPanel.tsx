@@ -21,8 +21,9 @@ interface Props {
 type OrderType = 'limit' | 'market' | 'conditional' | 'advanced_limit' | 'trailing_stop' | 'hidden' | 'twap';
 
 const BASIC_TABS: { key: OrderType; label: string }[] = [
-  { key: 'limit', label: 'Limit' },
+  // Market first — matches the default orderType state and KuCoin's own UI.
   { key: 'market', label: 'Market' },
+  { key: 'limit', label: 'Limit' },
   { key: 'conditional', label: 'Conditional' },
 ];
 
@@ -47,7 +48,11 @@ export default function ManualOrderPanel({
       .catch(() => setLeadStatus(null));
   }, []);
 
-  const [orderType, setOrderType] = useState<OrderType>('limit');
+  // Default to 'market' — matches KuCoin's own UI default and gives the
+  // expected behaviour when a user clicks Buy Long/Short without configuring
+  // anything (was 'limit' which created a pending order that sat in Open
+  // Orders forever instead of opening a position).
+  const [orderType, setOrderType] = useState<OrderType>('market');
   const [showAdvancedMenu, setShowAdvancedMenu] = useState(false);
   const [leverageModal, setLeverageModal] = useState(false);
   const [showMarginDropdown, setShowMarginDropdown] = useState(false);
