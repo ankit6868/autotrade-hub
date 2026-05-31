@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
+import MarginAdjustModal from './MarginAdjustModal';
 
 interface Props {
   mode: 'paper' | 'live';
@@ -200,6 +201,9 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
             onCloseAll={closeAllPositions}
             onPartialClose={partialClose}
             onRefresh={refreshAll}
+            mode={mode}
+            account={account}
+            refreshAll={refreshAll}
           />
         )}
         {tab === 'open_orders' && (
@@ -230,17 +234,23 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
   );
 }
 
-function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialClose, onRefresh }: {
+function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialClose, onRefresh, mode, account, refreshAll }: {
   positions: any[]; closingPair: string | null;
   onClose: (pair: string) => void; onCloseAll: () => void;
   // Phase 6: optional partial-close callback. When provided, the
   // "Close" button gains a dropdown for 25/50/75% partial close.
   onPartialClose?: (pair: string, pct: number) => void;
   onRefresh?: () => void;
+  // For the Add/Reduce Margin modal — needs the mode + wallet available
+  mode: 'paper' | 'live';
+  account: any;
+  refreshAll: () => void;
 }) {
   // TP/SL editor state — opens an inline modal for the selected position.
   const [tpslPair, setTpslPair] = useState<string | null>(null);
   const tpslPosition = positions.find(p => p.pair === tpslPair) || null;
+  // Add/Reduce margin modal state — selected open position
+  const [marginPosition, setMarginPosition] = useState<any | null>(null);
 
   if (positions.length === 0) {
     return <div className="text-center text-slate-500 py-8 text-sm">No open positions</div>;
@@ -407,6 +417,14 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                       </>
                     )}
                     <button
+                      onClick={() => setMarginPosition(p)}
+                      disabled={closingPair === p.pair}
+                      className="px-2 py-1 rounded bg-sky-500/15 text-sky-300 text-[10px] hover:bg-sky-500/25 border border-sky-500/30 disabled:opacity-50"
+                      title="Add or reduce margin on this position (mirrors KuCoin's Add Margin panel)"
+                    >
+                      Margin
+                    </button>
+                    <button
                       onClick={() => onClose(p.pair)}
                       disabled={closingPair === p.pair}
                       className="px-2 py-1 rounded bg-red-500/20 text-red-400 text-[10px] hover:bg-red-500/30"
@@ -421,6 +439,22 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
           })}
         </tbody>
       </table>
+      {marginPosition && (
+        <MarginAdjustModal
+          position={{
+            pair: marginPosition.pair,
+            direction: (marginPosition.direction || marginPosition.side || 'long') as 'long' | 'short',
+            entry: Number(marginPosition.entry_price ?? marginPosition.entry ?? 0),
+            size: Number(marginPosition.margin ?? marginPosition.stake ?? marginPosition.size ?? 0),
+            leverage: Number(marginPosition.leverage ?? 1),
+            liquidation_price: Number(marginPosition.liq_price ?? marginPosition.liquidation_price ?? 0),
+          }}
+          mode={mode}
+          walletAvailable={Number(account?.available_balance ?? account?.available_margin ?? 0)}
+          onClose={() => setMarginPosition(null)}
+          onSuccess={() => { refreshAll(); onRefresh?.(); }}
+        />
+      )}
       {tpslPosition && (
         <TpSlEditor
           position={tpslPosition}

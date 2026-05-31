@@ -389,6 +389,18 @@ export const api = {
     // Phase 6 — partial close (e.g. book 50% then leave remainder)
     partialClose: (data: { pair: string; mode: 'paper' | 'live'; close_pct: number }) =>
       request<any>('/api/futures/position/partial-close', { method: 'POST', body: JSON.stringify(data) }),
+    // Add margin to an open position (paper + live). Paper deducts from
+    // engine balance, live calls KuCoin /api/v1/position/margin-deposit.
+    addMargin: (data: { pair: string; mode: 'paper' | 'live'; amount: number }) =>
+      request<any>('/api/futures/position/add-margin', { method: 'POST', body: JSON.stringify(data) }),
+    // Reduce margin (paper only — live partial-close is the workaround).
+    reduceMargin: (data: { pair: string; mode: 'paper'; amount: number }) =>
+      request<any>('/api/futures/position/reduce-margin', { method: 'POST', body: JSON.stringify(data) }),
+    // Top up virtual USDT in paper mode (main engine or specific bot).
+    paperAddFunds: (data: { amount: number; reset?: boolean }) =>
+      request<any>('/api/futures/paper/add-funds', { method: 'POST', body: JSON.stringify(data) }),
+    paperBotAddFunds: (botId: number, data: { amount: number; reset?: boolean }) =>
+      request<any>(`/api/futures/paper/bot/${botId}/add-funds`, { method: 'POST', body: JSON.stringify(data) }),
     // Phase 6 — cancel-all endpoints
     cancelAllOrders: (params?: { mode?: 'paper' | 'live'; symbol?: string }) => {
       const q = new URLSearchParams();
