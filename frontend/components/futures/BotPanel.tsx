@@ -82,6 +82,10 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
   const [leadStatus, setLeadStatus] = useState<{ connected: boolean; balance?: number; equity?: number; reason?: string } | null>(null);
   const [runningBots, setRunningBots] = useState<any[]>([]);
   const [mainEngine, setMainEngine] = useState<any>(null);
+  // Collapse toggles — when the user is focused on Active Bots they don't
+  // want Recent Bots + the strategy library taking up half the panel.
+  const [recentCollapsed, setRecentCollapsed] = useState(false);
+  const [libraryCollapsed, setLibraryCollapsed] = useState(false);
 
   const refreshBots = useCallback(() => {
     api.futures.bots.list(mode).then(d => setRunningBots(d.bots || [])).catch(() => {});
@@ -384,8 +388,22 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
       {/* Stopped Bots (recent) */}
       {runningBots.filter(b => !b.is_running).length > 0 && (
         <div className="px-3 py-2 border-b border-white/[0.06]">
-          <p className="text-[10px] text-slate-500 font-medium mb-1.5">Recent Bots</p>
-          {runningBots.filter(b => !b.is_running).slice(0, 3).map(bot => (
+          <button
+            onClick={() => setRecentCollapsed(v => !v)}
+            className="flex items-center justify-between w-full mb-1.5 group"
+            aria-expanded={!recentCollapsed}
+          >
+            <p className="text-[10px] text-slate-500 font-medium group-hover:text-slate-300">
+              Recent Bots ({runningBots.filter(b => !b.is_running).length})
+            </p>
+            <svg
+              className={`w-3 h-3 text-slate-500 group-hover:text-slate-300 transition-transform ${recentCollapsed ? '-rotate-90' : ''}`}
+              fill="none" viewBox="0 0 24 24" stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+          {!recentCollapsed && runningBots.filter(b => !b.is_running).slice(0, 3).map(bot => (
             <div key={bot.id} onClick={() => setViewingBotId(bot.id)} className="p-2 rounded-lg bg-[#1e222d]/50 border border-white/[0.03] mb-1 cursor-pointer hover:border-white/[0.08] transition-colors">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -406,7 +424,28 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
         </div>
       )}
 
+      {/* Strategy Library collapse header — lets the user hide the whole
+          template browser when they just want to watch Active Bots. */}
+      <div className="px-3 pt-2 pb-1 border-b border-white/[0.06]">
+        <button
+          onClick={() => setLibraryCollapsed(v => !v)}
+          className="flex items-center justify-between w-full group"
+          aria-expanded={!libraryCollapsed}
+        >
+          <p className="text-[10px] text-slate-500 font-medium group-hover:text-slate-300">
+            Strategy Library
+          </p>
+          <svg
+            className={`w-3 h-3 text-slate-500 group-hover:text-slate-300 transition-transform ${libraryCollapsed ? '-rotate-90' : ''}`}
+            fill="none" viewBox="0 0 24 24" stroke="currentColor"
+          >
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </button>
+      </div>
+
       {/* Category filter */}
+      {!libraryCollapsed && (
       <div className="flex items-center gap-1 px-3 py-2 border-b border-white/[0.06] overflow-x-auto scrollbar-none">
         {categories.map(c => (
           <button
@@ -421,8 +460,10 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
         ))}
         <span className="text-slate-500 text-xs ml-auto">&gt;</span>
       </div>
+      )}
 
       {/* Section labels + Bot cards */}
+      {!libraryCollapsed && (
       <div className="flex-1 overflow-y-auto px-3 py-2 space-y-1">
         {/* User's own strategies first */}
         {userStrategyCards.length > 0 && (category === 'all' || category === 'ai') && (
@@ -464,6 +505,7 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
           </>
         )}
       </div>
+      )}
     </div>
   );
 }
