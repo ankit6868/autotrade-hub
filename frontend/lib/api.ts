@@ -336,14 +336,23 @@ export const api = {
       history: (limit = 20) =>
         request<any>(`/api/futures/backtest/history?limit=${limit}`),
     },
-    forceClose: (pair: string, mode?: 'paper' | 'live', direction?: 'long' | 'short') =>
+    forceClose: (
+      pair: string,
+      mode?: 'paper' | 'live',
+      direction?: 'long' | 'short',
+      positionId?: string,
+    ) =>
       request<any>(`/api/futures/force-close/${pair}`, {
         method: 'POST',
-        // direction is OPTIONAL — when present the backend closes only the
-        // long OR the short on that pair. Without it the old behaviour closes
-        // every position on the pair, which was wiping hedge-mode pairs in
-        // one click.
-        body: JSON.stringify({ mode, ...(direction ? { direction } : {}) }),
+        // position_id targets ONE specific row (engine or DB-fallback).
+        // Without it the backend falls back to (pair, direction, mode)
+        // matching, which closes EVERY position sharing those keys —
+        // exactly the "Close = Close All" bug the user reported.
+        body: JSON.stringify({
+          mode,
+          ...(direction ? { direction } : {}),
+          ...(positionId ? { position_id: positionId } : {}),
+        }),
       }),
     manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5, leverage?: number, mode?: 'paper' | 'live', costUsdt?: number) =>
       request<any>('/api/futures/manual-entry', {
@@ -390,8 +399,15 @@ export const api = {
     // UX#15 — TF-mismatch warning (strategy's authored TF vs user's pick)
     strategyTfCheck: (strategyId: number, executionTf: string) =>
       request<any>(`/api/strategy/${strategyId}/tf-check?execution_tf=${encodeURIComponent(executionTf)}`),
-    // Phase 6 — partial close (e.g. book 50% then leave remainder)
-    partialClose: (data: { pair: string; mode: 'paper' | 'live'; close_pct: number }) =>
+    // Phase 6 — partial close (e.g. book 50% then leave remainder).
+    // position_id targets the specific row clicked; without it the backend
+    // picks the first engine-side match which may not be the user's row.
+    partialClose: (data: {
+      pair: string;
+      mode: 'paper' | 'live';
+      close_pct: number;
+      position_id?: string;
+    }) =>
       request<any>('/api/futures/position/partial-close', { method: 'POST', body: JSON.stringify(data) }),
     // Add margin to an open position (paper + live). Paper deducts from
     // engine balance, live calls KuCoin /api/v1/position/margin-deposit.

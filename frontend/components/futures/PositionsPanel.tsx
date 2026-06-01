@@ -58,13 +58,15 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
     }
   }, [refreshTrigger, refreshAll]);
 
-  async function closePosition(pair: string, direction?: 'long' | 'short') {
+  async function closePosition(pair: string, direction?: 'long' | 'short', positionId?: string) {
     setClosingPair(pair);
     try {
-      // Pass direction so backend closes ONLY this row's position. Without
-      // it, hedge-mode pairs (long + short on the same symbol) close in one
-      // click — the user's "closed one and all closed" bug.
-      const res = await api.futures.forceClose(pair, mode, direction);
+      // position_id targets ONE row even when multiple positions share
+      // pair + direction (stacked manual entries, DB-fallback rows after
+      // an engine restart). Without it the backend matches by
+      // pair+direction+mode and closes EVERY matching row — which made
+      // Close behave like Close-All.
+      const res = await api.futures.forceClose(pair, mode, direction, positionId);
       // Backend returns { error } when KuCoin refuses the close — show it
       // so the user understands why the position is still visible and can
       // act on the real reason (e.g. margin-mode mismatch, lot size).
@@ -81,10 +83,13 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
 
   // Phase 6 — book a configurable percentage of the position at market.
   // Used by the per-row dropdown (25/50/75%) on the Positions tab.
-  async function partialClose(pair: string, pct: number) {
+  async function partialClose(pair: string, pct: number, positionId?: string) {
     setClosingPair(pair);
     try {
-      const res = await api.futures.partialClose({ pair, mode, close_pct: pct });
+      const res = await api.futures.partialClose({
+        pair, mode, close_pct: pct,
+        ...(positionId ? { position_id: positionId } : {}),
+      });
       if (res?.error) {
         alert(res.error);
       } else {
@@ -141,8 +146,13 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
 
   async function closeAllPositions() {
     for (const p of positions) {
-      // Pass direction so each row closes its own side — hedge-mode safe.
-      await api.futures.forceClose(p.pair, mode, (p.side || p.direction) as 'long' | 'short');
+      // Pass per-row position_id so each iteration closes exactly that
+      // one row, even when several share pair + direction.
+      await api.futures.forceClose(
+        p.pair, mode,
+        (p.side || p.direction) as 'long' | 'short',
+        p.position_id,
+      );
     }
     refreshAll();
     onRefresh?.();
@@ -244,10 +254,11 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
 
 function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialClose, onRefresh, mode, account, refreshAll }: {
   positions: any[]; closingPair: string | null;
-  onClose: (pair: string, direction?: 'long' | 'short') => void; onCloseAll: () => void;
+  onClose: (pair: string, direction?: 'long' | 'short', positionId?: string) => void;
+  onCloseAll: () => void;
   // Phase 6: optional partial-close callback. When provided, the
   // "Close" button gains a dropdown for 25/50/75% partial close.
-  onPartialClose?: (pair: string, pct: number) => void;
+  onPartialClose?: (pair: string, pct: number, positionId?: string) => void;
   onRefresh?: () => void;
   // For the Add/Reduce Margin modal — needs the mode + wallet available
   mode: 'paper' | 'live';
@@ -399,26 +410,26 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                     {onPartialClose && (
                       <>
                         <button
-                          onClick={() => onPartialClose(p.pair, 25)}
+                          onClick={() => onPartialClose(p.pair, 25, p.position_id)}
                           disabled={closingPair === p.pair}
                           className="px-1.5 py-1 rounded bg-emerald-500/10 text-emerald-400 text-[10px] hover:bg-emerald-500/20 disabled:opacity-50"
-                          title="Book 25% of the position at market — keeps 75% open"
+                          title="Book 25% of THIS position at market — keeps 75% of this row open"
                         >
                           25%
                         </button>
                         <button
-                          onClick={() => onPartialClose(p.pair, 50)}
+                          onClick={() => onPartialClose(p.pair, 50, p.position_id)}
                           disabled={closingPair === p.pair}
                           className="px-1.5 py-1 rounded bg-emerald-500/15 text-emerald-400 text-[10px] hover:bg-emerald-500/25 disabled:opacity-50"
-                          title="Book 50% of the position at market — keeps 50% open"
+                          title="Book 50% of THIS position at market — keeps 50% of this row open"
                         >
                           50%
                         </button>
                         <button
-                          onClick={() => onPartialClose(p.pair, 75)}
+                          onClick={() => onPartialClose(p.pair, 75, p.position_id)}
                           disabled={closingPair === p.pair}
                           className="px-1.5 py-1 rounded bg-emerald-500/20 text-emerald-400 text-[10px] hover:bg-emerald-500/30 disabled:opacity-50"
-                          title="Book 75% of the position at market — keeps 25% open"
+                          title="Book 75% of THIS position at market — keeps 25% of this row open"
                         >
                           75%
                         </button>
@@ -433,10 +444,14 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                       Margin
                     </button>
                     <button
-                      onClick={() => onClose(p.pair, (p.side || p.direction) as 'long' | 'short')}
+                      onClick={() => onClose(
+                        p.pair,
+                        (p.side || p.direction) as 'long' | 'short',
+                        p.position_id,
+                      )}
                       disabled={closingPair === p.pair}
                       className="px-2 py-1 rounded bg-red-500/20 text-red-400 text-[10px] hover:bg-red-500/30"
-                      title="Market close 100% of this position only (won't touch other directions on the same pair)"
+                      title="Market close THIS position only — won't touch other rows even on the same pair/direction"
                     >
                       Close
                     </button>

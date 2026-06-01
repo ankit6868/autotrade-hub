@@ -946,18 +946,22 @@ def futures_open_positions(
     # Build positions list filtered by mode.
     # Each position may have a _mode tag (manual trades), otherwise use engine mode.
     native_positions = []
-    seen_keys: set[tuple[str, str, str, str]] = set()    # de-dupe across engines
+    # De-dup by engine trade_key (which is unique per position) plus the
+    # (engine_src, bot_key) tuple so that the same trade_key from two
+    # different engines doesn't collapse. CRITICAL: was previously
+    # de-duping by (pair, direction, mode, source) which collapsed every
+    # stacked manual entry on the same pair into ONE visible row even
+    # though the engine actually held N of them — and made the Close
+    # button effectively a Close-All because pair+direction was the only
+    # identifier the UI knew.
+    seen_keys: set[tuple[str, str, str]] = set()
     for _src, _bot_key, eng in engines_with_meta:
         with eng._lock:
-            for p in eng.positions.values():
+            for trade_key, p in eng.positions.items():
                 pos_mode = getattr(p, "_mode", eng._mode or "paper")
                 if mode is not None and pos_mode != mode:
                     continue
-                # De-dupe by (pair, direction, mode, source). Manual and
-                # bot positions on the same pair/direction are distinct —
-                # the bot engine owns its position independently of any
-                # manual order the user placed.
-                k = (p.pair, p.direction, pos_mode, _src + (_bot_key or ""))
+                k = (trade_key, _src, _bot_key or "")
                 if k in seen_keys:
                     continue
                 seen_keys.add(k)
@@ -976,6 +980,11 @@ def futures_open_positions(
                 "_pos_mode":         pos_mode,
                 "_source":           _src,
                 "bot_key":           _bot_key,
+                # Unique per-position handle. Frontend echoes this back
+                # on Close / partial-close so the backend can target ONE
+                # specific position even when multiple share pair+direction.
+                "position_id":       f"eng:{trade_key}",
+                "_engine_trade_key": trade_key,
                 "exchange_order_id": getattr(p, "exchange_order_id", None),
                 # UX#14: Phase-3 ARM state surfaced so the UI shows
                 # partial-close history per position.
@@ -1008,7 +1017,11 @@ def futures_open_positions(
                     else (entry - cur) / entry * stake if entry else 0
         lev_pnl   = raw_pnl * leverage
         native_trades.append({
-            "id":                f"futures-{p['pair']}-{p.get('_pos_mode','paper')}",
+            # Unique per-position id so Close / 25-50-75% target the
+            # exact row the user clicked instead of every position
+            # matching pair+direction.
+            "id":                p.get("position_id") or f"futures-{p['pair']}-{p.get('_pos_mode','paper')}",
+            "position_id":       p.get("position_id"),
             "pair":              p["pair"],
             "side":              direction,
             "entry_price":       entry,
@@ -1065,6 +1078,10 @@ def futures_open_positions(
         unreal  = round(t.amount * raw_pnl * lev, 4) if entry else 0
         db_trades.append({
             "id":                t.id,
+            # Unique per-row identifier — string-typed so the frontend
+            # can treat engine-backed and DB-fallback rows uniformly.
+            # "db:42" cleanly distinguishes from engine keys ("eng:<key>").
+            "position_id":       f"db:{t.id}",
             "pair":              t.pair,
             "side":              side,
             "entry_price":       entry,
@@ -1429,9 +1446,10 @@ async def futures_force_close(
     from sqlalchemy import update as sql_update
     from datetime import timezone as _tz
 
-    # Parse optional JSON body for mode + direction
+    # Parse optional JSON body for mode + direction + position_id
     req_mode = None
     req_direction = None
+    req_position_id: str | None = None
     try:
         body = await request.json()
         if isinstance(body, dict):
@@ -1442,6 +1460,13 @@ async def futures_force_close(
             d = body.get("direction")
             if d in ("long", "short"):
                 req_direction = d
+            # Optional — targets ONE specific row by its engine trade_key
+            # ("eng:<key>") or DB Trade id ("db:<id>"). When present, all
+            # other filters are subordinate to this id so Close on row N
+            # affects ONLY row N even when row M shares pair+direction.
+            pid = body.get("position_id")
+            if isinstance(pid, str) and pid:
+                req_position_id = pid
     except Exception:
         pass
 
@@ -1462,12 +1487,32 @@ async def futures_force_close(
     # size, etc.) the in-memory position stays and the user gets a real
     # error to retry with, instead of "everything looks gone here but
     # KuCoin still has it" — which was the previous bug.
+    # Decode position_id ("eng:<trade_key>" or "db:<id>") into separate
+    # targets. When position_id points to a DB row, the engine match
+    # below should match nothing — and the DB orphan path further down
+    # picks up the single targeted row.
+    target_eng_key: str | None = None
+    target_db_id: int | None = None
+    if req_position_id:
+        if req_position_id.startswith("eng:"):
+            target_eng_key = req_position_id[4:]
+        elif req_position_id.startswith("db:"):
+            try:
+                target_db_id = int(req_position_id[3:])
+            except ValueError:
+                target_db_id = None
+
     with eng._lock:
         matching = [
             (k, p) for k, p in eng.positions.items()
             if p.pair == pair
             and getattr(p, "_mode", eng._mode or "paper") == mode
             and (req_direction is None or p.direction == req_direction)
+            # When the caller targets a specific row, every other engine
+            # position is rejected — even when pair + direction + mode
+            # would otherwise match.
+            and (target_eng_key is None or k == target_eng_key)
+            and (target_db_id is None)
         ]
 
     # ── Step 2: place close orders on KuCoin Lead Trading ────────────────
@@ -1598,6 +1643,16 @@ async def futures_force_close(
     # LONG would also wipe their orphaned SHORT row from the DB.
     if req_direction:
         orphan_query = orphan_query.where(Trade.side == req_direction)
+    # When the caller targets a specific row, narrow the orphan close to
+    # just that DB id. This is what makes "Close on row N" actually
+    # close only row N when N rows share pair+direction+mode.
+    if target_db_id is not None:
+        orphan_query = orphan_query.where(Trade.id == target_db_id)
+    elif target_eng_key is not None:
+        # Engine target → don't touch the DB orphans (they're a different
+        # set of rows). Otherwise close-on-engine-row would also wipe
+        # DB-only rows on the same pair.
+        orphan_query = orphan_query.where(Trade.id == -1)  # match nothing
     orphan_trades = db.execute(orphan_query).scalars().all()
 
     for t in orphan_trades:
@@ -2481,6 +2536,19 @@ def partial_close_futures_position(
     pair      = req.get("pair")
     mode      = req.get("mode", "paper")
     close_pct = float(req.get("close_pct", 50))
+    # Optional unique row id so 25/50/75% targets the specific position
+    # the user clicked instead of "first match on this pair".
+    req_position_id = req.get("position_id")
+    target_eng_key: str | None = None
+    target_db_id: int | None = None
+    if isinstance(req_position_id, str) and req_position_id:
+        if req_position_id.startswith("eng:"):
+            target_eng_key = req_position_id[4:]
+        elif req_position_id.startswith("db:"):
+            try:
+                target_db_id = int(req_position_id[3:])
+            except ValueError:
+                target_db_id = None
     if not pair:
         return {"error": "pair is required"}
     if not (0.5 <= close_pct <= 99.5):
@@ -2520,6 +2588,15 @@ def partial_close_futures_position(
             pos_mode = getattr(p, "_mode", getattr(_eng, "_mode", "paper"))
             if pos_mode != mode:
                 continue
+            # When the caller targets a specific engine row, accept only
+            # that exact trade_key. When they target a DB row (or no
+            # specific id was passed), behave as before.
+            if target_eng_key is not None and k != target_eng_key:
+                continue
+            if target_db_id is not None:
+                # User wants the DB-fallback orphan path — don't match
+                # any engine position so we fall through to that branch.
+                continue
             eng = _eng
             pos = p
             trade_key = k
@@ -2532,52 +2609,88 @@ def partial_close_futures_position(
         # Position not in any running engine, but might be an ORPHAN row
         # in the trades table (engine was killed/restarted leaving the
         # Trade row marked status='open' with no engine to manage it).
-        # Partial-close needs an engine to track remaining_pct, so the
-        # only sensible recovery for an orphan is a FULL close. Convert
-        # the request into a force-close + tell the user.
-        orphan = db.execute(
-            select(Trade).where(
-                Trade.user_id    == user_id,
-                Trade.pair       == pair,
-                Trade.market_type == "futures",
-                Trade.mode       == mode,
-                Trade.status     == "open",
-            ).order_by(desc(Trade.entry_time)).limit(1)
-        ).scalar_one_or_none()
+        #
+        # When the caller targets a specific row (target_db_id), use that
+        # exact row — the user clicked 25/50/75% on that row and expects
+        # only that one to be affected. Otherwise fall back to "most
+        # recent orphan on this pair", which is the legacy behaviour.
+        orphan_q = select(Trade).where(
+            Trade.user_id    == user_id,
+            Trade.pair       == pair,
+            Trade.market_type == "futures",
+            Trade.mode       == mode,
+            Trade.status     == "open",
+        )
+        if target_db_id is not None:
+            orphan_q = orphan_q.where(Trade.id == target_db_id)
+        else:
+            orphan_q = orphan_q.order_by(desc(Trade.entry_time)).limit(1)
+        orphan = db.execute(orphan_q).scalar_one_or_none()
         if orphan is None:
             return {"error": f"No open position for {pair} in {mode} mode"}
-        # Force-close the orphan at the current mark price.
+
+        # ── Actually do a PARTIAL close on the DB row ─────────────────
+        # Previously this branch did a forced FULL close regardless of
+        # close_pct — which is exactly the "25% closes the whole
+        # position" bug the user flagged. The Trade row doesn't have a
+        # remaining_pct column, but we can simulate the partial by
+        # reducing `amount` (= margin) and crediting the booked leg P&L
+        # into profit_abs (additive). Position stays status=open with
+        # the smaller margin until it's fully closed.
         from datetime import timezone as _tz
         exit_p = _futures_ticker_price(pair) or orphan.entry_price
         now_dt = datetime.now(_tz.utc)
-        orphan.exit_price = exit_p
-        orphan.exit_time  = now_dt
-        orphan.exit_reason = "manual_partial_close_orphan_full"
-        orphan.status     = "closed"
         side = getattr(orphan, "side", "long") or "long"
+        lev = orphan.leverage or 1
         if side == "short":
-            orphan.profit_pct = round(
-                (orphan.entry_price - exit_p) / orphan.entry_price * 100 * (orphan.leverage or 1), 4
-            )
+            leg_pct = (orphan.entry_price - exit_p) / orphan.entry_price * 100 * lev
         else:
-            orphan.profit_pct = round(
-                (exit_p - orphan.entry_price) / orphan.entry_price * 100 * (orphan.leverage or 1), 4
-            )
-        orphan.profit_abs = round((orphan.amount or 0) * orphan.profit_pct / 100, 4)
+            leg_pct = (exit_p - orphan.entry_price) / orphan.entry_price * 100 * lev
+        close_fraction = close_pct / 100.0
+        prev_amount = float(orphan.amount or 0)
+        leg_margin = prev_amount * close_fraction
+        leg_pnl = leg_margin * (leg_pct / 100.0)
+        new_amount = prev_amount - leg_margin
+
+        is_full_close = new_amount <= 0.01
+        if is_full_close:
+            # Effectively done — close the row.
+            orphan.exit_price  = exit_p
+            orphan.exit_time   = now_dt
+            orphan.exit_reason = "manual_partial_close_full"
+            orphan.status      = "closed"
+            orphan.profit_pct  = round(leg_pct, 4)
+            orphan.profit_abs  = round((orphan.profit_abs or 0.0) + leg_pnl, 4)
+        else:
+            # True partial: shrink amount, accumulate booked P&L on the
+            # row. status stays 'open' so the row keeps showing.
+            orphan.amount     = round(new_amount, 8)
+            orphan.profit_abs = round((orphan.profit_abs or 0.0) + leg_pnl, 4)
+
+        # Credit the user's main paper engine balance with the leg P&L.
+        # Without this the user "books" partial profit in the orphan row
+        # but their visible Asset Overview never updates.
+        if mode == "paper":
+            try:
+                _eng = futures_engine_registry.for_user(user_id)
+                if _eng is not None:
+                    with _eng._lock:
+                        _eng.balance = float(_eng.balance or 0.0) + leg_pnl
+            except Exception:
+                pass
+
         db.commit()
         return {
-            "ok": True,
-            "pair": pair,
-            "mode": mode,
-            "fill_price": exit_p,
-            "close_pct": 100.0,
-            "warning": (
-                "Position was orphaned (no engine tracking it). Partial "
-                "close requires an engine, so we did a FULL close at "
-                f"{exit_p:.2f} instead. Realised P&L "
-                f"{orphan.profit_pct:+.2f}% / {orphan.profit_abs:+.2f} USDT."
-            ),
-            "trade_id": orphan.id,
+            "ok":            True,
+            "pair":          pair,
+            "mode":          mode,
+            "fill_price":    exit_p,
+            "close_pct":     close_pct,
+            "leg_pnl":       round(leg_pnl, 4),
+            "remaining_pct": round((new_amount / max(prev_amount, 0.0001)) * 100.0, 2),
+            "fully_closed":  is_full_close,
+            "trade_id":      orphan.id,
+            "source":        "db_orphan",
         }
 
     close_fraction = close_pct / 100.0
