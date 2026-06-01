@@ -395,6 +395,11 @@ class PendingOrder:
         "stop_price", "leverage", "margin_mode", "tp_price", "sl_price",
         "hidden", "post_only", "reduce_only", "time_in_force",
         "created_at", "db_id", "cost_usdt",
+        # "paper" | "live". The /order endpoint registers both in the
+        # engine for matching tracking purposes, but only paper orders
+        # should be filled locally — live orders are filled by KuCoin
+        # and surfaced via the order-reconcile path.
+        "mode",
     )
 
     def __init__(self, **kwargs):
@@ -2205,6 +2210,7 @@ class FuturesEngine(NativeTradingEngine):
         reduce_only: bool = False,
         time_in_force: str = "GTC",
         cost_usdt: float = 0,
+        mode: str = "paper",
     ) -> dict:
         with self._lock:
             self._order_counter += 1
@@ -2219,6 +2225,7 @@ class FuturesEngine(NativeTradingEngine):
                 hidden=hidden, post_only=post_only,
                 reduce_only=reduce_only, time_in_force=time_in_force,
                 cost_usdt=cost_usdt,
+                mode=mode,
             )
             self._pending_orders[oid] = order
         return {"order_id": oid, "status": "pending", "symbol": symbol, "side": side, "type": order_type}
@@ -2270,7 +2277,14 @@ class FuturesEngine(NativeTradingEngine):
         return self._per_symbol_margin.get(symbol, self._margin_mode)
 
     def _check_pending_orders(self, pair: str, current_price: float):
-        """Check and fill pending orders that match the current price (paper mode)."""
+        """Check and fill pending PAPER orders that match the current price.
+
+        LIVE orders are deliberately skipped here — they're filled by
+        KuCoin and surfaced via the order-reconcile path in
+        /api/futures/orders. If we filled them locally too, the user
+        would end up with both a phantom local position AND the real
+        KuCoin position once it executes.
+        """
         symbol_variants = [
             pair.replace("/", "").replace("USDT", "USDTM"),
             pair.replace("/", "-"),
@@ -2280,6 +2294,11 @@ class FuturesEngine(NativeTradingEngine):
         with self._lock:
             for oid, order in list(self._pending_orders.items()):
                 if order.symbol not in symbol_variants:
+                    continue
+                # Mode tag added when /order persisted the engine row.
+                # Fallback to "paper" for orders created before the tag
+                # existed (in-memory only — wiped on next restart).
+                if getattr(order, "mode", "paper") != "paper":
                     continue
                 if order.should_fill(current_price):
                     orders_to_fill.append((oid, order))

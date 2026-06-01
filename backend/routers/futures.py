@@ -2041,7 +2041,11 @@ def place_futures_order(
         except Exception as e:
             return {"error": f"Lead Trading order failed: {e}"}
 
-    # Also track in engine (paper mode uses this for matching)
+    # Also track in engine (paper mode uses this for matching).
+    # Pass `mode` so the manual-paper watchdog can filter out LIVE pending
+    # orders — without it, live orders would be "filled" locally by
+    # tick_pending_orders_paper, creating phantom paper positions for
+    # orders KuCoin is independently working on.
     result = eng.place_pending_order(
         symbol=symbol, side=side, order_type=order_type, size=size,
         price=price, stop_price=stop_price, leverage=leverage,
@@ -2050,6 +2054,7 @@ def place_futures_order(
         hidden=hidden, post_only=post_only, reduce_only=reduce_only,
         time_in_force=time_in_force,
         cost_usdt=cost_usdt,
+        mode=mode,
     )
 
     # Persist to DB — include `mode` so paper limit orders don't leak into
