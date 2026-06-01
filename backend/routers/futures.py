@@ -2925,12 +2925,46 @@ def get_futures_orders(
                 ).scalars().all()
                 changed = False
                 for o in pending_rows:
-                    if str(o.exchange_order_id) not in live_active_ids:
-                        o.status     = "filled"
-                        o.filled_at  = datetime.utcnow()
-                        changed = True
-                        log.info("[%s] Reconcile: order %s no longer active on "
-                                 "KuCoin → marked filled", user_id, o.exchange_order_id)
+                    if str(o.exchange_order_id) in live_active_ids:
+                        continue
+                    # Disappeared from active list. Could mean FILLED or
+                    # CANCELLED — previously we always marked "filled"
+                    # which was wrong for orders the user cancelled on
+                    # KuCoin's own UI (they'd show as Filled in our
+                    # history with no exit). Fetch the order's actual
+                    # final state and use that.
+                    new_status = "filled"   # default fallback
+                    try:
+                        detail = _kucoin_get_signed(
+                            f"/api/v1/orders/{o.exchange_order_id}",
+                            eng._api_key, eng._api_sec, eng._api_pass,
+                            base_url=KUCOIN_FUTURES_BASE,
+                        )
+                        if str(detail.get("code")) == "200000":
+                            d = detail.get("data") or {}
+                            deal_size = float(d.get("dealSize") or 0)
+                            is_cancelled = bool(d.get("cancelExist"))
+                            if is_cancelled and deal_size <= 0:
+                                new_status = "cancelled"
+                            elif deal_size > 0:
+                                new_status = "filled"
+                            else:
+                                # Edge case — order gone, no fill, not
+                                # explicitly cancelled. Treat as cancelled
+                                # so we don't claim a phantom fill.
+                                new_status = "cancelled"
+                    except Exception as detail_exc:
+                        log.debug("[%s] order-detail lookup for %s failed: %s "
+                                  "(defaulting to filled)",
+                                  user_id, o.exchange_order_id, detail_exc)
+                    o.status = new_status
+                    if new_status == "filled":
+                        o.filled_at = datetime.utcnow()
+                    else:
+                        o.cancelled_at = datetime.utcnow()
+                    changed = True
+                    log.info("[%s] Reconcile: order %s no longer active "
+                             "→ marked %s", user_id, o.exchange_order_id, new_status)
                 if changed:
                     db.commit()
         except Exception as e:

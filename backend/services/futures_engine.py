@@ -1131,6 +1131,14 @@ class FuturesEngine(NativeTradingEngine):
                     if len(self.positions) == 0:
                         self._log_action("wind_down_complete", "All positions closed — stopping engine")
                         log.info("[%s] Wind-down complete, all positions closed", self.user_id)
+                        # Flip DB is_running=False so the watchdog won't
+                        # resurrect this bot 60s after the wind-down ends.
+                        # Without this, "Stop bot with open positions" →
+                        # wind-down → last position TP-hits → engine dies
+                        # → 60s later watchdog finds is_running=True in DB,
+                        # spins the engine back up → bot is "running" again
+                        # even though the user explicitly stopped it.
+                        self._persist_auto_stop(reason="wind_down_complete")
                         self._stop_evt.set()
                     continue
 
@@ -1699,6 +1707,55 @@ class FuturesEngine(NativeTradingEngine):
             except Exception:
                 pass
         return ok, err
+
+    def tick_pending_orders_paper(self) -> int:
+        """Fill any pending paper limit/stop orders whose trigger price has
+        been reached. The main user engine never runs _run_loop, so without
+        this paper limit orders would sit in Open Orders forever even after
+        price crossed the limit — making the paper trading flow incomplete.
+
+        LIVE pending orders are handled by KuCoin itself + the existing
+        order-reconcile in /api/futures/orders, so we skip them here.
+
+        Returns number of orders that filled this tick.
+        """
+        if not self._pending_orders:
+            return 0
+        # Snapshot the pairs we need prices for.
+        pairs = list({o.symbol for o in self._pending_orders.values()})
+        # _check_pending_orders takes a normalised "BTC/USDT" pair.
+        # Engine pending orders store symbol in whatever format the
+        # caller used (e.g. "BTCUSDTM"); normalise back.
+        def _to_pair(sym: str) -> str:
+            if "/" in sym:
+                return sym
+            if sym.endswith("USDTM"):
+                base = sym[:-5].replace("XBT", "BTC")
+                return f"{base}/USDT"
+            if sym.endswith("USDT"):
+                return f"{sym[:-4]}/USDT"
+            return sym
+        filled = 0
+        seen_pairs = set()
+        for sym in pairs:
+            pair = _to_pair(sym)
+            if pair in seen_pairs:
+                continue
+            seen_pairs.add(pair)
+            live_price = self._get_live_price(pair)
+            if live_price is None:
+                continue
+            before = len(self._pending_orders)
+            try:
+                self._check_pending_orders(pair, live_price)
+            except Exception as exc:
+                log.warning("[%s] tick_pending_orders_paper(%s) failed: %s",
+                            self.user_id, pair, exc)
+                continue
+            after = len(self._pending_orders)
+            if after < before:
+                filled += (before - after)
+        return filled
 
     def tick_manual_position_management(self) -> int:
         """Process liq + TP/SL exits for PAPER positions on this engine

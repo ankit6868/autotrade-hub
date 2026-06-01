@@ -3266,15 +3266,21 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
 
 
 async def _manual_position_watchdog():
-    """Tick TP/SL/liquidation on manual-paper positions every 5s.
+    """Tick paper limit-order fills + manual TP/SL/liquidation every 5s.
 
-    Manual positions live on the MAIN user engine (for_user) whose
-    `_run_loop` is never started (no strategy configured). Without this
-    task, TP/SL/liq on a /manual-entry paper position would never fire —
-    the user would have to click Close themselves.
+    The MAIN user engine (for_user) never starts _run_loop (no strategy
+    configured). Without this watchdog:
+      • /manual-entry paper positions never auto-exit on TP/SL/liq
+      • /order paper limit orders never auto-fill when price crosses
+    Both behaviours leave the user unable to actually paper-trade
+    without manually clicking Close / hoping the order fills magically.
 
-    Cheap: skips users with no open positions. Mirrors the bot loop's
-    5s fast-tick when positions are open.
+    LIVE positions/orders are handled by KuCoin natively + the
+    reconcile in /api/futures/orders (limit fills) and the
+    maybe_reconcile_live_positions path (position drift).
+
+    Cheap: skips users with no positions AND no pending orders.
+    Mirrors the bot loop's 5s fast-tick when state needs attention.
     """
     import logging
     log = logging.getLogger("manual-watchdog")
@@ -3289,14 +3295,27 @@ async def _manual_position_watchdog():
             with futures_engine_registry._lock:
                 engines = list(futures_engine_registry._engines.values())
             for eng in engines:
-                if not eng.positions:
+                # Skip engines with no work to do.
+                if not eng.positions and not getattr(eng, "_pending_orders", None):
                     continue
+                # 1. Fill any paper limit/stop orders whose price has crossed.
                 try:
-                    n = eng.tick_manual_position_management()
-                    if n > 0:
-                        log.info("[%s] manual-watchdog closed %d position(s)", eng.user_id, n)
+                    nf = eng.tick_pending_orders_paper()
+                    if nf > 0:
+                        log.info("[%s] manual-watchdog filled %d order(s)", eng.user_id, nf)
                 except Exception as exc:
-                    log.warning("[%s] manual-watchdog tick failed: %s", eng.user_id, exc)
+                    log.warning("[%s] manual-watchdog order-fill tick failed: %s",
+                                eng.user_id, exc)
+                # 2. TP/SL/liq on open positions (may include positions
+                #    that were just created by step 1's fills).
+                try:
+                    nc = eng.tick_manual_position_management()
+                    if nc > 0:
+                        log.info("[%s] manual-watchdog closed %d position(s)",
+                                 eng.user_id, nc)
+                except Exception as exc:
+                    log.warning("[%s] manual-watchdog exit tick failed: %s",
+                                eng.user_id, exc)
         except Exception as outer_exc:
             log.warning("Manual-position watchdog outer failure: %s", outer_exc)
         await asyncio.sleep(INTERVAL)
