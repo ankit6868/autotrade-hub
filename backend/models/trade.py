@@ -99,6 +99,11 @@ class StrategyInstance(Base):
     wallet = Column(Float, default=1000.0)
     risk_pct = Column(Float, default=5.0)
     is_running = Column(Boolean, default=False)
+    # NICE-6 — pause state persists across backend restarts so a bot the
+    # user paused doesn't silently un-pause after a Railway redeploy or
+    # crash recovery. Auto-resume reads this column and re-applies the
+    # paused flag on the engine after start.
+    is_paused = Column(Boolean, default=False)
     engine_key = Column(Text, unique=True)        # user_id:instance_id
     total_trades = Column(Integer, default=0)
     total_pnl = Column(Float, default=0.0)

@@ -985,6 +985,13 @@ def futures_open_positions(
                 # specific position even when multiple share pair+direction.
                 "position_id":       f"eng:{trade_key}",
                 "_engine_trade_key": trade_key,
+                # db_id of the corresponding Trade row (if any). Used by
+                # the merge below to suppress only the SPECIFIC DB row
+                # this engine position covers, not every DB row sharing
+                # the pair. Without it the engine having 1 position on
+                # BTC/USDT was hiding the OTHER 4 DB rows on BTC/USDT
+                # whose engine state was lost on backend restart.
+                "_db_id":            getattr(p, "db_id", None),
                 "exchange_order_id": getattr(p, "exchange_order_id", None),
                 # UX#14: Phase-3 ARM state surfaced so the UI shows
                 # partial-close history per position.
@@ -1022,6 +1029,9 @@ def futures_open_positions(
             # matching pair+direction.
             "id":                p.get("position_id") or f"futures-{p['pair']}-{p.get('_pos_mode','paper')}",
             "position_id":       p.get("position_id"),
+            # Mirror db_id onto the trade so the merge below can dedup
+            # row-by-row instead of by pair.
+            "_db_id":            p.get("_db_id"),
             "pair":              p["pair"],
             "side":              direction,
             "entry_price":       entry,
@@ -1100,7 +1110,15 @@ def futures_open_positions(
             "bot_key":           None,
         })
 
-    merged = native_trades + [t for t in db_trades if t["pair"] not in pairs_in_native]
+    # Merge by db_id, not by pair. Previously any pair that had at least
+    # one native engine position caused ALL DB-fallback rows for that pair
+    # to be dropped — so when an engine restart left N-1 of N positions
+    # without an engine binding, the user saw 1 row in the UI instead of N.
+    # Now: a DB row is suppressed only when the engine actually carries it
+    # (engine pos.db_id matches Trade.id). Rows the engine doesn't know
+    # about pass through and the user can still see and close them.
+    native_db_ids: set[int] = {t["_db_id"] for t in native_trades if t.get("_db_id")}
+    merged = native_trades + [t for t in db_trades if t["id"] not in native_db_ids]
 
     # ── Reconcile with KuCoin Lead Trading for live mode ─────────────────
     # Limit orders that fill immediately (e.g. buy-above-market) and any
@@ -4563,6 +4581,10 @@ def pause_futures_bot(
     if not eng or not eng.is_running:
         return {"error": "Bot engine is not running."}
     eng.pause()
+    # Persist so auto-resume re-applies the paused flag after a backend
+    # restart. Without this the bot silently un-pauses on every redeploy.
+    instance.is_paused = True
+    db.commit()
     log_event(db, user_id, "futures.pause_bot", request, payload={"bot_id": bot_id})
     return {"paused": True, "bot_id": bot_id}
 
@@ -4589,6 +4611,8 @@ def resume_futures_bot(
     if not eng or not eng.is_running:
         return {"error": "Bot engine is not running."}
     eng.resume()
+    instance.is_paused = False
+    db.commit()
     log_event(db, user_id, "futures.resume_bot", request, payload={"bot_id": bot_id})
     return {"paused": False, "bot_id": bot_id}
 

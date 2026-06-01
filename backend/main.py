@@ -3255,6 +3255,18 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
                     equal_price_thresh   = getattr(i, "equal_price_thresh", None),
                 )
                 resumed += 1
+                # Re-apply paused state if the bot was paused before the
+                # backend went down. Without this, a paused bot silently
+                # un-pauses on every Railway redeploy → new entries start
+                # firing again from a strategy the user explicitly halted.
+                if getattr(i, "is_paused", False):
+                    try:
+                        eng.pause()
+                        log.info("%s: re-applied PAUSED state to %s",
+                                 log_label, i.engine_key)
+                    except Exception as pause_exc:
+                        log.warning("%s: failed to re-apply pause to %s: %s",
+                                    log_label, i.engine_key, pause_exc)
                 log.info("%s: spun up %s (%s) for user %s",
                          log_label, i.strategy_name, i.engine_key, i.user_id)
             except Exception as resume_exc:
