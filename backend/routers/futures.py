@@ -33,6 +33,17 @@ _cache: dict[str, tuple[float, any]] = {}
 CACHE_TTL = 1.5  # seconds
 
 
+# Per-pair price cache. /open + /account + force-close + partial-close all
+# call _futures_ticker_price; without a cache, a Positions tab with 5
+# pairs makes 5 SEQUENTIAL KuCoin calls (each up to 5s timeout) on every
+# 8s poll — the user-visible "futures terminal is slow" symptom. 2s TTL
+# is short enough that prices stay essentially real-time (5x faster than
+# the UI poll interval) but long enough that all 6 endpoints in a single
+# poll cycle hit the cache after the first miss.
+_ticker_cache: dict[str, tuple[float, float]] = {}   # pair → (timestamp, price)
+_TICKER_TTL = 2.0
+
+
 def _futures_ticker_price(pair: str) -> float | None:
     """Bug-fix helper: get the FUTURES perp last price for a pair.
 
@@ -44,8 +55,16 @@ def _futures_ticker_price(pair: str) -> float | None:
     helper hits api-futures.kucoin.com so every futures-router endpoint
     references the correct market.
 
+    Cached for _TICKER_TTL seconds to collapse parallel calls within a
+    single UI poll cycle into one upstream request per pair.
+
     Returns None on transport / parsing failure so the caller can fall
     back to an entry-price-based P&L estimate."""
+    import time as _t
+    now = _t.time()
+    cached = _ticker_cache.get(pair)
+    if cached is not None and (now - cached[0]) < _TICKER_TTL:
+        return cached[1]
     try:
         from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
         from backend.services.kucoin_futures_client import (
@@ -57,13 +76,20 @@ def _futures_ticker_price(pair: str) -> float | None:
         )
         url = f"{_base}/api/v1/ticker?symbol={sym}"
         req = _ureq.Request(url, headers={"User-Agent": "AutoTradeHub/2.0"})
-        with _proxy_urlopen(req, timeout=5) as resp:
+        # Tightened from 5s to 2s — the UI poll runs 6 endpoints in
+        # parallel; one slow ticker request stalling at 5s blocked the
+        # whole Positions tab refresh. 2s is more than enough for
+        # KuCoin's healthy p95 (~150ms) while failing fast on outages.
+        with _proxy_urlopen(req, timeout=2) as resp:
             data = _json.loads(resp.read().decode())
         if str(data.get("code")) != "200000":
             return None
         d = data.get("data") or {}
         p = float(d.get("price", 0) or 0)
-        return p if p > 0 else None
+        if p > 0:
+            _ticker_cache[pair] = (now, p)
+            return p
+        return None
     except Exception:
         return None
 
@@ -1444,6 +1470,31 @@ def futures_manual_entry(
         "exchange_order_id": exchange_order_id,
         "margin": round(stake, 4),                   # what KuCoin actually locked
         "notional": real_notional,                    # position value at entry
+        # Position payload in the SAME shape /api/futures/open emits so
+        # the frontend can optimistically prepend the new row instead of
+        # waiting on a full panel refresh (~1-2 second perceived latency
+        # for the "click Buy → row appears" round-trip).
+        "position": {
+            "id":                f"eng:{pos_key}",
+            "position_id":       f"eng:{pos_key}",
+            "_db_id":            db_id,
+            "pair":              pair,
+            "side":              direction,
+            "entry_price":       entry_price,
+            "current_price":     entry_price,
+            "amount":            round(stake, 4),
+            "leverage":          leverage,
+            "liquidation_price": pos.liquidation_price,
+            "stoploss_price":    sl_price,
+            "tp_price":          tp_price,
+            "entry_time":        str(now),
+            "mode":              mode,
+            "exchange_order_id": exchange_order_id,
+            "market_type":       "futures",
+            "unrealized_pnl":    0.0,
+            "source":            "manual",
+            "bot_key":           None,
+        },
     }
 
 
@@ -4126,7 +4177,25 @@ def list_futures_bots(
     # Check actual engine status for running bots
     bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
 
-    # Auto-resume: restart engines for bots marked running in DB but with no live thread
+    # Auto-resume: restart engines for bots marked running in DB but with no
+    # live thread. Throttled per-user — the dedicated 60s _bot_watchdog in
+    # main.py already revives dead engines on its own cadence; running the
+    # resume scan on EVERY /bots poll (UI refreshes every 8s) was making
+    # this endpoint slow when several bots had decryption / start_futures
+    # latency. We still run it on the FIRST poll after each interval so a
+    # user opening the panel immediately after a backend restart gets an
+    # instant revive.
+    import time as _time_mod
+    global _last_bots_autoresume_ts
+    try:
+        _last_bots_autoresume_ts
+    except NameError:
+        _last_bots_autoresume_ts = {}
+    AUTORESUME_THROTTLE_SECS = 30.0
+    _now_resume = _time_mod.time()
+    _last_for_user = _last_bots_autoresume_ts.get(user_id, 0.0)
+    _should_autoresume = (_now_resume - _last_for_user) >= AUTORESUME_THROTTLE_SECS
+
     _kk = _ks = _kp = ""
     _creds_loaded = False
     for i in instances:
@@ -4134,6 +4203,12 @@ def list_futures_bots(
             continue
         eng = bot_engines.get(i.engine_key)
         if eng and eng.is_running:
+            continue
+        if not _should_autoresume:
+            # Skip the resume work this cycle — the watchdog will handle it
+            # within 60s. The bot card will still show is_running=true from
+            # the DB row; engine_running will read false, which is
+            # accurate ("DB says yes, engine actually dead, watchdog en route").
             continue
         # Engine is dead — resume it
         if not _creds_loaded:
@@ -4177,6 +4252,9 @@ def list_futures_bots(
                      i.engine_key, user_id, getattr(i, "arm_enabled", False))
         except Exception as exc:
             log.warning("Failed to auto-resume bot %s: %s", i.engine_key, exc)
+    # Record this attempt so the throttle gate skips the next ~30s.
+    if _should_autoresume:
+        _last_bots_autoresume_ts[user_id] = _now_resume
     # Refresh engine list after potential resumes
     bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
 
