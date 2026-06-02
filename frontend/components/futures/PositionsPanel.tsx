@@ -620,7 +620,17 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
             pair: marginPosition.pair,
             direction: (marginPosition.direction || marginPosition.side || 'long') as 'long' | 'short',
             entry: Number(marginPosition.entry_price ?? marginPosition.entry ?? 0),
-            size: Number(marginPosition.margin ?? marginPosition.stake ?? marginPosition.size ?? 0),
+            // /api/futures/open emits the margin as `amount` (not size /
+            // margin / stake). Reading the wrong field made the modal
+            // show "Current: 0.00" → leverage / liq-price preview math
+            // all divided by ~0 → garbage "After" values.
+            size: Number(
+              marginPosition.amount
+              ?? marginPosition.margin
+              ?? marginPosition.stake
+              ?? marginPosition.size
+              ?? 0
+            ),
             leverage: Number(marginPosition.leverage ?? 1),
             liquidation_price: Number(marginPosition.liq_price ?? marginPosition.liquidation_price ?? 0),
             // Pass through so add/reduce-margin targets the exact hedge

@@ -47,19 +47,39 @@ export default function MarginAdjustModal({
   const amt = Number(amount);
   const isValid = !isNaN(amt) && amt >= 0.01 && amt <= 1_000_000;
   const maxAddable = walletAvailable;
-  const maxReducible = Math.max(0, position.size - position.size * 0.10 - 0.5);
+  // Match backend's safety floor exactly (position_reduce_margin):
+  //   min_margin = max(0.5, size × 0.10)
+  // Reducible = size - min_margin.
+  // Old code did size − size×0.10 − 0.5 (the floor terms stacked) which
+  // showed a too-pessimistic max and could even go negative for small
+  // positions, displaying "0.00" even when ~0.7 USDT was reducible.
+  const minMargin = Math.max(0.5, position.size * 0.10);
+  const maxReducible = Math.max(0, position.size - minMargin);
 
-  // Preview impact (matches backend math)
-  const previewEffectiveLev = tab === 'add'
-    ? (position.size * position.leverage) / Math.max(position.size + (isValid ? amt : 0), 0.01)
-    : (position.size * position.leverage) / Math.max(position.size - (isValid ? amt : 0), 0.01);
+  // Preview impact (matches backend's _recompute_liq_price math).
+  // notional = original margin × original leverage. After margin change
+  // the notional is unchanged (margin add/reduce doesn't change position
+  // size); only the EFFECTIVE leverage changes:
+  //   effective_lev = notional / new_margin
+  const previewNewMargin = tab === 'add'
+    ? position.size + (isValid ? amt : 0)
+    : position.size - (isValid ? amt : 0);
+  const notional = position.size * position.leverage;
+  const previewEffectiveLev = previewNewMargin > 0.01
+    ? notional / previewNewMargin
+    : position.leverage;
+  // Liq is unreachable in normal market when effective leverage drops
+  // below ~1 (position is over-collateralised). Show "Never" instead of
+  // a confusing negative number that the old code clamped to 0.
+  const liqUnreachable = isValid && previewEffectiveLev < 1.001;
 
   const previewLiqPrice = (() => {
     if (!isValid) return position.liquidation_price ?? 0;
+    if (liqUnreachable) return null;
     if (position.direction === 'long') {
-      return position.entry * (1 - 1 / Math.max(previewEffectiveLev, 1));
+      return position.entry * (1 - 1 / previewEffectiveLev);
     } else {
-      return position.entry * (1 + 1 / Math.max(previewEffectiveLev, 1));
+      return position.entry * (1 + 1 / previewEffectiveLev);
     }
   })();
 
@@ -217,8 +237,16 @@ export default function MarginAdjustModal({
               </div>
               <div className={`text-right tabular-nums ${
                 isValid ? (tab === 'add' ? 'text-emerald-300' : 'text-red-300') : 'text-slate-600'
-              }`}>
-                {isValid ? fmtPrice(previewLiqPrice) : '—'}
+              }`}
+              title={liqUnreachable
+                ? "Adding this much margin drops effective leverage below 1× — position is over-collateralised and can't liquidate from a typical price move."
+                : ''}
+              >
+                {isValid
+                  ? (liqUnreachable || previewLiqPrice === null
+                      ? 'Never'
+                      : fmtPrice(previewLiqPrice as number))
+                  : '—'}
               </div>
               <div className="text-slate-400">Entry Price</div>
               <div className="text-right text-slate-300 tabular-nums">{fmtPrice(position.entry)}</div>
