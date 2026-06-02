@@ -185,36 +185,42 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
 
   return (
     <div className="flex flex-col h-full">
-      {/* Lead Trading / Mode Status — always visible */}
+      {/* Account status banner — mirror the Manual tab's pattern so
+          paper bots show "Paper Trading Account" instead of confusingly
+          claiming "Lead Trading Connected" (paper doesn't touch Lead
+          Trading at all). Live bots show the real Lead Trading state. */}
       <div className={`flex items-center justify-between px-3 py-2 text-xs font-bold border-b ${
-        leadStatus?.connected
-          ? 'bg-emerald-500/20 border-emerald-500/30'
-          : mode === 'live'
-            ? 'bg-amber-500/20 border-amber-500/30'
-            : 'bg-indigo-500/20 border-indigo-500/30'
+        mode === 'paper'
+          ? 'bg-indigo-500/20 border-indigo-500/30'
+          : leadStatus?.connected
+            ? 'bg-emerald-500/20 border-emerald-500/30'
+            : 'bg-amber-500/20 border-amber-500/30'
       }`}>
         <div className="flex items-center gap-2">
           <span className={`w-2 h-2 rounded-full shrink-0 ${
-            leadStatus?.connected
-              ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]'
-              : mode === 'live' ? 'bg-amber-400' : 'bg-indigo-400'
+            mode === 'paper'
+              ? 'bg-indigo-400'
+              : leadStatus?.connected
+                ? 'bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]'
+                : 'bg-amber-400'
           }`} />
           <span className={
-            leadStatus?.connected ? 'text-emerald-300'
-              : mode === 'live' ? 'text-amber-300' : 'text-indigo-300'
+            mode === 'paper' ? 'text-indigo-300'
+              : leadStatus?.connected ? 'text-emerald-300' : 'text-amber-300'
           }>
-            {leadStatus?.connected
-              ? mode === 'paper'
-                /* Paper mode: show paper engine balance, NOT the KuCoin 0-balance */
-                ? `Lead Trading Connected • ${(paperBalance ?? 1000).toFixed(2)} USDT`
-                : `Lead Trading Connected • ${(leadStatus.balance ?? 0).toFixed(2)} USDT`
-              : mode === 'live'
-                ? 'Lead Trading: Not Connected'
-                : `Paper Mode • ${(paperBalance ?? 1000).toFixed(2)} USDT`}
+            {mode === 'paper'
+              ? `Paper Trading Account`
+              : leadStatus?.connected
+                ? `Lead Trading Connected • ${(leadStatus.balance ?? 0).toFixed(2)} USDT`
+                : 'Lead Trading: Not Connected'}
           </span>
         </div>
-        {mode === 'paper' && (
-          <span className="text-[10px] text-indigo-300 font-medium">Paper Mode</span>
+        {mode === 'paper' ? (
+          <span className="text-[11px] text-indigo-300 font-medium">
+            {(paperBalance ?? 1000).toFixed(2)} USDT
+          </span>
+        ) : (
+          <span className="text-[10px] text-amber-300 font-medium">Live Mode</span>
         )}
       </div>
 
