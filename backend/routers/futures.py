@@ -1554,6 +1554,13 @@ def futures_manual_entry(
     pos_key = f"{pair}-{direction}-manual-{int(now.timestamp())}"
     with eng._lock:
         eng.positions[pos_key] = pos
+    # Invalidate the recently-closed guard for THIS (pair, direction) —
+    # the user is explicitly re-opening, so any stale KuCoin-side echo
+    # from the previous close is now superseded by a real new position.
+    # Without this, a quick close → re-open cycle (especially across an
+    # engine restart) could leave the new position invisible because
+    # /open's reconcile skipped KuCoin's report of it.
+    _recently_closed.pop((user_id, pair, direction), None)
 
     db_id = _persist_open_trade(
         user_id, pos, mode,
@@ -3652,28 +3659,18 @@ def get_futures_leverage(
     # yet, KuCoin's /api/v1/position returns realLeverage=0 and
     # leverage=1 (the symbol-default that nobody has overridden via
     # changeLeverage). The old code took that "1" as truth and
-    # overwrote the user's chosen leverage. Sequence that broke:
-    #   POST /leverage {leverage: 20}  → syncs to KuCoin OK
-    #   GET  /leverage                  → KuCoin returns 1 (no position)
-    #   → backend returned 1
-    #   → frontend overwrote the user's 20× with 1×
-    #   → next manual order placed at 1× leverage by mistake.
-    #
-    # New rule: if KuCoin returns the no-position default (lev=1,
-    # realLev=0), TRUST the engine's last-set value instead. The
-    # engine's cache reflects what we just pushed via changeLeverage.
-    # Only override the engine when KuCoin reports a clearly-applied
-    # value (realLev > 0 → has open position, OR lev > 1 → user
-    # configured the per-symbol leverage on KuCoin separately).
+    # overwrote the user's chosen leverage. Now we only override engine
+    # leverage when KuCoin's value is meaningful (has a position OR
+    # the configured leverage is non-default).
     if _ensure_live_credentials(eng, user_id, db)[0]:
-        kc_lev, kc_mode = _fetch_kucoin_symbol_settings(eng, symbol, user_id)
-        # Distinguish "KuCoin actually knows X" from "KuCoin returned the
-        # default because nothing's set on the symbol yet". We need the
-        # raw /api/v1/position response to tell — fetch it separately.
-        kucoin_has_position = False
         try:
             from backend.services.native_trading_engine import _kucoin_get_signed
             from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+            # Single KuCoin call — extract everything we need from one
+            # response (was previously TWO sequential round trips:
+            # _fetch_kucoin_symbol_settings + a duplicate /position fetch
+            # to decide if the value was meaningful). Saves ~300ms per
+            # leverage GET, which the modal calls on every open.
             _raw = _kucoin_get_signed(
                 "/api/v1/position",
                 eng._api_key, eng._api_sec, eng._api_pass,
@@ -3682,31 +3679,40 @@ def get_futures_leverage(
             )
             if str(_raw.get("code")) == "200000":
                 _d = _raw.get("data") or {}
-                _real = float(_raw.get("data", {}).get("realLeverage") or 0)
+                _real = float(_d.get("realLeverage") or 0)
+                _cfg  = _d.get("leverage")
                 _cur_qty = abs(float(_d.get("currentQty") or 0))
                 kucoin_has_position = (_real > 0) or (_cur_qty > 0)
-        except Exception:
-            pass
+                try:
+                    kc_lev = int(round(float(_real) if _real > 0 else float(_cfg or 0)))
+                except (TypeError, ValueError):
+                    kc_lev = None
+                kc_mode_raw = (_d.get("marginMode") or "").upper()
+                if not kc_mode_raw:
+                    cross_flag = _d.get("crossMode")
+                    if cross_flag is True:
+                        kc_mode_raw = "CROSS"
+                    elif cross_flag is False:
+                        kc_mode_raw = "ISOLATED"
 
-        # Only override engine leverage when KuCoin's value is meaningful:
-        #   • KuCoin has an open position → realLev is current truth
-        #   • OR KuCoin returned a non-default value (user set it elsewhere)
-        # When KuCoin returned the lev=1 default with no position, keep
-        # the engine value (which reflects what user just set via POST).
-        if kc_lev and (kucoin_has_position or kc_lev > 1):
-            leverage = kc_lev
-            # Mirror into engine so subsequent orders use the same value
-            try:
-                eng.set_symbol_leverage(symbol, kc_lev)
-            except Exception:
-                pass
-            source = "kucoin"
-        if kc_mode in ("CROSS", "ISOLATED"):
-            margin_mode = kc_mode.lower()
-            try:
-                eng.set_symbol_margin(symbol, margin_mode)
-            except Exception:
-                pass
+                # Only override engine leverage when KuCoin's value is
+                # meaningful — see comment above.
+                if kc_lev and (kucoin_has_position or kc_lev > 1):
+                    leverage = kc_lev
+                    try:
+                        eng.set_symbol_leverage(symbol, kc_lev)
+                    except Exception:
+                        pass
+                    source = "kucoin"
+                if kc_mode_raw in ("CROSS", "ISOLATED"):
+                    margin_mode = kc_mode_raw.lower()
+                    try:
+                        eng.set_symbol_margin(symbol, margin_mode)
+                    except Exception:
+                        pass
+        except Exception as e:
+            log.debug("[%s] /leverage live fetch failed for %s: %s",
+                      user_id, symbol, e)
 
     return {
         "symbol":      symbol,
