@@ -90,19 +90,28 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
   // panel would be a wall of empty space with one tiny chevron).
   const [recentCollapsed, setRecentCollapsed] = useState(false);
   const [libraryCollapsed, setLibraryCollapsed] = useState(true);
+  // Tracks whether the FIRST /bots fetch has returned. Without this the
+  // panel flashes "no active bots → Strategy Library at top" for the
+  // ~500ms before the network responds, then shuffles when the bot
+  // cards finally appear. We render a stable loading state until the
+  // initial fetch completes.
+  const [initialLoaded, setInitialLoaded] = useState(false);
   // Derived: do we have anything to show in the Active Bots area?
   const hasActiveContent = runningBots.filter(b => b.is_running).length > 0 || !!mainEngine;
-  // When the panel first mounts with no active bots, force-expand the
-  // library so the user can immediately pick a strategy to start. Once
-  // they start one, hasActiveContent flips true and we leave the user's
-  // collapse choice alone (don't re-collapse on every state change).
+  // When the panel first mounts AND the initial load has happened with
+  // no active bots, force-expand the library so the user can immediately
+  // pick a strategy to start. Avoiding the pre-load auto-expand prevents
+  // the flash where library opens then collapses once bots arrive.
   useEffect(() => {
-    if (!hasActiveContent) setLibraryCollapsed(false);
+    if (initialLoaded && !hasActiveContent) setLibraryCollapsed(false);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initialLoaded]);
 
   const refreshBots = useCallback(() => {
-    api.futures.bots.list(mode).then(d => setRunningBots(d.bots || [])).catch(() => {});
+    api.futures.bots.list(mode)
+      .then(d => setRunningBots(d.bots || []))
+      .catch(() => {})
+      .finally(() => setInitialLoaded(true));
     api.futures.status().then(d => setMainEngine(d?.running ? d : null)).catch(() => setMainEngine(null));
   }, [mode]);
 
@@ -209,10 +218,37 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
         )}
       </div>
 
+      {/* Initial loading state — first paint of the panel runs while the
+          /bots fetch is still in flight. Showing the real "no active bots
+          → Strategy Library expanded" layout in that window would flash
+          and then re-shuffle when the real data arrives a few hundred ms
+          later. Render a thin shimmer in the Active Bots slot until the
+          first response lands. */}
+      {!initialLoaded && (
+        <div className="px-3 py-2 border-b border-white/[0.06] flex flex-col flex-1 min-h-0">
+          <div className="flex items-center justify-between mb-1.5 shrink-0">
+            <p className="text-[10px] text-emerald-400 font-bold">Active Bots</p>
+            <span className="text-[9px] text-slate-500">Loading…</span>
+          </div>
+          <div className="space-y-1.5">
+            {[0, 1].map(i => (
+              <div key={i} className="p-2.5 rounded-lg bg-[#1e222d] border border-white/[0.05] animate-pulse">
+                <div className="h-3 w-32 rounded bg-slate-700/60 mb-2" />
+                <div className="grid grid-cols-3 gap-2">
+                  <div className="h-8 rounded bg-slate-800" />
+                  <div className="h-8 rounded bg-slate-800" />
+                  <div className="h-8 rounded bg-slate-800" />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* Running Bots — flex-1 so it takes ALL space between the header and
           the collapsed footer sections (Recent Bots + Strategy Library).
           User asked for Active Bots to be the primary thing they see. */}
-      {(runningBots.filter(b => b.is_running).length > 0 || mainEngine) && (
+      {initialLoaded && (runningBots.filter(b => b.is_running).length > 0 || mainEngine) && (
         <div className="px-3 py-2 border-b border-white/[0.06] flex flex-col flex-1 min-h-0">
           <div className="flex items-center justify-between mb-1.5 shrink-0">
             <p className="text-[10px] text-emerald-400 font-bold">Active Bots ({runningBots.filter(b => b.is_running).length + (mainEngine ? 1 : 0)})</p>
@@ -430,11 +466,11 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
         </div>
       )}
 
-      {/* Spacer — only when there are no active bots AND the library is
-          collapsed. Otherwise either Active Bots (flex-1) or the expanded
-          library (flex-1 below) fills the space, so we don't want a spacer
-          double-pushing things off-screen. */}
-      {!hasActiveContent && libraryCollapsed && (
+      {/* Spacer — only when initial load is done, there are no active
+          bots, AND the library is collapsed. Otherwise either Active Bots
+          (flex-1), the loading skeleton (flex-1), or the expanded
+          library (flex-1 below) fills the space. */}
+      {initialLoaded && !hasActiveContent && libraryCollapsed && (
         <div className="flex-1 min-h-0" />
       )}
 

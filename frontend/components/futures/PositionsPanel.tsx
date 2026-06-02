@@ -87,22 +87,27 @@ export default function PositionsPanel({
 
   async function closePosition(pair: string, direction?: 'long' | 'short', positionId?: string) {
     setClosingPair(pair);
+    // Optimistic UI: hide the row instantly so the user sees the click
+    // landed. Snapshot in case the backend rejects and we need to put it
+    // back. Without this the row stays visible until the next /open
+    // round-trip (~300-800ms even with caching) → "Close is slow."
+    const prevPositions = positions;
+    setPositions(prev => prev.filter(p =>
+      positionId ? p.position_id !== positionId
+                 : !(p.pair === pair && (!direction || (p.side || p.direction) === direction))
+    ));
     try {
-      // position_id targets ONE row even when multiple positions share
-      // pair + direction (stacked manual entries, DB-fallback rows after
-      // an engine restart). Without it the backend matches by
-      // pair+direction+mode and closes EVERY matching row — which made
-      // Close behave like Close-All.
       const res = await api.futures.forceClose(pair, mode, direction, positionId);
-      // Backend returns { error } when KuCoin refuses the close — show it
-      // so the user understands why the position is still visible and can
-      // act on the real reason (e.g. margin-mode mismatch, lot size).
+      // Backend returns { error } when KuCoin refuses the close — surface
+      // it AND restore the row so the user sees the real position state.
       if (res?.error) {
+        setPositions(prevPositions);
         alert(res.error);
       }
       refreshAll();
       onRefresh?.();
     } catch (e) {
+      setPositions(prevPositions);
       alert(`Close failed: ${e}`);
     }
     setClosingPair(null);
@@ -112,15 +117,27 @@ export default function PositionsPanel({
   // Used by the per-row dropdown (25/50/75%) on the Positions tab.
   async function partialClose(pair: string, pct: number, positionId?: string) {
     setClosingPair(pair);
+    // Optimistic shrink: reduce the row's amount in-place so the user
+    // sees instant feedback. If the request fails we restore from the
+    // snapshot. Total close (pct≈100) just hides the row.
+    const prevPositions = positions;
+    const fraction = pct / 100;
+    setPositions(prev => prev.flatMap(p => {
+      const match = positionId ? p.position_id === positionId : p.pair === pair;
+      if (!match) return [p];
+      const newAmount = (p.amount || 0) * (1 - fraction);
+      if (newAmount <= 0.01) return [];   // hide if effectively closed
+      return [{ ...p, amount: newAmount }];
+    }));
     try {
       const res = await api.futures.partialClose({
         pair, mode, close_pct: pct,
         ...(positionId ? { position_id: positionId } : {}),
       });
       if (res?.error) {
+        setPositions(prevPositions);
         alert(res.error);
       } else {
-        // Quick toast in the action log via re-render
         console.info(
           `Partial close ${pair} ${pct}%: leg P&L=${res.leg_pnl}, remaining=${res.remaining_pct}`,
         );
@@ -128,6 +145,7 @@ export default function PositionsPanel({
       refreshAll();
       onRefresh?.();
     } catch (e) {
+      setPositions(prevPositions);
       alert(`Partial close failed: ${e}`);
     }
     setClosingPair(null);
@@ -138,9 +156,16 @@ export default function PositionsPanel({
   async function cancelAllOrders(symbol?: string) {
     const label = symbol ? `cancel ALL pending orders for ${symbol}` : `cancel ALL pending ${mode} orders`;
     if (!confirm(`Are you sure you want to ${label}?`)) return;
+    // Optimistic clear of the affected rows.
+    const prevOrders = openOrders;
+    setOpenOrders(prev =>
+      symbol ? prev.filter(o => o.symbol !== symbol && o.pair !== symbol)
+             : []
+    );
     try {
       const res = await api.futures.cancelAllOrders({ mode, symbol });
       if (res?.error) {
+        setOpenOrders(prevOrders);
         alert(res.error);
       } else {
         const failedNote = res.failed?.length
@@ -152,34 +177,50 @@ export default function PositionsPanel({
       refreshAll();
       onRefresh?.();
     } catch (e) {
+      setOpenOrders(prevOrders);
       alert(`Cancel All failed: ${e}`);
     }
   }
 
   async function cancelOrder(orderId: string) {
+    // Optimistic hide — the user clicks Cancel and the row disappears
+    // immediately. If backend rejects (KuCoin says "already filled" or
+    // similar) we restore the row and surface the error. Without this
+    // the row stayed visible for the full cancel + /orders round-trip
+    // (often >1s for live), giving the "Cancel doesn't work" feeling.
+    const prevOrders = openOrders;
+    setOpenOrders(prev => prev.filter(o => o.order_id !== orderId));
     try {
       const res = await api.futures.cancelOrder(orderId);
       if (res?.error) {
-        // Backend returns a structured error when KuCoin refuses the
-        // cancel — surface it to the user so they know the order is
-        // still alive on the exchange.
+        setOpenOrders(prevOrders);
         alert(res.error);
       }
       refreshAll();
     } catch (e) {
+      setOpenOrders(prevOrders);
       alert(`Cancel failed: ${e}`);
     }
   }
 
   async function closeAllPositions() {
-    for (const p of positions) {
-      // Pass per-row position_id so each iteration closes exactly that
-      // one row, even when several share pair + direction.
-      await api.futures.forceClose(
-        p.pair, mode,
-        (p.side || p.direction) as 'long' | 'short',
-        p.position_id,
-      );
+    // Optimistic clear so all rows vanish instantly; backend chews
+    // through them in the background. Errors per-row alert but the
+    // full panel will reconcile on the refresh that follows.
+    const prevPositions = positions;
+    setPositions([]);
+    try {
+      for (const p of prevPositions) {
+        await api.futures.forceClose(
+          p.pair, mode,
+          (p.side || p.direction) as 'long' | 'short',
+          p.position_id,
+        );
+      }
+    } catch (e) {
+      // Network failure mid-batch — let the refresh re-populate from
+      // server-of-record. No need to restore the snapshot manually.
+      console.warn('closeAllPositions partial failure:', e);
     }
     refreshAll();
     onRefresh?.();
