@@ -2458,7 +2458,7 @@ def cancel_futures_order(
                 )
                 url = f"{_base}{ep}"
                 req_obj = urllib.request.Request(url, headers=headers, method=method)
-                with _proxy_urlopen(req_obj, timeout=15) as resp:
+                with _proxy_urlopen(req_obj, timeout=8) as resp:
                     return True, _json.loads(resp.read().decode())
             except urllib.error.HTTPError as he:
                 try:
@@ -2631,7 +2631,7 @@ def cancel_futures_order(
                 )
                 url = f"{_base}{endpoint}"
                 req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
-                with _proxy_urlopen(req_obj, timeout=15) as resp:
+                with _proxy_urlopen(req_obj, timeout=8) as resp:
                     cancel_resp = _json.loads(resp.read().decode())
                 code = str(cancel_resp.get("code", ""))
                 if code == "200000":
@@ -2779,7 +2779,7 @@ def cancel_all_futures_orders(
                     )
                     url = f"{_base}{endpoint}"
                     req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
-                    with _proxy_urlopen(req_obj, timeout=15) as resp:
+                    with _proxy_urlopen(req_obj, timeout=8) as resp:
                         cancel_resp = _json.loads(resp.read().decode())
                     code = str(cancel_resp.get("code", ""))
                     if code != "200000":

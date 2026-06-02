@@ -73,7 +73,7 @@ def _fetch_futures_candles(pair: str, tf: str, limit: int = 200) -> list[dict]:
            f"?symbol={sym}&granularity={gran}&from={from_ms}&to={now_ms}")
     try:
         req = _ureq.Request(url, headers={"User-Agent": "AutoTradeHub/2.0"})
-        with _proxy_urlopen(req, timeout=20) as resp:
+        with _proxy_urlopen(req, timeout=8) as resp:
             payload = json.loads(resp.read().decode())
     except Exception as e:
         log.warning("_fetch_futures_candles %s/%s fetch failed: %s", sym, tf, e)
@@ -2207,7 +2207,7 @@ class FuturesEngine(NativeTradingEngine):
                 f"{_base}{endpoint}", data=body_str.encode(),
                 headers=headers, method="POST",
             )
-            with _proxy_urlopen(req2, timeout=15) as r2:
+            with _proxy_urlopen(req2, timeout=8) as r2:
                 resp = _json.loads(r2.read().decode())
             code = str(resp.get("code", ""))
             if code == "200000":

@@ -170,7 +170,7 @@ def _kucoin_get(path: str, params: dict | None = None) -> dict:
     qs = ("?" + urllib.parse.urlencode(params)) if params else ""
     url = f"{KUCOIN_BASE}{path}{qs}"
     req = urllib.request.Request(url, headers={"User-Agent": "AutoTradeHub/2.0"})
-    with _proxy_urlopen(req, timeout=20) as resp:
+    with _proxy_urlopen(req, timeout=8) as resp:
         return json.loads(resp.read().decode())
 
 
@@ -200,8 +200,12 @@ def _kucoin_post_signed(path: str, body: dict, api_key: str,
     url = f"{base_url}{path}"
     data = body_str.encode()
     req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-    with _proxy_urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode())
+    _t0 = time.perf_counter()
+    with _proxy_urlopen(req, timeout=8) as resp:
+        result = json.loads(resp.read().decode())
+    _ms = (time.perf_counter() - _t0) * 1000
+    log.info("KC POST %s → code=%s  %.0fms", path, result.get("code"), _ms)
+    return result
 
 
 def _kucoin_get_signed(path: str, api_key: str, api_secret: str,
@@ -230,8 +234,12 @@ def _kucoin_get_signed(path: str, api_key: str, api_secret: str,
     }
     url = f"{base_url}{path}{qs}"
     req = urllib.request.Request(url, headers=headers)
-    with _proxy_urlopen(req, timeout=20) as resp:
-        return json.loads(resp.read().decode())
+    _t0 = time.perf_counter()
+    with _proxy_urlopen(req, timeout=8) as resp:
+        result = json.loads(resp.read().decode())
+    _ms = (time.perf_counter() - _t0) * 1000
+    log.info("KC GET  %s → code=%s  %.0fms", path, result.get("code"), _ms)
+    return result
 
 
 def _fetch_candles(symbol: str, ktype: str, limit: int = CANDLE_HISTORY) -> list[dict]:
