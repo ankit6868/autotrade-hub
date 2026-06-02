@@ -1379,6 +1379,16 @@ def futures_manual_entry(
     from backend.services.kucoin_futures_client import normalize_futures_symbol
     from datetime import datetime, timezone as _tz
 
+    # ── Latency instrumentation ─────────────────────────────────────────
+    # Records cumulative ms-since-click at each milestone so Railway logs
+    # answer "how many ms when I click Buy/Long". Cheap (perf_counter only).
+    # Per-KuCoin-call ms are ALSO logged by _kucoin_post_signed; this adds
+    # the TOTAL + the non-KuCoin overhead (price fetch, sizing, DB write).
+    _t0 = _time.perf_counter()
+    _tmark: dict[str, float] = {}
+    def _ck(_name: str) -> None:
+        _tmark[_name] = (_time.perf_counter() - _t0) * 1000.0
+
     pair          = req.get("pair", "BTC/USDT")
     direction     = req.get("direction", "long").lower()
     stake_pct     = float(req.get("stake_pct", 5.0))
@@ -1403,6 +1413,7 @@ def futures_manual_entry(
 
     # Fetch current FUTURES price (was hitting spot — basis bug).
     entry_price = _futures_ticker_price(pair)
+    _ck("price")
     if entry_price is None:
         return {"error": f"Could not fetch futures price for {pair}"}
 
@@ -1479,6 +1490,7 @@ def futures_manual_entry(
         )
         if sz_err:
             return {"error": sz_err}
+        _ck("sizing")
 
         try:
             side          = "buy" if direction == "long" else "sell"
@@ -1497,7 +1509,14 @@ def futures_manual_entry(
             )
             if not sync_ok:
                 return {"error": sync_err}
-            _sync_leverage_to_kucoin(eng, kc_symbol, leverage, user_id)
+            # NOTE: leverage sync moved OFF the critical path — it now runs in
+            # the background thread below (with the TP/SL push). The order body
+            # carries `leverage` and KuCoin opens the position at exactly that
+            # leverage (the bot engine's _place_live_entry proves this: it never
+            # calls changeLeverage and opens at the right leverage via the body
+            # alone). The changeLeverage call only keeps the per-symbol default
+            # in sync for other tooling, so blocking the click on it just burned
+            # ~100-300ms on the first trade per symbol for no execution benefit.
 
             # NOTE: previously this called _fetch_kucoin_symbol_settings to
             # READ BACK KuCoin's effective leverage/margin_mode (Cross often
@@ -1527,6 +1546,7 @@ def futures_manual_entry(
                 log.warning("[%s] Lead Trading manual entry rejected: %s", user_id, resp)
                 return {"error": f"KuCoin Lead Trading rejected the order: {msg}"}
             exchange_order_id = resp.get("data", {}).get("orderId")
+            _ck("order")
             log.info("[%s] Lead Trading manual ENTRY ok: order_id=%s cost=%.2f "
                      "real_margin=%.2f notional=%.2f body=%s",
                      user_id, exchange_order_id, user_cost, real_margin,
@@ -1569,6 +1589,7 @@ def futures_manual_entry(
         market_type  = "futures",
     )
     pos.db_id = db_id
+    _ck("persist")
 
     # ── Live mode: push TP/SL to KuCoin so the stops actually fire ───
     # Fire-and-forget on a background thread so the HTTP response
@@ -1584,8 +1605,17 @@ def futures_manual_entry(
     if mode == "live":
         import threading as _t
         def _bg_push_tp_sl():
+            kc_sym_bg = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+            # Best-effort: keep KuCoin's per-symbol leverage default in sync.
+            # Off the critical path — the order already opened at the right
+            # leverage via the order body. Cached per (user, symbol) so this
+            # is a no-op on back-to-back same-leverage trades.
             try:
-                kc_sym_bg = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+                _sync_leverage_to_kucoin(eng, kc_sym_bg, leverage, user_id)
+            except Exception as lev_exc:
+                log.warning("[%s] background leverage sync failed for %s: %s",
+                            user_id, kc_sym_bg, lev_exc)
+            try:
                 eng._push_live_tp_sl(
                     kc_sym_bg, sl_price, tp_price,
                     label="manual_entry", pos=pos,
@@ -1603,6 +1633,18 @@ def futures_manual_entry(
         "leverage": leverage, "mode": mode, "exchange_order_id": exchange_order_id,
         "margin": stake, "notional": real_notional,
     })
+    _ck("done")
+    # Cumulative ms-since-click at each milestone. price=price ready,
+    # sizing=lot-size math done, order=KuCoin order confirmed, persist=DB
+    # row written, done=response built (log_event commit included). The
+    # gap order→persist→done is local/DB work; price→order is the KuCoin
+    # round-trip(s). TP/SL push + leverage sync are off-thread (not counted).
+    log.info("[%s] TIMING manual-entry %s %s %s  total=%.0fms  "
+             "[price@%.0f sizing@%.0f order@%.0f persist@%.0f done@%.0f]",
+             user_id, mode, pair, direction, _tmark.get("done", 0.0),
+             _tmark.get("price", 0.0), _tmark.get("sizing", 0.0),
+             _tmark.get("order", 0.0), _tmark.get("persist", 0.0),
+             _tmark.get("done", 0.0))
     return {
         "entered": True,
         "pair": pair,
@@ -1671,6 +1713,12 @@ def futures_force_close(
     from sqlalchemy import update as sql_update
     from datetime import timezone as _tz
 
+    # ── Latency instrumentation (see /manual-entry for rationale) ───────
+    _t0 = _time.perf_counter()
+    _tmark: dict[str, float] = {}
+    def _ck(_name: str) -> None:
+        _tmark[_name] = (_time.perf_counter() - _t0) * 1000.0
+
     # Parse optional JSON body for mode + direction + position_id
     req_mode = None
     req_direction = None
@@ -1699,6 +1747,7 @@ def futures_force_close(
     # Fetch live exit price
     # Fetch FUTURES exit price (was hitting spot — basis bug).
     exit_price = _futures_ticker_price(pair)
+    _ck("price")
 
     now = datetime.now(_tz.utc)
     closed_positions = []
@@ -1808,6 +1857,7 @@ def futures_force_close(
                 kucoin_errors.append(str(e))
                 log.error("[%s] Lead Trading close failed for %s: %s", user_id, pair, e)
 
+        _ck("kucoin_close")
         # If ANY close was rejected, surface the error and don't touch
         # local state — the user retries with the real reason in hand.
         if kucoin_errors:
@@ -1989,6 +2039,16 @@ def futures_force_close(
 
     log_event(db, user_id, "futures.force_close", request,
               payload={"pair": pair, "exit_price": exit_price, "count": total_closed})
+    _ck("done")
+    # Cumulative ms-since-click: price=exit price ready, kucoin_close=KuCoin
+    # reduce-only close confirmed (live only), done=response built (DB
+    # persist + log_event commit included). price→kucoin_close is the
+    # KuCoin round-trip; the rest is local/DB work.
+    log.info("[%s] TIMING force-close %s %s  total=%.0fms  "
+             "[price@%.0f kucoin_close@%.0f done@%.0f]  closed=%d",
+             user_id, mode, pair, _tmark.get("done", 0.0),
+             _tmark.get("price", 0.0), _tmark.get("kucoin_close", 0.0),
+             _tmark.get("done", 0.0), total_closed)
     return {
         "status":       "closed",
         "pair":         pair,
@@ -2842,6 +2902,12 @@ def partial_close_futures_position(
     Used by the bot panel's "Book 50%" button and by ARM TP1 booking
     (the engine calls this internally too in Phase 3).
     """
+    # ── Latency instrumentation (see /manual-entry for rationale) ───────
+    _t0 = _time.perf_counter()
+    _tmark: dict[str, float] = {}
+    def _ck(_name: str) -> None:
+        _tmark[_name] = (_time.perf_counter() - _t0) * 1000.0
+
     pair      = req.get("pair")
     mode      = req.get("mode", "paper")
     close_pct = float(req.get("close_pct", 50))
@@ -3051,6 +3117,7 @@ def partial_close_futures_position(
     # In live mode this is updated every tick from KuCoin; in paper mode
     # it tracks the same market data so paper exits match live timing.
     fill_price = eng._get_live_price(pair) or pos.entry
+    _ck("price")
     from datetime import timezone as _tz
     now = datetime.now(_tz.utc)
 
@@ -3106,6 +3173,7 @@ def partial_close_futures_position(
                 "ok":    False,
                 "error": f"KuCoin partial-close call failed: {e}. Position unchanged.",
             }
+        _ck("kucoin_close")
 
     # Mutate local state AFTER KuCoin confirms (or immediately for paper).
     pos.partial_pnl_abs += leg_pnl
@@ -3186,6 +3254,15 @@ def partial_close_futures_position(
               payload={"pair": pair, "mode": mode, "close_pct": close_pct,
                        "leg_pnl": round(leg_pnl, 4),
                        "remaining_pct": round(pos.remaining_pct, 4)})
+    _ck("done")
+    # Cumulative ms-since-click: price=fill price ready, kucoin_close=KuCoin
+    # reduce-only partial confirmed (live only), done=response built (history
+    # row + log_event commits included).
+    log.info("[%s] TIMING partial-close %s %s %.0f%%  total=%.0fms  "
+             "[price@%.0f kucoin_close@%.0f done@%.0f]",
+             user_id, mode, pair, close_pct, _tmark.get("done", 0.0),
+             _tmark.get("price", 0.0), _tmark.get("kucoin_close", 0.0),
+             _tmark.get("done", 0.0))
     return {
         "ok":            True,
         "pair":          pair,

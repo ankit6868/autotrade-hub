@@ -35,6 +35,7 @@ Two helpers:
 """
 from __future__ import annotations
 
+import io
 import logging
 import os
 import re
@@ -42,6 +43,9 @@ import threading
 import urllib.error
 import urllib.request
 from typing import Any
+
+import requests
+import requests.adapters
 
 log = logging.getLogger(__name__)
 
@@ -101,100 +105,243 @@ def _demote(proxy: str) -> None:
         if _cached_proxies and proxy in _cached_proxies and len(_cached_proxies) > 1:
             _cached_proxies.remove(proxy)
             _cached_proxies.append(proxy)
-    # Drop the cached opener for this proxy — its TLS pool may be
-    # stale (DNS failure / proxy down). Next call rebuilds fresh.
-    with _opener_lock:
-        _opener_cache.pop(proxy, None)
+    # Drop the cached Session for this proxy — its connection pool may be
+    # stale (DNS failure / proxy down / rotated creds). Next call rebuilds
+    # a fresh Session + pool.
+    _drop_session(proxy)
 
 
-def _proxy_failed_terminally(exc: Exception) -> bool:
-    """Return True if this exception means the proxy itself is bad, not the
-    upstream — i.e. we should try the next proxy."""
-    if isinstance(exc, urllib.error.HTTPError):
-        # 407 Proxy Auth Required, 502/503/504 from the proxy itself
-        return exc.code in (407, 502, 503, 504)
-    if isinstance(exc, urllib.error.URLError):
-        # DNS resolution failure, connection refused, TLS error — proxy down
-        return True
-    return False
+# ── pooled requests.Session layer (used by native_trading_engine + ──────
+# ──  futures router + futures_engine via urlopen) ───────────────────────
+#
+# WHY requests instead of urllib:
+#   urllib.request opens a brand-new HTTPSConnection on EVERY urlopen()
+#   call (AbstractHTTPHandler.do_open does `http_class(host, ...)` each
+#   time), so every KuCoin call paid a full TCP + TLS handshake — through
+#   a proxy that's ~150-300ms of pure round-trips before a single byte of
+#   the actual request is sent. On the live trading path (buy/long,
+#   sell/short, close, partial-close) that handshake dominated latency.
+#
+#   requests.Session (urllib3 underneath) keeps a keep-alive connection
+#   pool keyed by (proxy, destination host). For HTTPS-through-an-HTTP
+#   proxy it reuses the CONNECT-tunnelled, TLS-handshaked socket across
+#   calls, so only the FIRST call to KuCoin pays the handshake; every
+#   subsequent call reuses the warm socket (~typical 80-200ms total
+#   instead of 250-500ms). This is the single biggest backend latency win
+#   for live order execution.
+#
+# We keep the public `urlopen(req, timeout=...)` signature and a urllib-
+# compatible response/error surface so none of the ~15 call sites change.
+
+# Per-proxy Session cache. Sessions are thread-safe for our usage pattern
+# (each call grabs the cached Session and issues an independent request;
+# urllib3's connection pool is internally locked).
+_session_cache: dict[str, requests.Session] = {}
+_session_lock = threading.Lock()
+
+# Tune-able pool sizes. The live path makes at most 2-3 concurrent KuCoin
+# calls per user action; keep a small but reusable pool.
+_POOL_CONNECTIONS = int(os.getenv("KUCOIN_POOL_CONNECTIONS", "4"))
+_POOL_MAXSIZE     = int(os.getenv("KUCOIN_POOL_MAXSIZE", "10"))
 
 
-# ── urllib (used by native_trading_engine + futures router) ─────────────
-
-
-# Per-proxy opener cache — urllib doesn't pool HTTPS connections by
-# default, so a fresh opener on every call means a new TCP + TLS
-# handshake every call (~200-400ms each). Caching one opener per
-# proxy URL lets HTTPSConnection reuse the underlying socket between
-# calls to the same host (KuCoin), cutting subsequent-call latency
-# significantly. Critical for the live manual-entry flow which makes
-# 2-3 sequential KuCoin calls per click.
-_opener_cache: dict[str, urllib.request.OpenerDirector] = {}
-_opener_lock = threading.Lock()
-
-
-def _build_opener(proxy: str | None) -> urllib.request.OpenerDirector:
+def _get_session(proxy: str | None) -> requests.Session:
     key = proxy or "__direct__"
-    with _opener_lock:
-        cached = _opener_cache.get(key)
-        if cached is not None:
-            return cached
+    with _session_lock:
+        sess = _session_cache.get(key)
+        if sess is not None:
+            return sess
+        sess = requests.Session()
+        # Don't let OS / shell env proxies (HTTP_PROXY etc.) leak in — we
+        # set the proxy explicitly per-Session. trust_env=False also skips
+        # .netrc lookups, shaving a touch of per-request work.
+        sess.trust_env = False
         if proxy:
-            handler = urllib.request.ProxyHandler({"http": proxy, "https": proxy})
-            opener = urllib.request.build_opener(handler)
-        else:
-            opener = urllib.request.build_opener()
-        # urllib's HTTPSConnection keeps the underlying socket alive
-        # between requests when keep-alive headers are present, which
-        # is the default for HTTP/1.1.
-        _opener_cache[key] = opener
-        return opener
+            sess.proxies = {"http": proxy, "https": proxy}
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=_POOL_CONNECTIONS,
+            pool_maxsize=_POOL_MAXSIZE,
+            max_retries=0,          # we do our own proxy-level failover
+        )
+        sess.mount("https://", adapter)
+        sess.mount("http://", adapter)
+        _session_cache[key] = sess
+        return sess
 
 
-def reset_opener_cache() -> None:
-    """Drop all cached openers — call when proxy list changes."""
-    with _opener_lock:
-        _opener_cache.clear()
+def _drop_session(proxy: str | None) -> None:
+    key = proxy or "__direct__"
+    with _session_lock:
+        sess = _session_cache.pop(key, None)
+    if sess is not None:
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
+def reset_session_cache() -> None:
+    """Drop all cached Sessions — call when the proxy list changes."""
+    with _session_lock:
+        sessions = list(_session_cache.values())
+        _session_cache.clear()
+    for sess in sessions:
+        try:
+            sess.close()
+        except Exception:
+            pass
+
+
+# Backward-compat alias for the old urllib-era name (kept in case any
+# external caller still imports it; internally unused now).
+reset_opener_cache = reset_session_cache
+
+
+class _Resp:
+    """Minimal urllib-compatible wrapper over a requests.Response so existing
+    call sites (`with urlopen(req) as resp: resp.read().decode()`) keep working.
+
+    requests has already fully read the body into `r.content` by the time we
+    wrap it, so `.read()` just hands back those bytes and the underlying
+    socket has been returned to the keep-alive pool for reuse.
+    """
+
+    __slots__ = ("_r", "_content", "status", "code", "headers")
+
+    def __init__(self, r: requests.Response):
+        self._r = r
+        self._content = r.content
+        self.status = r.status_code
+        self.code = r.status_code
+        self.headers = r.headers
+
+    def read(self, *_a, **_k) -> bytes:
+        return self._content
+
+    def getcode(self) -> int:
+        return self._r.status_code
+
+    def geturl(self) -> str:
+        return self._r.url
+
+    def info(self):
+        return self._r.headers
+
+    def close(self) -> None:
+        try:
+            self._r.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "_Resp":
+        return self
+
+    def __exit__(self, *_exc) -> bool:
+        self.close()
+        return False
+
+
+# requests transport errors that mean "this proxy is bad, try the next one"
+# (the urllib3 equivalents of urllib's URLError-for-proxy-down).
+_PROXY_TRANSPORT_ERRORS = (
+    requests.exceptions.ProxyError,
+    requests.exceptions.SSLError,
+    requests.exceptions.ConnectionError,
+    requests.exceptions.Timeout,
+)
+
+# HTTP status codes that indicate the PROXY (not KuCoin) failed → try next.
+_PROXY_FAIL_STATUS = (407, 502, 503, 504)
+
+
+def _send(req, proxy: str | None, timeout: float) -> requests.Response:
+    """Issue `req` (a urllib.request.Request) via the pooled Session for `proxy`."""
+    sess = _get_session(proxy)
+    method = req.get_method()
+    url = req.full_url
+    # urllib capitalises header keys (KC-API-KEY -> Kc-api-key); HTTP headers
+    # are case-insensitive and KuCoin accepts them (this is exactly what the
+    # urllib path already put on the wire in production).
+    headers = dict(req.header_items())
+    data = req.data
+    # Short connect timeout for fast proxy failover; full read timeout as
+    # requested by the caller. (connect, read)
+    connect_to = min(float(timeout), 4.0)
+    return sess.request(
+        method, url,
+        headers=headers,
+        data=data,
+        timeout=(connect_to, float(timeout)),
+        allow_redirects=True,
+    )
+
+
+def _finalize(r: requests.Response):
+    """Return a urllib-compatible _Resp for 2xx; raise HTTPError otherwise
+    (matches urllib's urlopen, which raises HTTPError on any non-2xx)."""
+    if 200 <= r.status_code < 300:
+        return _Resp(r)
+    raise urllib.error.HTTPError(
+        r.url, r.status_code, r.reason or "", r.headers, io.BytesIO(r.content)
+    )
 
 
 def urlopen(req, *, timeout: float = 8):
     """Open `req` through the proxy list with automatic failover.
 
-    Default timeout: 8 seconds (was 20). Order placement / close on
-    live trading needs to fail fast — a 20s wait on a stuck proxy was
-    the source of user-reported 6-7s close latency. With proxy
-    failover + 8s per attempt, the worst case across N proxies is
-    bounded at ~8N seconds, but the typical case (healthy proxy)
-    completes in ~300-500ms because the cached HTTPS connection is
-    reused (TLS handshake avoided after the first call).
+    Drop-in replacement for the old urllib-based helper, but now backed by a
+    pooled requests.Session so HTTPS keep-alive connections are reused across
+    calls (no per-call TLS handshake after the first). Returns a
+    urllib-compatible response (supports `with ... as resp: resp.read()`).
 
-    Iterates the current proxy list in order. The first proxy that returns
-    a non-407 response wins and is promoted to the head. If every proxy
-    fails with 407/proxy-down, raises the last error so the caller surfaces
-    a real message instead of silently using no proxy.
+    Behaviour preserved from the urllib version:
+      * Iterates the current proxy list; first success is promoted to head.
+      * 407/502/503/504 OR a transport error (proxy down / DNS / TLS / timeout)
+        → demote that proxy and try the next one.
+      * Any OTHER non-2xx (e.g. KuCoin 400 "balance insufficient") → raise
+        urllib.error.HTTPError immediately so the caller's existing
+        `except urllib.error.HTTPError` handlers and `.read()` on the error
+        body keep working (rotating proxies wouldn't help and would hide the
+        real error).
+      * No proxy configured → direct connection.
+
+    Worst case across N proxies is bounded by ~(connect+read) per attempt;
+    the typical healthy case completes fast on a warm pooled socket.
     """
     proxies = list(_get_proxies())   # snapshot — _promote/_demote mutates the cache
     if not proxies:
-        # No proxy configured — direct connection.
-        return _build_opener(None).open(req, timeout=timeout)
+        # No proxy configured — direct connection (local dev).
+        try:
+            r = _send(req, None, timeout)
+        except _PROXY_TRANSPORT_ERRORS as exc:
+            # Surface as urllib.error.URLError so callers expecting the urllib
+            # exception type still match.
+            raise urllib.error.URLError(exc) from exc
+        return _finalize(r)
 
     last_exc: Exception | None = None
     for proxy in proxies:
-        opener = _build_opener(proxy)
         try:
-            resp = opener.open(req, timeout=timeout)
-            _promote(proxy)
-            return resp
-        except Exception as exc:    # noqa: BLE001
-            last_exc = exc
-            if _proxy_failed_terminally(exc):
-                log.warning("Proxy %s failed (%s); trying next.",
-                            _redact(proxy), type(exc).__name__)
-                _demote(proxy)
-                continue
-            # Non-proxy error (e.g. KuCoin returned 4xx) — bubble up immediately;
-            # rotating proxies won't help and would hide the real issue.
-            raise
+            r = _send(req, proxy, timeout)
+        except _PROXY_TRANSPORT_ERRORS as exc:
+            last_exc = urllib.error.URLError(exc)
+            log.warning("Proxy %s failed (%s); trying next.",
+                        _redact(proxy), type(exc).__name__)
+            _demote(proxy)
+            continue
+
+        if r.status_code in _PROXY_FAIL_STATUS:
+            last_exc = urllib.error.HTTPError(
+                r.url, r.status_code, r.reason or "", r.headers, io.BytesIO(r.content)
+            )
+            log.warning("Proxy %s returned HTTP %s; trying next.",
+                        _redact(proxy), r.status_code)
+            _demote(proxy)
+            continue
+
+        # Reached KuCoin (2xx or a real upstream 4xx/5xx). This proxy works.
+        _promote(proxy)
+        return _finalize(r)   # raises HTTPError for non-proxy non-2xx
 
     # Every proxy failed terminally.
     if last_exc:
