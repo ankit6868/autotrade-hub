@@ -585,6 +585,9 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
             size: Number(marginPosition.margin ?? marginPosition.stake ?? marginPosition.size ?? 0),
             leverage: Number(marginPosition.leverage ?? 1),
             liquidation_price: Number(marginPosition.liq_price ?? marginPosition.liquidation_price ?? 0),
+            // Pass through so add/reduce-margin targets the exact hedge
+            // side instead of the first match on the pair.
+            position_id: marginPosition.position_id,
           }}
           mode={mode}
           walletAvailable={Number(account?.available_balance ?? account?.available_margin ?? 0)}
@@ -719,6 +722,12 @@ function TpSlEditor({ position, onClose, onSaved }: {
         pair: position.pair,
         ...(tpNum ? { tp_price: tpNum } : {}),
         ...(slNum ? { sl_price: slNum } : {}),
+        // Pass direction + position_id so hedge-mode users hit the
+        // exact row they edited, not the first match on the pair.
+        ...((position.side || position.direction)
+          ? { direction: (position.side || position.direction) as 'long' | 'short' }
+          : {}),
+        ...(position.position_id ? { position_id: position.position_id } : {}),
       });
       if (r?.error) {
         setError(r.error);

@@ -399,7 +399,16 @@ export const api = {
     setMarginMode: (data: { symbol: string; mode: string }) =>
       request<any>('/api/futures/margin-mode', { method: 'POST', body: JSON.stringify(data) }),
     getLeverage: (symbol: string) => request<any>(`/api/futures/leverage/${symbol}`),
-    setTpSl: (data: { pair: string; tp_price?: number; sl_price?: number }) =>
+    // direction + position_id keep TP/SL targeting honest in hedge mode
+    // (long + short on the same pair) — without them the backend would
+    // attach the stops to whichever side iterated first.
+    setTpSl: (data: {
+      pair: string;
+      tp_price?: number;
+      sl_price?: number;
+      direction?: 'long' | 'short';
+      position_id?: string;
+    }) =>
       request<any>('/api/futures/position/tp-sl', { method: 'POST', body: JSON.stringify(data) }),
     // Phase 5e — decoded strategy preview (rules + risk + confidence)
     // Used by the bot Create flow to render the "Strategy understood: X/100"
@@ -420,11 +429,24 @@ export const api = {
     }) =>
       request<any>('/api/futures/position/partial-close', { method: 'POST', body: JSON.stringify(data) }),
     // Add margin to an open position (paper + live). Paper deducts from
-    // engine balance, live calls KuCoin /api/v1/position/margin-deposit.
-    addMargin: (data: { pair: string; mode: 'paper' | 'live'; amount: number }) =>
+    // engine balance, live calls KuCoin /api/v1/position/margin/deposit-margin.
+    // direction + position_id target the exact hedge-mode side.
+    addMargin: (data: {
+      pair: string;
+      mode: 'paper' | 'live';
+      amount: number;
+      direction?: 'long' | 'short';
+      position_id?: string;
+    }) =>
       request<any>('/api/futures/position/add-margin', { method: 'POST', body: JSON.stringify(data) }),
     // Reduce margin (paper only — live partial-close is the workaround).
-    reduceMargin: (data: { pair: string; mode: 'paper'; amount: number }) =>
+    reduceMargin: (data: {
+      pair: string;
+      mode: 'paper';
+      amount: number;
+      direction?: 'long' | 'short';
+      position_id?: string;
+    }) =>
       request<any>('/api/futures/position/reduce-margin', { method: 'POST', body: JSON.stringify(data) }),
     // Top up virtual USDT in paper mode (main engine or specific bot).
     paperAddFunds: (data: { amount: number; reset?: boolean }) =>

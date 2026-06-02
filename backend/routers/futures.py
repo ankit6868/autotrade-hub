@@ -3801,7 +3801,12 @@ def paper_bot_add_funds(
 
 # ── Position Margin Management (Add / Reduce Margin) ─────────────────────
 
-def _find_position_across_engines(user_id: str, pair: str, mode: str):
+def _find_position_across_engines(
+    user_id: str, pair: str, mode: str,
+    *,
+    direction: str | None = None,
+    position_id: str | None = None,
+):
     """Search main engine + all per-bot engines for an open position on
     `pair` whose per-position mode tag matches `mode`. Returns
     (engine, position, trade_key) or (None, None, None) if not found.
@@ -3811,7 +3816,27 @@ def _find_position_across_engines(user_id: str, pair: str, mode: str):
     manual LIVE position (the position is tagged at /manual-entry with
     the user's actual choice). Filtering by engine mode would skip the
     main engine for live mode and fail to find live manual positions.
+
+    Optional refinements for hedge-mode safety:
+      • direction="long"|"short" — when set, only matches that side.
+      • position_id="eng:<trade_key>" or "db:<id>" — exact target row.
+        If a "db:" id is passed there's no engine match by definition,
+        so we return (None, None, None) and let the caller fall back
+        to the DB-orphan path.
+
+    Without these filters, a user with both LONG and SHORT positions
+    on BTC/USDT (hedge mode) would get whichever side iterated first
+    on every action — TP/SL editor, add-margin, etc. would silently
+    operate on the wrong row.
     """
+    # Decode position_id once. db:<id> ⇒ no engine match (orphan only).
+    target_eng_key: str | None = None
+    if isinstance(position_id, str) and position_id:
+        if position_id.startswith("eng:"):
+            target_eng_key = position_id[4:]
+        elif position_id.startswith("db:"):
+            return None, None, None
+
     candidates = []
     main_eng = futures_engine_registry.for_user(user_id)
     if main_eng is not None:
@@ -3828,6 +3853,10 @@ def _find_position_across_engines(user_id: str, pair: str, mode: str):
                 continue
             pos_mode = getattr(p, "_mode", getattr(_e, "_mode", "paper"))
             if pos_mode != mode:
+                continue
+            if direction is not None and p.direction != direction:
+                continue
+            if target_eng_key is not None and _k != target_eng_key:
                 continue
             return _e, p, _k
     return None, None, None
@@ -3854,8 +3883,16 @@ def position_add_margin(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Add margin to an open futures position (paper or live)."""
+    """Add margin to an open futures position (paper or live).
+
+    Accepts optional `direction` and `position_id` so hedge-mode users
+    can target a specific side (long or short on the same pair).
+    """
     pair   = req.get("pair")
+    direction_req = req.get("direction")
+    if direction_req not in ("long", "short", None):
+        direction_req = None
+    position_id_req = req.get("position_id") if isinstance(req.get("position_id"), str) else None
     mode   = req.get("mode", "paper")
     try:
         amount = float(req.get("amount"))
@@ -3868,9 +3905,15 @@ def position_add_margin(
     if not (0.01 <= amount <= 1_000_000):
         return {"error": "amount must be between 0.01 and 1,000,000 USDT"}
 
-    eng, pos, _ = _find_position_across_engines(user_id, pair, mode)
+    eng, pos, _ = _find_position_across_engines(
+        user_id, pair, mode,
+        direction=direction_req, position_id=position_id_req,
+    )
     if pos is None:
-        return {"error": f"No open position for {pair} in {mode} mode"}
+        suffix = ""
+        if direction_req:
+            suffix = f" ({direction_req.upper()})"
+        return {"error": f"No open position for {pair}{suffix} in {mode} mode"}
 
     if mode == "paper":
         with eng._lock:
@@ -3951,6 +3994,8 @@ def position_reduce_margin(
     """
     pair = req.get("pair")
     mode = req.get("mode", "paper")
+    direction_req = req.get("direction") if req.get("direction") in ("long", "short") else None
+    position_id_req = req.get("position_id") if isinstance(req.get("position_id"), str) else None
     try:
         amount = float(req.get("amount"))
     except (TypeError, ValueError):
@@ -3963,7 +4008,10 @@ def position_reduce_margin(
     if not (0.01 <= amount <= 1_000_000):
         return {"error": "amount must be between 0.01 and 1,000,000 USDT"}
 
-    eng, pos, _ = _find_position_across_engines(user_id, pair, "paper")
+    eng, pos, _ = _find_position_across_engines(
+        user_id, pair, "paper",
+        direction=direction_req, position_id=position_id_req,
+    )
     if pos is None:
         return {"error": f"No open paper position for {pair}"}
 
@@ -4028,6 +4076,15 @@ def set_position_tp_sl(
     pair     = req.get("pair", "BTC/USDT")
     tp_price = req.get("tp_price")
     sl_price = req.get("sl_price")
+    # Hedge-safe: when present, only update THIS exact position. Without
+    # these filters, a user with long + short on the same pair (hedge
+    # mode) would have their TP/SL silently applied to whichever side
+    # iterated first — the wrong one half the time.
+    direction_req   = req.get("direction") if req.get("direction") in ("long", "short") else None
+    position_id_req = req.get("position_id") if isinstance(req.get("position_id"), str) else None
+    target_eng_key: str | None = None
+    if position_id_req and position_id_req.startswith("eng:"):
+        target_eng_key = position_id_req[4:]
 
     if tp_price is None and sl_price is None:
         return {"error": "Provide tp_price and/or sl_price."}
@@ -4038,14 +4095,19 @@ def set_position_tp_sl(
     # ── Step 1: find the position to attach TP/SL to ────────────────────
     matched_pos = None
     with eng._lock:
-        for pos in eng.positions.values():
-            if pos.pair == pair:
-                if tp_price is not None:
-                    pos.tp = float(tp_price)
-                if sl_price is not None:
-                    pos.sl = float(sl_price)
-                matched_pos = pos
-                break
+        for trade_key, pos in eng.positions.items():
+            if pos.pair != pair:
+                continue
+            if direction_req is not None and pos.direction != direction_req:
+                continue
+            if target_eng_key is not None and trade_key != target_eng_key:
+                continue
+            if tp_price is not None:
+                pos.tp = float(tp_price)
+            if sl_price is not None:
+                pos.sl = float(sl_price)
+            matched_pos = pos
+            break
 
     # KuCoin-side metadata (filled in below when needed). Either from the
     # local position object OR from a /api/v1/position fetch.

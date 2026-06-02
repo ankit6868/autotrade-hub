@@ -22,6 +22,9 @@ type Position = {
   size: number;           // current margin (USDT)
   leverage: number;
   liquidation_price?: number;
+  // Optional unique identifier so add/reduce-margin targets the exact
+  // row even when hedge mode has long + short on the same pair.
+  position_id?: string;
 };
 
 type Props = {
@@ -68,8 +71,16 @@ export default function MarginAdjustModal({
     setBusy(true); setErr(null);
     try {
       const res = tab === 'add'
-        ? await api.futures.addMargin({ pair: position.pair, mode, amount: amt })
-        : await api.futures.reduceMargin({ pair: position.pair, mode: 'paper', amount: amt });
+        ? await api.futures.addMargin({
+            pair: position.pair, mode, amount: amt,
+            direction: position.direction,
+            ...(position.position_id ? { position_id: position.position_id } : {}),
+          })
+        : await api.futures.reduceMargin({
+            pair: position.pair, mode: 'paper', amount: amt,
+            direction: position.direction,
+            ...(position.position_id ? { position_id: position.position_id } : {}),
+          });
       if (res?.error) {
         setErr(res.error);
         setBusy(false);
