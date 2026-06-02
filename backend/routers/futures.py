@@ -4078,6 +4078,23 @@ def position_add_margin(
                     prev_margin=prev_margin, new_margin=new_margin)
             except Exception:
                 pass
+        # Persist new margin + liq to the open Trade row so the change
+        # survives a backend restart. Without this, adding margin in
+        # memory is lost when the engine resets and /open re-renders
+        # from the original DB amount.
+        try:
+            if getattr(pos, "db_id", None):
+                db_row = db.execute(
+                    select(Trade).where(Trade.id == pos.db_id)
+                ).scalar_one_or_none()
+                if db_row is not None:
+                    db_row.amount = round(new_margin, 8)
+                    if getattr(pos, "liquidation_price", None) is not None:
+                        db_row.liquidation_price = round(pos.liquidation_price, 8)
+                    db.commit()
+        except Exception as persist_exc:
+            log.warning("[%s] Failed to persist engine add-margin to DB: %s",
+                        user_id, persist_exc)
         return {"ok": True, "mode": "paper", "pair": pair,
                 "amount_added": amount,
                 "prev_margin": round(prev_margin, 4),
@@ -4120,9 +4137,32 @@ def position_add_margin(
                 pos.size = prev_margin + amount
         except Exception:
             pass
+        # If this was a DB-orphan stub (engine got reset, position lives
+        # only in the Trade row), also persist to the DB so /open
+        # reflects the new margin instead of the old.
+        orphan_trade = getattr(pos, "_orphan_trade", None)
+        if orphan_trade is not None:
+            try:
+                orphan_trade.amount = round(float(orphan_trade.amount or 0) + amount, 8)
+                # Recompute liq price from the new effective leverage.
+                lev_old = float(orphan_trade.leverage or 1)
+                new_eff_lev = ((float(orphan_trade.amount or 0) - amount) * lev_old) / max(float(orphan_trade.amount or 0), 0.01)
+                if (orphan_trade.side or "long") == "long":
+                    orphan_trade.liquidation_price = round(
+                        orphan_trade.entry_price * (1.0 - 1.0 / max(new_eff_lev, 1.0)), 8
+                    )
+                else:
+                    orphan_trade.liquidation_price = round(
+                        orphan_trade.entry_price * (1.0 + 1.0 / max(new_eff_lev, 1.0)), 8
+                    )
+                db.commit()
+            except Exception as orphan_db_exc:
+                log.warning("[%s] Failed to persist live orphan add-margin: %s",
+                            user_id, orphan_db_exc)
         return {"ok": True, "mode": "live", "pair": pair,
                 "amount_added": amount,
-                "kucoin_response": result.get("data")}
+                "kucoin_response": result.get("data"),
+                "source": "db_orphan_live" if orphan_trade else "engine"}
     except Exception as exc:
         return {"error": f"KuCoin margin deposit failed: {exc}"}
 
@@ -4237,6 +4277,20 @@ def position_reduce_margin(
                 prev_margin=prev_margin, new_margin=new_margin)
         except Exception:
             pass
+    # Persist the reduction to DB so it survives engine restart.
+    try:
+        if getattr(pos, "db_id", None):
+            db_row = db.execute(
+                select(Trade).where(Trade.id == pos.db_id)
+            ).scalar_one_or_none()
+            if db_row is not None:
+                db_row.amount = round(new_margin, 8)
+                if getattr(pos, "liquidation_price", None) is not None:
+                    db_row.liquidation_price = round(pos.liquidation_price, 8)
+                db.commit()
+    except Exception as persist_exc:
+        log.warning("[%s] Failed to persist engine reduce-margin to DB: %s",
+                    user_id, persist_exc)
     return {"ok": True, "mode": "paper", "pair": pair,
             "amount_reduced": amount,
             "prev_margin": round(prev_margin, 4),
