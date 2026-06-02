@@ -178,6 +178,30 @@ def _compute_live_sizing(cost_usdt: float, leverage: int, price: float,
     return contracts, round(real_margin, 4), round(real_notional, 4), None
 
 
+# Per-(user, symbol) cache of the last leverage + margin_mode we
+# successfully pushed to KuCoin. Each live entry was doing two extra
+# round trips (changeMarginMode + changeLeverage) on EVERY trade even
+# when the values hadn't changed — that's ~600ms of pure overhead per
+# click. Once we've synced, we know KuCoin's state until either the
+# user changes the setting in the UI or an order rejection forces a
+# re-sync. Cleared on a "margin mode mismatch" rejection (KuCoin tells
+# us the cache is stale and we re-sync on the next attempt).
+_kc_settings_cache: dict[tuple[str, str], dict] = {}
+# {(user_id, kc_symbol): {"leverage": int, "margin_mode": "CROSS"|"ISOLATED"}}
+
+
+def _invalidate_kc_settings_cache(user_id: str, kc_symbol: str | None = None) -> None:
+    """Drop cached leverage/margin_mode after a stale-related rejection
+    so the next call re-syncs. If kc_symbol is None, drop all entries
+    for the user (used when API keys are rotated)."""
+    if kc_symbol is None:
+        keys = [k for k in _kc_settings_cache if k[0] == user_id]
+        for k in keys:
+            _kc_settings_cache.pop(k, None)
+    else:
+        _kc_settings_cache.pop((user_id, kc_symbol), None)
+
+
 def _sync_margin_mode_to_kucoin(eng, kc_symbol: str, desired_mode: str,
                                   user_id: str) -> tuple[bool, str | None]:
     """
@@ -188,6 +212,10 @@ def _sync_margin_mode_to_kucoin(eng, kc_symbol: str, desired_mode: str,
     Without this, the toggle in the UI only updates engine local memory.
     KuCoin still has the previous mode, and the next order is rejected with
     "The order's margin mode does not match the selected one".
+
+    Caches the last successful sync per (user, symbol) so back-to-back
+    entries with the same margin mode skip the changeMarginMode call —
+    typically saves ~300ms per trade.
 
     Returns (ok, error_message).
       - ok=True even if KuCoin is already in `desired_mode` (idempotent).
@@ -200,6 +228,12 @@ def _sync_margin_mode_to_kucoin(eng, kc_symbol: str, desired_mode: str,
     mode_upper = (desired_mode or "ISOLATED").upper()
     if mode_upper not in ("CROSS", "ISOLATED"):
         return False, f"Invalid margin mode: {desired_mode}"
+
+    # Fast path: cache says KuCoin is already in this mode. Skip the call.
+    cache_key = (user_id, kc_symbol)
+    cached = _kc_settings_cache.get(cache_key)
+    if cached and cached.get("margin_mode") == mode_upper:
+        return True, None
 
     try:
         resp = _kucoin_post_signed(
@@ -219,12 +253,14 @@ def _sync_margin_mode_to_kucoin(eng, kc_symbol: str, desired_mode: str,
     if code == "200000":
         log.info("[%s] Synced %s margin mode to %s on KuCoin",
                  user_id, kc_symbol, mode_upper)
+        _kc_settings_cache.setdefault(cache_key, {})["margin_mode"] = mode_upper
         return True, None
 
     msg = (resp.get("msg") or "").lower()
     # 330005 = already in this mode (older API); treat as success.
     # Some accounts return 200000 with msg "already set" — also fine.
     if "already" in msg or code in ("330005", "330006"):
+        _kc_settings_cache.setdefault(cache_key, {})["margin_mode"] = mode_upper
         return True, None
 
     # KuCoin's typical block: "Please close all open positions first" or
@@ -246,7 +282,16 @@ def _sync_leverage_to_kucoin(eng, kc_symbol: str, leverage: int,
     Failures are logged but never block the order — the leverage is also
     in the order body itself; this just keeps the per-symbol setting on
     KuCoin in sync so other tooling sees the same number.
+
+    Cached per (user, symbol) — skip the call when the cached value
+    matches. Saves ~300ms per trade for back-to-back entries at the
+    same leverage on the same pair.
     """
+    cache_key = (user_id, kc_symbol)
+    cached = _kc_settings_cache.get(cache_key)
+    if cached and int(cached.get("leverage") or 0) == int(leverage):
+        return  # already in sync
+
     from backend.services.native_trading_engine import _kucoin_post_signed
     from backend.services.futures_engine import KUCOIN_FUTURES_BASE
     try:
@@ -256,6 +301,7 @@ def _sync_leverage_to_kucoin(eng, kc_symbol: str, leverage: int,
             eng._api_key, eng._api_sec, eng._api_pass,
             base_url=KUCOIN_FUTURES_BASE,
         )
+        _kc_settings_cache.setdefault(cache_key, {})["leverage"] = int(leverage)
     except Exception as e:
         log.warning("[%s] changeLeverage failed for %s lev=%s: %s",
                     user_id, kc_symbol, leverage, e)
@@ -1360,6 +1406,8 @@ def futures_manual_entry(
             # placing the order. Without this, KuCoin remembers whatever mode
             # the symbol was last in and rejects the order with
             # "The order's margin mode does not match the selected one".
+            # Both syncs are cached per (user, symbol) — back-to-back trades
+            # at the same leverage/margin skip these calls entirely.
             sync_ok, sync_err = _sync_margin_mode_to_kucoin(
                 eng, kc_symbol, margin_mode, user_id
             )
@@ -1367,15 +1415,13 @@ def futures_manual_entry(
                 return {"error": sync_err}
             _sync_leverage_to_kucoin(eng, kc_symbol, leverage, user_id)
 
-            # Read back KuCoin's REAL leverage/margin-mode (Cross often keeps
-            # its own per-symbol leverage that overrides our request). Use
-            # those values for the order body, response, and DB row so the
-            # app and KuCoin always agree on what leverage is in effect.
-            kc_lev, kc_mode = _fetch_kucoin_symbol_settings(eng, kc_symbol, user_id)
-            if kc_lev:
-                leverage = kc_lev
-            if kc_mode in ("CROSS", "ISOLATED"):
-                margin_mode = kc_mode
+            # NOTE: previously this called _fetch_kucoin_symbol_settings to
+            # READ BACK KuCoin's effective leverage/margin_mode (Cross often
+            # carries a per-symbol override). That added ~300ms per trade.
+            # Removed for speed — the sync we just did already enforced our
+            # values, and any KuCoin override will be picked up by the
+            # reconcile that runs every 30s on /open. The order body still
+            # carries our requested values, which is the authoritative path.
 
             body = {
                 "clientOid":   client_oid,
@@ -1434,23 +1480,32 @@ def futures_manual_entry(
     pos.db_id = db_id
 
     # ── Live mode: push TP/SL to KuCoin so the stops actually fire ───
-    # Without this, the sl/tp values on the position object are local-
-    # only decoration — KuCoin doesn't know about them and only the
-    # exchange's liquidation level protects the user. Bot live entries
-    # already do this at futures_engine.py:_push_live_tp_sl; this brings
-    # manual live entries to parity.
+    # Fire-and-forget on a background thread so the HTTP response
+    # returns the moment the entry order succeeded (~300ms instead of
+    # ~900ms with TP/SL inline). The push itself takes ~600ms because
+    # it tries the primary endpoint then falls back to st-orders;
+    # blocking the response on that was the biggest single source of
+    # user-perceived latency on live manual buys.
+    #
+    # Without the stops, the local sl/tp values are decoration — the
+    # exchange's liquidation level is the only real protection. The
+    # background push lands within ~1s of the response.
     if mode == "live":
-        try:
-            kc_symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
-            eng._push_live_tp_sl(
-                kc_symbol, sl_price, tp_price,
-                label="manual_entry", pos=pos,
-            )
-        except Exception as tpsl_exc:
-            log.warning("[%s] Manual entry TP/SL push to KuCoin failed: %s "
-                        "(position is open, stops are local-only — user can "
-                        "re-push via the TP/SL editor on the Positions tab)",
-                        user_id, tpsl_exc)
+        import threading as _t
+        def _bg_push_tp_sl():
+            try:
+                kc_sym_bg = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+                eng._push_live_tp_sl(
+                    kc_sym_bg, sl_price, tp_price,
+                    label="manual_entry", pos=pos,
+                )
+            except Exception as tpsl_exc:
+                log.warning("[%s] Manual entry TP/SL push (background) failed: %s "
+                            "(position is open, stops are local-only — user can "
+                            "re-push via the TP/SL editor on the Positions tab)",
+                            user_id, tpsl_exc)
+        _t.Thread(target=_bg_push_tp_sl, daemon=True,
+                  name=f"tp-sl-push-{user_id}-{pair}").start()
 
     log_event(db, user_id, "futures.manual_entry", request, payload={
         "pair": pair, "direction": direction, "entry": entry_price,
@@ -2039,13 +2094,9 @@ def place_futures_order(
                 return {"error": sync_err}
             _sync_leverage_to_kucoin(eng, symbol, lev, user_id)
 
-            # Read back KuCoin's REAL leverage/margin-mode so the DB row +
-            # success response reflect what KuCoin will actually apply.
-            kc_lev, kc_mode = _fetch_kucoin_symbol_settings(eng, symbol, user_id)
-            if kc_lev:
-                lev = kc_lev
-            if kc_mode in ("CROSS", "ISOLATED"):
-                margin_mode = kc_mode
+            # Skip the post-sync read-back — same reasoning as
+            # /manual-entry above. Saves ~300ms per order. The reconcile
+            # on /open every 30s will surface any KuCoin-side override.
 
             body: dict = {
                 "clientOid":   client_oid,

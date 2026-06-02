@@ -1643,13 +1643,24 @@ class FuturesEngine(NativeTradingEngine):
                         # Continue to next pair instead of falling through.
                         continue
                     # NICE-5: rewrite on-exchange TP/SL for the new position.
+                    # Fire-and-forget — the push takes ~600ms (primary +
+                    # st-orders fallback). Blocking the bot tick on it
+                    # would delay the next pair's signal scan and prevent
+                    # quick exits on the position we just opened.
                     try:
                         from .kucoin_futures_client import normalize_futures_symbol
                         sym = normalize_futures_symbol(
                             pair.replace("/", "").replace("USDT", "USDTM"),
                         )
                         tp_to_push = pos.tp2_price if (pos.arm_active and pos.tp2_price) else pos.tp
-                        self._push_live_tp_sl(sym, pos.sl, tp_to_push, label="open", pos=pos)
+                        import threading as _t_push
+                        _t_push.Thread(
+                            target=self._push_live_tp_sl,
+                            args=(sym, pos.sl, tp_to_push),
+                            kwargs={"label": "open", "pos": pos},
+                            daemon=True,
+                            name=f"bot-tp-sl-{self.user_id}-{pair}",
+                        ).start()
                     except Exception as _push_exc:
                         log.debug("[%s] TP/SL push on open skipped: %s",
                                   self.user_id, _push_exc)
