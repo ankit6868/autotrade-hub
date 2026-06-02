@@ -3318,7 +3318,7 @@ async def _manual_position_watchdog():
                 except Exception as exc:
                     log.warning("[%s] manual-watchdog order-fill tick failed: %s",
                                 eng.user_id, exc)
-                # 2. TP/SL/liq on open positions (may include positions
+                # 2. TP/SL/liq on open PAPER positions (may include positions
                 #    that were just created by step 1's fills).
                 try:
                     nc = eng.tick_manual_position_management()
@@ -3327,6 +3327,18 @@ async def _manual_position_watchdog():
                                  eng.user_id, nc)
                 except Exception as exc:
                     log.warning("[%s] manual-watchdog exit tick failed: %s",
+                                eng.user_id, exc)
+                # 3. Reconcile LIVE manual positions against KuCoin so a
+                #    TP/SL trigger, liquidation, or a close done on KuCoin's
+                #    own app clears our local row + books the P&L even when the
+                #    user isn't polling the Positions tab (24/7 trading). The
+                #    /open endpoint also calls this, but only while the UI is
+                #    open. No-op unless the engine holds a live position;
+                #    throttled to 3s inside the method.
+                try:
+                    eng.maybe_reconcile_live_positions(throttle_secs=3)
+                except Exception as exc:
+                    log.warning("[%s] manual-watchdog reconcile tick failed: %s",
                                 eng.user_id, exc)
         except Exception as outer_exc:
             log.warning("Manual-position watchdog outer failure: %s", outer_exc)

@@ -1924,6 +1924,29 @@ class FuturesEngine(NativeTradingEngine):
                         closed += 1
         return closed
 
+    def _has_live_positions(self) -> bool:
+        """True if this engine holds at least one LIVE-tagged position.
+
+        The shared manual engine (futures_engine_registry.for_user) is ALWAYS
+        constructed in _mode='paper' and never flipped to live, yet it hosts
+        manual LIVE positions — each tagged pos._mode='live' at entry. Those
+        positions still need reconciling against KuCoin (a TP/SL trigger, a
+        liquidation, or a close done on KuCoin's own app must clear our local
+        row and book the P&L). Gating reconcile on engine _mode alone left
+        them stuck 'open' forever — this helper lets the gate also fire when
+        the engine merely HOLDS a live position."""
+        # Snapshot via list() — called outside the engine lock, so iterating
+        # the live dict directly could raise "dict changed size".
+        return any(getattr(p, "_mode", None) == "live"
+                   for p in list(self.positions.values()))
+
+    def _reconcile_should_run(self) -> bool:
+        """Reconcile applies to LIVE positions only. Run when the engine is
+        live (bot engine) OR holds any live-tagged position (manual engine)."""
+        if not self._api_key:
+            return False
+        return self._mode == "live" or self._has_live_positions()
+
     def maybe_reconcile_live_positions(self, *, throttle_secs: int = 3) -> bool:
         """Throttled wrapper around _reconcile_live_positions, safe to call
         from HTTP endpoints that don't have a run loop (e.g. the user-
@@ -1940,7 +1963,7 @@ class FuturesEngine(NativeTradingEngine):
         Returns True if a reconcile actually ran. Throttle still protects
         KuCoin from being hammered when multiple /open polls land in
         the same second (deduplicates the call across endpoints)."""
-        if self._mode != "live" or not self._api_key:
+        if not self._reconcile_should_run():
             return False
         now = time.time()
         last = getattr(self, "_last_manual_reconcile_ts", 0.0)
@@ -1986,7 +2009,9 @@ class FuturesEngine(NativeTradingEngine):
         every few seconds) without false-removing positions during the
         eventual-consistency window after a fresh entry.
         """
-        if self._mode != "live" or not self._api_key or not self.positions:
+        if not self._api_key or not self.positions:
+            return
+        if self._mode != "live" and not self._has_live_positions():
             return
         try:
             from .native_trading_engine import _kucoin_get_signed
@@ -2014,6 +2039,14 @@ class FuturesEngine(NativeTradingEngine):
             drop: list[str] = []
             with self._lock:
                 for trade_key, pos in list(self.positions.items()):
+                    # Reconcile LIVE positions ONLY. On the shared manual
+                    # engine paper + live positions coexist; paper positions
+                    # never appear on KuCoin, so without this guard the drift
+                    # logic below would (wrongly) drop every paper position.
+                    # When the engine itself is live (bot engine) all its
+                    # positions are live.
+                    if self._mode != "live" and getattr(pos, "_mode", None) != "live":
+                        continue
                     sym = normalize_futures_symbol(
                         pos.pair.replace("/", "").replace("USDT", "USDTM"),
                     )
@@ -2044,16 +2077,23 @@ class FuturesEngine(NativeTradingEngine):
                     self._reconcile_drift_counts.pop(trade_key, None)
                     if pos is None:
                         continue
-                    # Use last-known price as the close fill; net P&L is
-                    # whatever the bot saw before the drift. Persist so
-                    # the trade history shows the reconciliation.
-                    fill = self._last_prices.get(pos.pair, pos.entry)
+                    # Estimate the close fill: freshest price we have (WS /
+                    # 1m bar / REST) since the position likely exited at its
+                    # TP/SL trigger near the current price. Falls back to
+                    # entry only if no price is available (P&L≈0 then).
+                    fill = (self._last_prices.get(pos.pair)
+                            or self._get_live_price(pos.pair)
+                            or pos.entry)
+                    # Persist with the POSITION's own mode — the shared manual
+                    # engine is _mode='paper' but this position is live, and a
+                    # live close must be recorded as live in the history.
+                    pos_mode = getattr(pos, "_mode", None) or self._mode
                     try:
                         pos.close(fill, "reconciled_drift", datetime.now(timezone.utc))
                         self.balance += pos.pnl_abs
                         self.closed_trades.append(pos)
                         _persist_closed_trade(
-                            self.user_id, pos, self._mode,
+                            self.user_id, pos, pos_mode,
                             self._strategy_id, pos.db_id,
                         )
                     except Exception:
