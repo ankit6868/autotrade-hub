@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from datetime import datetime
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select, desc, func
 
@@ -1647,14 +1647,24 @@ def futures_manual_entry(
 # ── Force Close ───────────────────────────────────────────────────────────────
 
 @router.post("/force-close/{pair:path}")
-async def futures_force_close(
+def futures_force_close(
     pair: str,
     request: Request,
+    body: dict | None = Body(default=None),
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
     """Close ALL open futures positions for the given pair.
-    In live mode, places close orders via KuCoin Lead Trading API."""
+    In live mode, places close orders via KuCoin Lead Trading API.
+
+    SYNC endpoint (not async): the KuCoin close goes through blocking
+    urllib (_kucoin_post_signed). A `async def` here would run the
+    blocking call ON the event loop and freeze EVERY other request
+    (the /open poll, the price ticker, a second trade) until KuCoin
+    replied — up to 8s on a stuck proxy. As a plain `def`, FastAPI
+    runs it in its worker threadpool, so a close in flight never
+    stalls the rest of the app. Body is read via the `body` param
+    instead of `await request.json()` so no await is needed."""
     from backend.services.native_trading_engine import _kucoin_get, _kucoin_post_signed, _persist_closed_trade
     from backend.services.futures_engine import KUCOIN_FUTURES_BASE
     from backend.services.kucoin_futures_client import normalize_futures_symbol
@@ -1666,7 +1676,6 @@ async def futures_force_close(
     req_direction = None
     req_position_id: str | None = None
     try:
-        body = await request.json()
         if isinstance(body, dict):
             req_mode = body.get("mode")
             # Optional — when present, close only the matching long OR short.

@@ -580,7 +580,7 @@ class FuturesEngine(NativeTradingEngine):
             sym = normalize_futures_symbol(pair)
             url = f"https://api-futures.kucoin.com/api/v1/ticker?symbol={sym}"
             req = urllib.request.Request(url, headers={"User-Agent": "autotrade-hub/1.0"})
-            with _proxy_urlopen(req, timeout=10) as resp:
+            with _proxy_urlopen(req, timeout=8) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
             data = (payload or {}).get("data") or {}
             price_str = data.get("price") or data.get("lastTradedPrice") or data.get("bestBidPrice")
