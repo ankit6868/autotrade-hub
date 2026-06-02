@@ -4327,7 +4327,75 @@ def set_position_tp_sl(
         kc_contracts  = max(1, int(contract_size / matched_pos.entry * 1000))
         kc_mode       = getattr(matched_pos, "_mode", None) or eng._mode or "paper"
 
-    # ── Step 2: if no engine position, try to fetch from KuCoin ─────────
+    # ── Step 2a: PAPER DB-orphan fallback ────────────────────────────────
+    # If no engine match AND the row is a paper position visible only in
+    # the DB (engine got reset), RESURRECT it into the main user engine
+    # first, then set TP/SL on the live engine pos. After resurrection
+    # the manual-position watchdog auto-ticks TP/SL/liq every 5s — so
+    # the stops the user just set actually fire. Without resurrection,
+    # writing TP/SL to a DB-only row left no thread checking them.
+    if not matched_pos:
+        orphan_q = select(Trade).where(
+            Trade.user_id    == user_id,
+            Trade.pair       == pair,
+            Trade.market_type == "futures",
+            Trade.mode       == "paper",
+            Trade.status     == "open",
+        )
+        if direction_req:
+            orphan_q = orphan_q.where(Trade.side == direction_req)
+        if position_id_req and position_id_req.startswith("db:"):
+            try:
+                orphan_q = orphan_q.where(Trade.id == int(position_id_req[3:]))
+            except ValueError:
+                pass
+        else:
+            orphan_q = orphan_q.order_by(desc(Trade.entry_time)).limit(1)
+        orphan = db.execute(orphan_q).scalar_one_or_none()
+        if orphan is not None:
+            from backend.services.futures_engine import FuturesPosition, _calc_liquidation_price
+            from datetime import timezone as _tz
+            # Resurrect into the main user engine so the watchdog ticks it.
+            with eng._lock:
+                new_pos = FuturesPosition(
+                    pair      = orphan.pair,
+                    direction = orphan.side or "long",
+                    entry     = float(orphan.entry_price or 0),
+                    sl        = float(sl_price if sl_price is not None
+                                       else (orphan.stoploss_price or 0)),
+                    tp        = float(tp_price if tp_price is not None
+                                       else (orphan.entry_price or 0)),
+                    size      = float(orphan.amount or 0),
+                    leverage  = int(orphan.leverage or 1),
+                    opened_at = orphan.entry_time or datetime.now(_tz.utc),
+                )
+                new_pos._mode = "paper"
+                new_pos.db_id = orphan.id
+                # Use the same trade_key format as /manual-entry so /open
+                # can de-dup if the engine somehow already had this row.
+                trade_key = f"{orphan.pair}-{orphan.side}-resurrected-{int((orphan.entry_time or datetime.now(_tz.utc)).timestamp())}"
+                eng.positions[trade_key] = new_pos
+            # Persist the new SL on the DB row so the next reconcile
+            # cycle agrees with the engine.
+            if sl_price is not None:
+                orphan.stoploss_price = round(float(sl_price), 8)
+                db.commit()
+            return {
+                "ok": True,
+                "pair": pair,
+                "mode": "paper",
+                "tp_price": float(tp_price) if tp_price is not None else None,
+                "sl_price": float(sl_price) if sl_price is not None else None,
+                "source": "db_orphan_resurrected",
+                "note": (
+                    "Position was DB-only (engine got reset). Resurrected "
+                    "into the main engine and set TP/SL — the manual-"
+                    "position watchdog now ticks it every 5s and will "
+                    "auto-close on TP/SL/liq hit."
+                ),
+            }
+
+    # ── Step 2b: if no engine position AND no paper orphan, try KuCoin ──
     if not matched_pos:
         if not _ensure_live_credentials(eng, user_id, db)[0]:
             return {"error": f"No open position for {pair}. Connect a Lead Trading API key in Setup to enable TP/SL on KuCoin-only positions."}
