@@ -44,6 +44,42 @@ _ticker_cache: dict[str, tuple[float, float]] = {}   # pair → (timestamp, pric
 _TICKER_TTL = 2.0
 
 
+# Recently-closed live positions guard. KuCoin's /api/v1/positions is
+# eventually consistent — after we send a successful close, KuCoin may
+# still report the position as open for a few seconds. Without this
+# guard, /open's reconcile would RE-ADD the position to the user's
+# Positions tab right after they closed it, making the close appear
+# to fail. We record (user_id, pair, direction) → close_ts when a
+# close confirms, and the reconcile skips any KuCoin-only row that
+# matches a recent close.
+_recently_closed: dict[tuple[str, str, str], float] = {}
+_RECENTLY_CLOSED_TTL = 30.0   # seconds — covers KuCoin's worst-case
+                              # post-close consistency window
+
+
+def _mark_recently_closed(user_id: str, pair: str, direction: str) -> None:
+    """Record that we just closed (user_id, pair, direction) so /open
+    skips KuCoin's stale 'still open' echo for a few seconds."""
+    import time as _t
+    _recently_closed[(user_id, pair, direction)] = _t.time()
+
+
+def _was_recently_closed(user_id: str, pair: str, direction: str) -> bool:
+    """Check if (user_id, pair, direction) was closed in the last
+    _RECENTLY_CLOSED_TTL seconds. Also opportunistically prunes
+    expired entries to keep the dict from growing."""
+    import time as _t
+    now = _t.time()
+    key = (user_id, pair, direction)
+    ts = _recently_closed.get(key)
+    if ts is None:
+        return False
+    if now - ts > _RECENTLY_CLOSED_TTL:
+        _recently_closed.pop(key, None)
+        return False
+    return True
+
+
 def _futures_ticker_price(pair: str) -> float | None:
     """Bug-fix helper: get the FUTURES perp last price for a pair.
 
@@ -1238,6 +1274,15 @@ def futures_open_positions(
                     pair = f"{base}/USDT"
                     if pair in pairs_already_in_merged:
                         continue   # already tracking via engine/DB
+                    # Skip positions we JUST closed via the app — KuCoin's
+                    # /positions is eventually consistent and may still
+                    # report them as open for a few seconds. Without
+                    # this guard, the user clicks Close, the row vanishes
+                    # via optimistic UI, then reappears on the next /open
+                    # refresh because KuCoin hadn't propagated yet.
+                    _kc_dir = "long" if qty > 0 else "short"
+                    if _was_recently_closed(user_id, pair, _kc_dir):
+                        continue
                     direction = "long" if qty > 0 else "short"
                     entry     = float(kp.get("avgEntryPrice", 0))
                     cur       = float(kp.get("markPrice", 0)) or entry
@@ -1732,6 +1777,12 @@ async def futures_force_close(
                     confirmed_keys.append(trade_key)
                     log.info("[%s] Lead Trading CLOSE ok for %s: %s",
                              user_id, pair, resp.get("data"))
+                    # Mark so the next /open reconcile skips the stale
+                    # KuCoin "still open" echo for ~30s. Without this,
+                    # the row vanishes via optimistic UI then re-appears
+                    # because KuCoin's /positions endpoint hadn't
+                    # propagated the close yet.
+                    _mark_recently_closed(user_id, pair, pos.direction)
                 else:
                     msg = resp.get("msg") or f"KuCoin code {code}"
                     kucoin_errors.append(msg)
@@ -1902,6 +1953,10 @@ async def futures_force_close(
                         kucoin_only_closed = 1
                         log.info("[%s] Closed KuCoin-only position for %s qty=%s",
                                  user_id, pair, qty)
+                        # Same anti-reappear guard as the engine close
+                        # path — KuCoin /positions may still report this
+                        # open for ~30s; skip in reconcile until then.
+                        _mark_recently_closed(user_id, pair, direction)
                     else:
                         log.warning("[%s] Failed to close KuCoin-only position for %s: %s",
                                     user_id, pair, resp)
