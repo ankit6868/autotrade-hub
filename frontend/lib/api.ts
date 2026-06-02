@@ -354,19 +354,29 @@ export const api = {
           ...(positionId ? { position_id: positionId } : {}),
         }),
       }),
-    manualEntry: (pair: string, direction: 'long' | 'short' = 'long', stakePct = 5, leverage?: number, mode?: 'paper' | 'live', costUsdt?: number) =>
+    manualEntry: (
+      pair: string,
+      direction: 'long' | 'short' = 'long',
+      stakePct = 5,
+      leverage?: number,
+      mode?: 'paper' | 'live',
+      costUsdt?: number,
+      allowHedge?: boolean,
+    ) =>
       request<any>('/api/futures/manual-entry', {
         method: 'POST',
         // cost_usdt is the user's typed margin in USDT. Backend prefers it
         // over stake_pct for live mode (stake_pct gets misinterpreted against
         // the engine's paper wallet, not the real KuCoin balance). Paper
         // mode keeps using stake_pct since there's no real exchange call.
+        // allow_hedge=true lets long + short coexist on the same pair.
         body: JSON.stringify({
           pair, direction,
           stake_pct: stakePct,
           ...(costUsdt && costUsdt > 0 ? { cost_usdt: costUsdt } : {}),
           ...(leverage ? { leverage } : {}),
           ...(mode ? { mode } : {}),
+          ...(allowHedge ? { allow_hedge: true } : {}),
         }),
       }),
     orderbook: (symbol: string) => request<any>(`/api/futures/orderbook/${symbol}`),

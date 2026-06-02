@@ -58,6 +58,10 @@ export default function ManualOrderPanel({
   const [showAdvancedMenu, setShowAdvancedMenu] = useState(false);
   const [leverageModal, setLeverageModal] = useState(false);
   const [showMarginDropdown, setShowMarginDropdown] = useState(false);
+  // Hedge mode: when on, the backend allows opposite directions on the
+  // same pair (long + short coexist for hedging). Off by default — a
+  // careless second click shouldn't stack two longs on one pair.
+  const [hedgeMode, setHedgeMode] = useState(false);
 
   // Common fields
   const [price, setPrice] = useState('');
@@ -183,7 +187,10 @@ export default function ManualOrderPanel({
         // 1000 USDT paper when no live bot is running, causing "Order
         // quantity is too high, insufficient available margin" rejections
         // from KuCoin).
-        const r = await api.futures.manualEntry(pair, direction, Math.min(stakePct, 100), leverage, mode, costUsdt_);
+        const r = await api.futures.manualEntry(
+          pair, direction, Math.min(stakePct, 100),
+          leverage, mode, costUsdt_, hedgeMode,
+        );
         if (r.error) setError(r.error);
         else {
           const marginStr = r.margin != null ? ` · margin ${Number(r.margin).toFixed(2)} USDT` : '';
@@ -918,6 +925,19 @@ export default function ManualOrderPanel({
               className="accent-emerald-500 w-3 h-3"
             />
             Reduce Only
+          </label>
+          {/* Hedge mode — when on, the backend allows long + short on
+              the same pair (opposite directions coexist). Off by default
+              so a second click doesn't accidentally stack same-side. */}
+          <label className="flex items-center gap-1.5 text-[11px] text-slate-400 cursor-pointer"
+                 title="Allow opposite-direction position on the same pair (long + short coexist)">
+            <input
+              type="checkbox"
+              checked={hedgeMode}
+              onChange={() => setHedgeMode(!hedgeMode)}
+              className="accent-purple-500 w-3 h-3"
+            />
+            <span className={hedgeMode ? 'text-purple-300 font-medium' : ''}>Hedge Mode</span>
           </label>
         </div>
 

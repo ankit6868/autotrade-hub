@@ -228,7 +228,10 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
         <div className="px-3 py-2 border-b border-white/[0.06] flex flex-col flex-1 min-h-0">
           <div className="flex items-center justify-between mb-1.5 shrink-0">
             <p className="text-[10px] text-emerald-400 font-bold">Active Bots</p>
-            <span className="text-[9px] text-slate-500">Loading…</span>
+            <span className="flex items-center gap-1.5 text-[10px] text-slate-400">
+              <span className="w-2 h-2 rounded-full bg-emerald-400/60 animate-pulse" />
+              Loading bots…
+            </span>
           </div>
           <div className="space-y-1.5">
             {[0, 1].map(i => (
@@ -242,6 +245,9 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
               </div>
             ))}
           </div>
+          <p className="text-[10px] text-slate-500 text-center mt-2 italic">
+            Fetching your active strategies — this usually takes 1-2 seconds…
+          </p>
         </div>
       )}
 

@@ -140,8 +140,11 @@ export default function PositionsPanel({
   async function partialClose(pair: string, pct: number, positionId?: string) {
     setClosingPair(pair);
     // Optimistic shrink: reduce the row's amount in-place so the user
-    // sees instant feedback. If the request fails we restore from the
-    // snapshot. Total close (pct≈100) just hides the row.
+    // sees instant feedback. The backend /open now correctly reports
+    // amount × remaining_pct (commit 94d945b → next), so the value
+    // STAYS shrunk after refresh instead of snapping back. If the
+    // request fails we restore from the snapshot. Total close (~100%)
+    // just hides the row.
     const prevPositions = positions;
     const fraction = pct / 100;
     setPositions(prev => prev.flatMap(p => {

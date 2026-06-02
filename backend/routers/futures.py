@@ -1039,13 +1039,22 @@ def futures_open_positions(
                 seen_keys.add(k)
                 liq = getattr(p, "liquidation_price", None)
                 lev = getattr(p, "leverage", 1)
+                # EFFECTIVE size accounts for partial closes. partial_close
+                # reduces remaining_pct (e.g. 25% close → remaining_pct=0.75)
+                # but leaves pos.size unchanged. Without this multiplication
+                # /open reports the ORIGINAL size, the UI snaps back to the
+                # full row after a partial — the user clicks 25%, sees the
+                # row shrink optimistically, then 8s later it's back to
+                # full because /open re-renders pos.size.
+                _remaining = float(getattr(p, "remaining_pct", 1.0) or 1.0)
+                _effective_size = float(p.size) * max(0.0, min(1.0, _remaining))
                 native_positions.append({
                 "pair":              p.pair,
                 "direction":         p.direction,
                 "entry":             round(p.entry, 6),
                 "sl":                round(p.effective_sl, 6) if hasattr(p, "effective_sl") else round(p.sl, 6),
                 "tp":                round(p.tp, 6),
-                "stake":             round(p.size, 2),
+                "stake":             round(_effective_size, 2),
                 "opened_at":         str(p.opened_at),
                 "leverage":          lev,
                 "liquidation_price": round(liq, 6) if liq else None,
@@ -1368,11 +1377,31 @@ def futures_manual_entry(
         sl_price = round(entry_price * (1 + sl_pct), 6)
         tp_price = round(entry_price * (1 - tp_pct / 100), 6)
 
+    # Hedge mode: when allow_hedge=true we permit opposite directions
+    # on the same pair (long + short coexist for hedging). Default is
+    # false so a careless click can't accidentally stack two longs on
+    # one pair. Matches KuCoin's hedge-mode position-side handling
+    # since order body already carries the correct positionSide.
+    allow_hedge = bool(req.get("allow_hedge", False))
     with eng._lock:
-        existing_pairs = [p.pair for p in eng.positions.values()
-                          if getattr(p, "_mode", eng._mode) == mode]
-    if pair in existing_pairs:
-        return {"error": f"Already have an open position for {pair}. Close it first."}
+        if allow_hedge:
+            # Block only SAME direction. Opposite directions ok.
+            existing_same_dir = [
+                p.pair for p in eng.positions.values()
+                if getattr(p, "_mode", eng._mode) == mode
+                and p.pair == pair
+                and p.direction == direction
+            ]
+            blocked = bool(existing_same_dir)
+        else:
+            existing_pairs = [p.pair for p in eng.positions.values()
+                              if getattr(p, "_mode", eng._mode) == mode]
+            blocked = pair in existing_pairs
+    if blocked:
+        return {"error": (
+            f"Already have an open {direction.upper() if allow_hedge else ''} position for {pair}. "
+            f"Close it first" + (" or use a different direction." if allow_hedge else ".")
+        )}
 
     # ── Live mode: place real order via Lead Trading API ──────────────
     # CRITICAL: must talk to KuCoin BEFORE we mutate engine state. If the API
