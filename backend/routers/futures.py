@@ -4973,45 +4973,71 @@ def list_futures_bots(
     # Refresh engine list after potential resumes
     bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
 
-    # Count trades from DB per BOT INSTANCE for fallback.
-    # Bug fix: was counting ALL trades with the same strategy_id, which
-    # double-counts trades from PREVIOUS bot instances of the same
-    # strategy template (e.g. starting/stopping a Bollinger Bands bot
-    # 3 times made each new instance inherit the 3 historical trades).
-    # Now filters to trades that opened AFTER the current instance's
-    # created_at, so each instance's count is unique to its lifetime.
-    from sqlalchemy import func
-    db_trade_counts = {}
-    # Also compute SUM(profit_abs) per instance — same scope as the count,
-    # so the bot card's P&L number matches what's in the trades list.
-    # Previously total_pnl came from engine_status.realized_pnl, which
-    # is 0.0 after a Railway redeploy (engine restarted, in-memory state
-    # lost). Python's .get(key, default) returns the value if the key
-    # EXISTS even when it's 0, so the fallback never triggered. Result:
-    # bot card showed P&L = +0.00 forever despite N closed trades in DB.
+    # Per-bot trade stats from DB. Previous implementation did 2
+    # separate queries PER bot (count + sum), so N bots cost 2N
+    # round trips — a major source of /bots latency that surfaced as
+    # "Loading bots…" hanging in the UI for several seconds.
+    #
+    # Now: TWO consolidated queries total (regardless of bot count):
+    #   1. count + sum grouped by (strategy_id, mode), bounded to
+    #      trades opened on/after each instance's created_at
+    #   2. open-position count per (strategy_id, mode) so the card
+    #      reflects DB truth even when the bot engine isn't in memory
+    #
+    # The first query uses a UNION-style aggregate per instance because
+    # the per-instance created_at cutoff makes a single GROUP BY
+    # impossible. We instead do ONE call returning rows keyed by
+    # (strategy_id, mode) for each instance's window. Even with 10
+    # bots this is one DB hit instead of 20.
+    from sqlalchemy import func, and_, or_ as _sql_or
+    db_trade_counts: dict[int, int] = {}
     db_pnl_sums: dict[int, float] = {}
-    for i in instances:
-        count = db.execute(
-            select(func.count(Trade.id)).where(
-                Trade.user_id == user_id,
-                Trade.market_type == "futures",
-                Trade.strategy_id == i.strategy_id,
-                Trade.mode == i.mode,
-                Trade.entry_time >= i.created_at,
-            )
-        ).scalar() or 0
-        db_trade_counts[i.id] = count
-        pnl_sum = db.execute(
-            select(func.coalesce(func.sum(Trade.profit_abs), 0.0)).where(
-                Trade.user_id == user_id,
-                Trade.market_type == "futures",
-                Trade.strategy_id == i.strategy_id,
-                Trade.mode == i.mode,
-                Trade.entry_time >= i.created_at,
-                Trade.status == "closed",
-            )
-        ).scalar() or 0.0
-        db_pnl_sums[i.id] = float(pnl_sum)
+    db_open_counts: dict[int, int] = {}    # NEW: open-position fallback
+
+    if instances:
+        # Build a single query that handles ALL instances' windows.
+        # We use a CASE-WHEN aggregation grouped by (strategy_id, mode)
+        # PLUS we apply the latest created_at per (strategy_id, mode)
+        # as the cutoff. Simpler approach: bulk-load all relevant
+        # trades once, then bucket them in Python.
+        relevant_strategy_ids = list({i.strategy_id for i in instances if i.strategy_id})
+        relevant_modes        = list({i.mode for i in instances if i.mode})
+        if relevant_strategy_ids and relevant_modes:
+            min_created = min(i.created_at for i in instances if i.created_at)
+            all_trades = db.execute(
+                select(
+                    Trade.id,
+                    Trade.strategy_id,
+                    Trade.mode,
+                    Trade.entry_time,
+                    Trade.profit_abs,
+                    Trade.status,
+                ).where(
+                    Trade.user_id == user_id,
+                    Trade.market_type == "futures",
+                    Trade.strategy_id.in_(relevant_strategy_ids),
+                    Trade.mode.in_(relevant_modes),
+                    Trade.entry_time >= min_created,
+                )
+            ).all()
+            # Bucket in Python — cheap, single pass.
+            for i in instances:
+                tot = 0
+                pnl = 0.0
+                opn = 0
+                for tid, t_sid, t_mode, t_entry, t_profit, t_status in all_trades:
+                    if t_sid != i.strategy_id or t_mode != i.mode:
+                        continue
+                    if t_entry is None or t_entry < i.created_at:
+                        continue
+                    tot += 1
+                    if t_status == "closed":
+                        pnl += float(t_profit or 0.0)
+                    elif t_status == "open":
+                        opn += 1
+                db_trade_counts[i.id] = tot
+                db_pnl_sums[i.id] = pnl
+                db_open_counts[i.id] = opn
 
     bots = []
     for i in instances:
@@ -5045,7 +5071,18 @@ def list_futures_bots(
                 or float(i.total_pnl or 0.0),
                 4,
             ),
-            "open_positions": (engine_status or {}).get("open_trades", 0),
+            # Engine-reported count is freshest, but falls back to the
+            # DB count (just bulk-loaded above) when the engine isn't in
+            # memory yet — e.g. right after a Railway restart, or while
+            # the watchdog is mid-revive. Without the fallback the bot
+            # card showed "Open: 0" even when DB had open positions for
+            # the bot, contradicting what the user saw in the Positions
+            # tab.
+            "open_positions": (
+                (engine_status or {}).get("open_trades")
+                if engine_status is not None
+                else db_open_counts.get(i.id, 0)
+            ),
             "ticks": (engine_status or {}).get("ticks", 0),
             "signals": (engine_status or {}).get("signal_count", 0),
             "last_action": (engine_status or {}).get("last_action", ""),
