@@ -58,12 +58,13 @@ export default function PositionsPanel({
       api.futures.bots.list(mode).catch(() => ({ bots: [] })),
       api.futures.status().catch(() => null),
     ]);
-    // Show ONLY manual positions in the Positions tab. Bot-owned positions
-    // appear in the Bots tab — keeping them separate prevents the user
-    // from accidentally closing a bot trade from the manual UI and stops
-    // the paper-bot → manual-paper leak the user flagged.
-    const allTrades = pos.trades || [];
-    setPositions(allTrades.filter((t: any) => (t.source ?? 'manual') === 'manual'));
+    // Show ALL open positions — manual AND bot-owned. Bot rows are
+    // tagged with `source='bot'` + `bot_key` and rendered with a
+    // visible "BOT" badge so the user can distinguish (the row's
+    // Contract column shows BOT • <bot_key>). Previous filter hid
+    // bot rows entirely; user wanted to see them in one place
+    // alongside the bot's own management cards.
+    setPositions(pos.trades || []);
     setOpenOrders(orders.orders || []);
     setTradeHistory(history.trades || []);
     if (acct) setAccount(acct);
@@ -451,11 +452,33 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                 <td className="px-2 py-2">
                   <div className="flex items-center gap-1.5">
                     <div>
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded ${
                           (p.side || p.direction) === 'long' ? 'bg-emerald-500/20 text-emerald-400' : 'bg-red-500/20 text-red-400'
                         }`}>{((p.side || p.direction) === 'long' ? 'LONG' : 'SHORT')}</span>
                         <span className="text-white font-medium">{p.pair} Perp</span>
+                        {/* Source badge — distinguish manual entries from
+                            bot-managed positions so the user knows which
+                            rows are autonomous vs which they opened
+                            themselves. Bot positions are still shown
+                            here per user request; the bot still manages
+                            them, but the user can see them at a glance. */}
+                        {p.source === 'bot' && (
+                          <span
+                            className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-cyan-500/20 text-cyan-300"
+                            title={`Managed by bot: ${p.bot_key ?? 'unknown'}. The bot will close this position automatically on TP / SL / signal.`}
+                          >
+                            BOT
+                          </span>
+                        )}
+                        {p.source !== 'bot' && (
+                          <span
+                            className="text-[9px] font-medium px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-300"
+                            title="Manual position you opened yourself."
+                          >
+                            MANUAL
+                          </span>
+                        )}
                       </div>
                       {/* Leverage is locked while a position is open — KuCoin
                           rejects leverage changes on an active symbol. The tiny
