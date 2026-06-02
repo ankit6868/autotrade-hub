@@ -2130,6 +2130,83 @@ def place_futures_order(
     if real_notional is not None:
         result["notional"] = real_notional
 
+    # ── Paper: immediate-fill check ────────────────────────────────────
+    # The manual-paper watchdog runs every 5s. Without this immediate
+    # check, a limit order placed at or beyond the current price (e.g.
+    # buy limit at 69558 with current 69533) sits in Open Orders for
+    # up to 5 seconds before the watchdog notices it should fill —
+    # by which time the market may have moved past the limit. Calling
+    # tick_pending_orders_paper synchronously here matches the order
+    # against live price in the same request that placed it.
+    optimistic_position_payload = None
+    if mode == "paper":
+        try:
+            eng.tick_pending_orders_paper()
+        except Exception as fill_exc:
+            log.warning("[%s] Immediate-fill tick failed for %s: %s",
+                        user_id, symbol, fill_exc)
+        # Did the order disappear from pending? → it filled. Find the
+        # resulting position and build an optimistic payload for the UI.
+        client_oid_just_placed = result.get("order_id")
+        order_still_pending = False
+        with eng._lock:
+            order_still_pending = client_oid_just_placed in eng._pending_orders
+        if not order_still_pending:
+            # Filled — find the position we just created so the frontend
+            # can prepend it to the Positions tab (skipping the wait for
+            # the next /open round-trip).
+            with eng._lock:
+                for trade_key, pos in eng.positions.items():
+                    if (pos.pair.replace("/", "").replace("USDT", "USDTM") == symbol.upper()
+                        and getattr(pos, "_mode", "paper") == "paper"):
+                        # Latest position on this pair — likely ours.
+                        cur = eng._get_live_price(pos.pair) or pos.entry
+                        optimistic_position_payload = {
+                            "id":                f"eng:{trade_key}",
+                            "position_id":       f"eng:{trade_key}",
+                            "_db_id":            getattr(pos, "db_id", None),
+                            "pair":              pos.pair,
+                            "side":              pos.direction,
+                            "entry_price":       pos.entry,
+                            "current_price":     cur,
+                            "amount":            round(pos.size, 4),
+                            "leverage":          getattr(pos, "leverage", 1),
+                            "liquidation_price": getattr(pos, "liquidation_price", None),
+                            "stoploss_price":    pos.sl,
+                            "tp_price":          pos.tp,
+                            "entry_time":        str(pos.opened_at),
+                            "mode":              "paper",
+                            "market_type":       "futures",
+                            "unrealized_pnl":    0.0,
+                            "source":            "manual",
+                            "bot_key":           None,
+                        }
+                        break
+            result["filled_immediately"] = True
+            result["position"] = optimistic_position_payload
+
+    # Also surface the pending-order payload so when the order DOESN'T
+    # fill immediately, the frontend can prepend it to Open Orders
+    # without waiting for /orders to round-trip.
+    if optimistic_position_payload is None:
+        result["order"] = {
+            "order_id":    result.get("order_id"),
+            "db_id":       order_rec.id,
+            "symbol":      symbol,
+            "side":        side,
+            "order_type":  order_type,
+            "size":        size,
+            "price":       price,
+            "stop_price":  stop_price,
+            "leverage":    lev,
+            "margin_mode": "isolated",
+            "mode":        mode,
+            "status":      "pending",
+            "tp_price":    float(tp_price) if tp_price else None,
+            "sl_price":    float(sl_price) if sl_price else None,
+            "created_at":  str(order_rec.created_at),
+        }
+
     log_event(db, user_id, "futures.place_order", request, payload=result)
     return result
 

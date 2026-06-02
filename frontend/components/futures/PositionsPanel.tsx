@@ -8,17 +8,23 @@ interface Props {
   onRefresh?: () => void;
   refreshTrigger?: number;
   // Optional optimistic position payload — parent sets this when a
-  // manual entry succeeds so the new row renders BEFORE the next
-  // /open round-trip. PositionsPanel consumes it and calls
-  // onOptimisticConsumed so the parent can clear it.
+  // manual entry succeeds (or a limit filled immediately) so the new
+  // row renders BEFORE the next /open round-trip. PositionsPanel
+  // consumes it and calls onOptimisticConsumed so the parent can clear.
   optimisticPosition?: any;
   onOptimisticConsumed?: () => void;
+  // Same idea for pending orders — when /order returns and the order
+  // is still pending (didn't fill immediately), it shows up here.
+  optimisticOrder?: any;
+  onOptimisticOrderConsumed?: () => void;
 }
 
 type Tab = 'positions' | 'open_orders' | 'order_history' | 'trade_history' | 'position_history' | 'assets' | 'bots';
 
 export default function PositionsPanel({
-  mode, onRefresh, refreshTrigger, optimisticPosition, onOptimisticConsumed,
+  mode, onRefresh, refreshTrigger,
+  optimisticPosition, onOptimisticConsumed,
+  optimisticOrder, onOptimisticOrderConsumed,
 }: Props) {
   const [tab, setTab] = useState<Tab>('positions');
   const [positions, setPositions] = useState<any[]>([]);
@@ -84,6 +90,22 @@ export default function PositionsPanel({
     });
     onOptimisticConsumed?.();
   }, [optimisticPosition, mode, onOptimisticConsumed]);
+
+  // Same optimistic flow for pending orders. /api/futures/order returns
+  // either `position` (filled immediately) or `order` (sitting in Open
+  // Orders). The position case is handled above; this handles the
+  // order case so a limit placed in Open Orders also shows up instantly.
+  useEffect(() => {
+    if (!optimisticOrder) return;
+    if (optimisticOrder.mode !== mode) return;
+    setOpenOrders(prev => {
+      if (prev.some(o => o.order_id === optimisticOrder.order_id)) {
+        return prev;
+      }
+      return [optimisticOrder, ...prev];
+    });
+    onOptimisticOrderConsumed?.();
+  }, [optimisticOrder, mode, onOptimisticOrderConsumed]);
 
   async function closePosition(pair: string, direction?: 'long' | 'short', positionId?: string) {
     setClosingPair(pair);

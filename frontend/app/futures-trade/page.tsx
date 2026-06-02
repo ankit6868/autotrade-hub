@@ -27,10 +27,12 @@ export default function FuturesTerminal() {
   const [account, setAccount] = useState<any>({ balance: 1000, available_balance: 1000 });
   const [lastPrice, setLastPrice] = useState(0);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
-  // Optimistic-UI handoff: when a manual entry succeeds, the panel adds
-  // this row immediately so the user sees the position before the next
-  // /open round-trip. PositionsPanel consumes + clears it.
+  // Optimistic-UI handoffs: when an order/entry succeeds, the panel
+  // adds the new row immediately so the user sees the result before
+  // the next /open or /orders round-trip. PositionsPanel consumes
+  // + clears each one.
   const [optimisticPosition, setOptimisticPosition] = useState<any>(null);
+  const [optimisticOrder,    setOptimisticOrder]    = useState<any>(null);
   // Asset Overview can be collapsed to reclaim vertical space in the bottom
   // row — useful when the user wants more room for Positions / Open Orders.
   const [assetCollapsed, setAssetCollapsed] = useState(false);
@@ -191,6 +193,8 @@ export default function FuturesTerminal() {
                 refreshTrigger={refreshTrigger}
                 optimisticPosition={optimisticPosition}
                 onOptimisticConsumed={() => setOptimisticPosition(null)}
+                optimisticOrder={optimisticOrder}
+                onOptimisticOrderConsumed={() => setOptimisticOrder(null)}
               />
             </div>
           </div>
@@ -257,11 +261,12 @@ export default function FuturesTerminal() {
                     refreshAccount();
                     fetchLeverage();
                     setRefreshTrigger(n => n + 1);
-                    // Backend's /manual-entry returns a `position` payload
-                    // in the same shape /open emits. Surface it through
-                    // optimisticPosition so PositionsPanel can render the
-                    // new row instantly (no wait for the next /open poll).
+                    // Backend echoes either a `position` (market entry or
+                    // limit that filled immediately) OR an `order`
+                    // (pending limit/conditional). Surface whichever is
+                    // present so the right tab updates instantly.
                     if (result?.position) setOptimisticPosition(result.position);
+                    if (result?.order)    setOptimisticOrder(result.order);
                   }}
                 />
               ) : (
@@ -346,6 +351,7 @@ export default function FuturesTerminal() {
                       fetchLeverage();
                       setRefreshTrigger(n => n + 1);
                       if (result?.position) setOptimisticPosition(result.position);
+                      if (result?.order)    setOptimisticOrder(result.order);
                     }}
                   />
                 ) : (

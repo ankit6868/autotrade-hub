@@ -305,8 +305,15 @@ export default function ManualOrderPanel({
         const r = await api.futures.placeOrder(orderPayload);
         if (r.error) setError(r.error);
         else {
-          setSuccess(`${activeLabel} ${side.toUpperCase()} order placed successfully`);
-          onOrderPlaced();
+          // If the order filled immediately (paper, limit at/beyond
+          // market) the backend echoes back the new position so we
+          // can prepend it to Positions; otherwise it echoes the
+          // pending order for Open Orders. Either way the UI updates
+          // the same frame as the response, without waiting for the
+          // next refresh poll.
+          const filled = r.filled_immediately ? ' (filled immediately)' : '';
+          setSuccess(`${activeLabel} ${side.toUpperCase()} order placed successfully${filled}`);
+          onOrderPlaced(r);
           resetForm();
         }
       }
