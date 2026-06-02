@@ -27,6 +27,10 @@ export default function FuturesTerminal() {
   const [account, setAccount] = useState<any>({ balance: 1000, available_balance: 1000 });
   const [lastPrice, setLastPrice] = useState(0);
   const [refreshTrigger, setRefreshTrigger] = useState(0);
+  // Optimistic-UI handoff: when a manual entry succeeds, the panel adds
+  // this row immediately so the user sees the position before the next
+  // /open round-trip. PositionsPanel consumes + clears it.
+  const [optimisticPosition, setOptimisticPosition] = useState<any>(null);
   // Asset Overview can be collapsed to reclaim vertical space in the bottom
   // row — useful when the user wants more room for Positions / Open Orders.
   const [assetCollapsed, setAssetCollapsed] = useState(false);
@@ -181,7 +185,13 @@ export default function FuturesTerminal() {
               <KuCoinFuturesChart pair={pair} defaultInterval="15m" />
             </div>
             <div className="h-[260px] shrink-0 border-t border-white/[0.06] overflow-hidden">
-              <PositionsPanel mode={mode} onRefresh={refreshAccount} refreshTrigger={refreshTrigger} />
+              <PositionsPanel
+                mode={mode}
+                onRefresh={refreshAccount}
+                refreshTrigger={refreshTrigger}
+                optimisticPosition={optimisticPosition}
+                onOptimisticConsumed={() => setOptimisticPosition(null)}
+              />
             </div>
           </div>
 
@@ -243,10 +253,15 @@ export default function FuturesTerminal() {
                   lastPrice={lastPrice}
                   onLeverageChange={handleLeverageChange}
                   onMarginModeChange={handleMarginModeChange}
-                  onOrderPlaced={() => {
+                  onOrderPlaced={(result?: any) => {
                     refreshAccount();
                     fetchLeverage();
                     setRefreshTrigger(n => n + 1);
+                    // Backend's /manual-entry returns a `position` payload
+                    // in the same shape /open emits. Surface it through
+                    // optimisticPosition so PositionsPanel can render the
+                    // new row instantly (no wait for the next /open poll).
+                    if (result?.position) setOptimisticPosition(result.position);
                   }}
                 />
               ) : (
@@ -326,10 +341,11 @@ export default function FuturesTerminal() {
                     lastPrice={lastPrice}
                     onLeverageChange={handleLeverageChange}
                     onMarginModeChange={handleMarginModeChange}
-                    onOrderPlaced={() => {
+                    onOrderPlaced={(result?: any) => {
                       refreshAccount();
                       fetchLeverage();
                       setRefreshTrigger(n => n + 1);
+                      if (result?.position) setOptimisticPosition(result.position);
                     }}
                   />
                 ) : (

@@ -7,11 +7,19 @@ interface Props {
   mode: 'paper' | 'live';
   onRefresh?: () => void;
   refreshTrigger?: number;
+  // Optional optimistic position payload — parent sets this when a
+  // manual entry succeeds so the new row renders BEFORE the next
+  // /open round-trip. PositionsPanel consumes it and calls
+  // onOptimisticConsumed so the parent can clear it.
+  optimisticPosition?: any;
+  onOptimisticConsumed?: () => void;
 }
 
 type Tab = 'positions' | 'open_orders' | 'order_history' | 'trade_history' | 'position_history' | 'assets' | 'bots';
 
-export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Props) {
+export default function PositionsPanel({
+  mode, onRefresh, refreshTrigger, optimisticPosition, onOptimisticConsumed,
+}: Props) {
   const [tab, setTab] = useState<Tab>('positions');
   const [positions, setPositions] = useState<any[]>([]);
   const [openOrders, setOpenOrders] = useState<any[]>([]);
@@ -57,6 +65,25 @@ export default function PositionsPanel({ mode, onRefresh, refreshTrigger }: Prop
       refreshAll();
     }
   }, [refreshTrigger, refreshAll]);
+
+  // Optimistic UI: when the parent passes a new position payload from a
+  // /manual-entry response, prepend it to the visible list IMMEDIATELY
+  // so the user sees the row before the next /open round-trip lands.
+  // De-dup on position_id so the subsequent refreshAll() doesn't double
+  // it. We also auto-clear via onOptimisticConsumed so the parent state
+  // resets and the same id can flow through again for a future entry.
+  useEffect(() => {
+    if (!optimisticPosition) return;
+    if (optimisticPosition.mode !== mode) return;          // wrong tab
+    if ((optimisticPosition.source ?? 'manual') !== 'manual') return;
+    setPositions(prev => {
+      if (prev.some(p => p.position_id === optimisticPosition.position_id)) {
+        return prev;   // already in list — backend refresh beat us to it
+      }
+      return [optimisticPosition, ...prev];
+    });
+    onOptimisticConsumed?.();
+  }, [optimisticPosition, mode, onOptimisticConsumed]);
 
   async function closePosition(pair: string, direction?: 'long' | 'short', positionId?: string) {
     setClosingPair(pair);

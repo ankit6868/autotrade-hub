@@ -13,7 +13,9 @@ interface Props {
   lastPrice?: number;
   onLeverageChange: (lev: number) => void;
   onMarginModeChange: (mode: string) => void;
-  onOrderPlaced: () => void;
+  // Optional `result` carries the backend response so the parent can do
+  // optimistic UI updates (e.g. prepend the new position immediately).
+  onOrderPlaced: (result?: any) => void;
   onPriceSet?: (price: string) => void;
 }
 
@@ -186,7 +188,10 @@ export default function ManualOrderPanel({
         else {
           const marginStr = r.margin != null ? ` · margin ${Number(r.margin).toFixed(2)} USDT` : '';
           setSuccess(`${direction.toUpperCase()} market order placed at ${r.entry}${marginStr}`);
-          onOrderPlaced();
+          // Pass the full backend response so the parent can optimistic-add
+          // the new position. Falls back to plain refresh if `r.position`
+          // is missing (older backend).
+          onOrderPlaced(r);
           resetForm();
         }
       } else if (orderType === 'twap') {
