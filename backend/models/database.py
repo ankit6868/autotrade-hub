@@ -18,21 +18,26 @@ _engine_kwargs: dict = {"echo": False, "future": True}
 if url.drivername.startswith("sqlite"):
     _engine_kwargs["connect_args"] = {"check_same_thread": False}
 else:
-    # Pool was 10+5=15. With 5 bot engines doing tick work, plus 6
-    # UI-polling endpoints firing every 8s, plus reconcile + audit
-    # writes, 15 connections gets blown in seconds → "QueuePool limit
-    # reached" errors that show up as "engine error" in the bot panel.
-    # 30+20=50 comfortably covers up to ~10 bots on a normal Postgres
-    # plan (most managed DBs allow 100+ concurrent connections).
-    _engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "30"))
-    _engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "20"))
+    # Pool sizing has to match the upstream Postgres server's limits.
+    # User reported: FATAL EMAXCONNSESSION max clients=15 in the bot
+    # log — their managed Postgres tier (Supabase free etc.) caps
+    # session-mode pooler at 15 simultaneous clients. We had been
+    # configuring 30+20=50 which made our SQLAlchemy side think it had
+    # capacity, but Postgres itself was rejecting the 16th connection.
+    #
+    # Safe default: 8+4=12 (leaves headroom under a 15-client cap).
+    # Users on bigger DBs (Railway Postgres, RDS, etc.) should set
+    # DB_POOL_SIZE=30 + DB_MAX_OVERFLOW=20 via env to get the higher
+    # capacity. Document this in deploy notes.
+    _engine_kwargs["pool_size"] = int(os.getenv("DB_POOL_SIZE", "8"))
+    _engine_kwargs["max_overflow"] = int(os.getenv("DB_MAX_OVERFLOW", "4"))
     _engine_kwargs["pool_pre_ping"] = True
     # Recycle connections every 30min so stale ones from a Postgres
     # idle-timeout drop don't block forever waiting for a half-dead conn.
     _engine_kwargs["pool_recycle"] = int(os.getenv("DB_POOL_RECYCLE", "1800"))
-    # Timeout waiting for a free connection — fail fast (10s) instead
+    # Timeout waiting for a free connection — fail fast (8s) instead
     # of hanging 30s and surfacing as "engine error" in the UI.
-    _engine_kwargs["pool_timeout"] = int(os.getenv("DB_POOL_TIMEOUT", "10"))
+    _engine_kwargs["pool_timeout"] = int(os.getenv("DB_POOL_TIMEOUT", "8"))
 
 engine = create_engine(url, **_engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False)
