@@ -2871,9 +2871,9 @@ def partial_close_futures_position(
         # close_pct — which is exactly the "25% closes the whole
         # position" bug the user flagged. The Trade row doesn't have a
         # remaining_pct column, but we can simulate the partial by
-        # reducing `amount` (= margin) and crediting the booked leg P&L
-        # into profit_abs (additive). Position stays status=open with
-        # the smaller margin until it's fully closed.
+        # reducing `amount` (= current margin) and crediting the booked
+        # leg P&L into profit_abs (additive). Position stays status=open
+        # with the smaller margin until it's fully closed.
         from datetime import timezone as _tz
         exit_p = _futures_ticker_price(pair) or orphan.entry_price
         now_dt = datetime.now(_tz.utc)
@@ -2888,6 +2888,49 @@ def partial_close_futures_position(
         leg_margin = prev_amount * close_fraction
         leg_pnl = leg_margin * (leg_pct / 100.0)
         new_amount = prev_amount - leg_margin
+
+        # ── LIVE orphan: also hit KuCoin so on-exchange reflects the
+        #   reduction. Without this, the DB shrinks but KuCoin still
+        #   holds the original size — the next /open reconcile would
+        #   either resurrect the original size or report a phantom.
+        if mode == "live":
+            try:
+                main_eng = futures_engine_registry.for_user(user_id)
+                ok_creds, err_creds = _ensure_live_credentials(main_eng, user_id, db)
+                if not ok_creds:
+                    return {
+                        "error": (f"Cannot partial-close live orphan: {err_creds}. "
+                                  "DB unchanged."),
+                    }
+                # Build a minimal pos-like object so we can reuse
+                # _place_live_partial_close. Shrinking by close_fraction
+                # of current (orphan.amount). The helper applies this
+                # fraction to its OWN contract calc using pos.size +
+                # pos.leverage, so feed the current effective size.
+                class _OrphanPos:
+                    pass
+                _op = _OrphanPos()
+                _op.pair      = pair
+                _op.direction = side
+                _op.entry     = orphan.entry_price
+                _op.size      = prev_amount        # current margin (already-shrunk)
+                _op.leverage  = lev
+                _op.tp2_price = None
+                _op.sl        = orphan.stoploss_price or 0
+                _op.remaining_pct = 1.0            # full of CURRENT for the helper's clamp
+                ok_live, err_live = main_eng._place_live_partial_close(
+                    pair, _op, close_fraction, exit_p,
+                )
+                if not ok_live:
+                    return {
+                        "error": (f"KuCoin rejected partial close: {err_live}. "
+                                  "DB unchanged — retry or close from KuCoin tab."),
+                    }
+            except Exception as live_exc:
+                return {
+                    "error": (f"KuCoin partial-close on orphan failed: {live_exc}. "
+                              "DB unchanged."),
+                }
 
         is_full_close = new_amount <= 0.01
         if is_full_close:
@@ -2906,7 +2949,8 @@ def partial_close_futures_position(
 
         # Credit the user's main paper engine balance with the leg P&L.
         # Without this the user "books" partial profit in the orphan row
-        # but their visible Asset Overview never updates.
+        # but their visible Asset Overview never updates. Live skips —
+        # KuCoin's own balance is the source of truth.
         if mode == "paper":
             try:
                 _eng = futures_engine_registry.for_user(user_id)
@@ -2938,9 +2982,26 @@ def partial_close_futures_position(
     from datetime import timezone as _tz
     now = datetime.now(_tz.utc)
 
-    # Compute leg P&L (mirror of FuturesPosition.book_partial_at_tp1, but
-    # configurable close_pct instead of pos.tp1_close_pct).
-    leg_margin = pos.size * close_fraction
+    # Initialise partial-close state on first use.
+    if not hasattr(pos, "partial_pnl_abs"):
+        pos.partial_pnl_abs = 0.0
+    if not hasattr(pos, "partial_exits"):
+        pos.partial_exits = []
+    if not hasattr(pos, "remaining_pct"):
+        pos.remaining_pct = 1.0
+
+    # CRITICAL: close_pct is applied to the CURRENT REMAINING size, not
+    # the original. This matches KuCoin's UI semantics ("25% closes 25%
+    # of what's open") and the optimistic-UI math in PositionsPanel
+    # (which multiplies the displayed `amount` by `1 - fraction`).
+    # Previously close_fraction was applied to pos.size (original
+    # margin), so re-clicking 25% on an already-shrunken row gave
+    # different results between frontend and backend on the refresh.
+    prev_remaining = float(pos.remaining_pct or 1.0)
+    leg_remaining_fraction  = prev_remaining * close_fraction        # fraction of ORIGINAL being closed this leg
+    new_remaining           = prev_remaining * (1.0 - close_fraction)
+    leg_margin              = pos.size * leg_remaining_fraction
+
     if pos.direction == "long":
         raw_pct = (fill_price - pos.entry) / pos.entry
     else:
@@ -2948,37 +3009,49 @@ def partial_close_futures_position(
     leveraged_pct = raw_pct * getattr(pos, "leverage", 1)
     leg_pnl = leg_margin * leveraged_pct
 
-    # Update position state (works for both ARM and non-ARM positions).
-    if not hasattr(pos, "partial_pnl_abs"):
-        pos.partial_pnl_abs = 0.0
-    if not hasattr(pos, "partial_exits"):
-        pos.partial_exits = []
-    if not hasattr(pos, "remaining_pct"):
-        pos.remaining_pct = 1.0
-    pos.partial_pnl_abs += leg_pnl
-    pos.remaining_pct   -= close_fraction
-    pos.partial_exits.append({
-        "ts":         now.isoformat(),
-        "price":      round(float(fill_price), 6),
-        "reason":     "manual_partial_close",
-        "close_pct":  round(close_fraction, 4),
-        "pnl_abs":    round(float(leg_pnl), 4),
-    })
-    eng.balance += leg_pnl
-
-    # LIVE: also send the reduce-only market order to KuCoin.
+    # ── LIVE first: hit KuCoin BEFORE we mutate local state so a
+    #   rejection leaves us with the SAME position state we already
+    #   showed the user (no phantom local update). Paper mode skips.
     if mode == "live":
         try:
-            eng._place_live_partial_close(pair, pos, close_fraction, fill_price)
+            ok_live, err_live = eng._place_live_partial_close(
+                pair, pos, leg_remaining_fraction, fill_price,
+            )
+            if not ok_live:
+                log_event(db, user_id, "futures.partial_close.live_failed", request,
+                          payload={"pair": pair, "close_pct": close_pct, "error": err_live})
+                return {
+                    "ok":    False,
+                    "error": (
+                        f"KuCoin Lead Trading rejected the partial close: {err_live}. "
+                        "Position state unchanged — retry or close from the KuCoin tab."
+                    ),
+                }
         except Exception as e:
             log_event(db, user_id, "futures.partial_close.live_failed", request,
                       payload={"pair": pair, "close_pct": close_pct, "error": str(e)})
             return {
-                "ok":              False,
-                "error":           f"Local position updated but KuCoin order failed: {e}",
-                "leg_pnl":         round(leg_pnl, 4),
-                "remaining_pct":   round(pos.remaining_pct, 4),
+                "ok":    False,
+                "error": f"KuCoin partial-close call failed: {e}. Position unchanged.",
             }
+
+    # Mutate local state AFTER KuCoin confirms (or immediately for paper).
+    pos.partial_pnl_abs += leg_pnl
+    pos.remaining_pct    = max(0.0, new_remaining)
+    pos.partial_exits.append({
+        "ts":         now.isoformat(),
+        "price":      round(float(fill_price), 6),
+        "reason":     "manual_partial_close",
+        "close_pct":  round(close_fraction, 4),       # what the USER clicked (25/50/75)
+        "leg_fraction_of_original": round(leg_remaining_fraction, 4),
+        "pnl_abs":    round(float(leg_pnl), 4),
+    })
+    # Credit the wallet ONLY for paper. Live: KuCoin's account-overview
+    # is the source of truth and the engine.balance for the main user
+    # engine is just the paper wallet (don't pollute it with live P&L).
+    pos_mode = getattr(pos, "_mode", getattr(eng, "_mode", "paper"))
+    if pos_mode == "paper":
+        eng.balance += leg_pnl
 
     # If close_pct = ~100, the position is effectively flat — auto-close it.
     if pos.remaining_pct <= 0.01:

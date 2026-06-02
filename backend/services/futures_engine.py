@@ -2043,37 +2043,68 @@ class FuturesEngine(NativeTradingEngine):
     def _place_live_partial_close(self, pair: str, pos, close_pct: float, fill_price: float) -> tuple[bool, str]:
         """LIVE-mode: send a reduce-only market order to close `close_pct`
         of the position via KuCoin Lead Trading. Returns (ok, error_msg).
-        Mirrors the partial-close booked in the local position state."""
+
+        `close_pct` is the fraction of the ORIGINAL position size to
+        reduce (e.g. 0.25 = 25% of the original contracts). The caller
+        is responsible for translating "click 25% on a row that already
+        has 75% remaining" into the right value (i.e. 0.75 × 0.25 = 0.1875
+        of original). The partial-close router does this correctly.
+
+        Uses pos.leverage (the position's actual leverage) instead of
+        self._leverage. For the MAIN user engine that hosts manual live
+        positions, self._leverage is the engine default (often 1) — not
+        what the position was opened with. Wrong leverage → wrong
+        contract count → KuCoin closes the wrong size.
+        """
         if self._mode != "live" or not self._api_key or close_pct <= 0:
             return True, ""
         from .kucoin_futures_client import normalize_futures_symbol
         symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
         side   = "sell" if pos.direction == "long" else "buy"
         position_side = "LONG" if pos.direction == "long" else "SHORT"
-        # Bug-fix: per-symbol lot-size-aware contracts.
-        full_contracts = _stake_to_contracts(pos.size, self._leverage, pos.entry, symbol)
-        leg_contracts  = max(1, int(full_contracts * close_pct))
+        # Use the position's OWN leverage — self._leverage is the engine
+        # default and is wrong for manual positions on the user engine.
+        pos_lev = int(getattr(pos, "leverage", None) or self._leverage or 1)
+        # Lot-size-aware contracts: compute the full position's contracts
+        # at its actual leverage, then take the requested fraction.
+        full_contracts = _stake_to_contracts(pos.size, pos_lev, pos.entry, symbol)
+        leg_contracts  = max(1, int(round(full_contracts * close_pct)))
+        # Clamp to remaining contracts so we never try to reduce more
+        # than what's actually open (would either reject or close other
+        # collateral). Estimate remaining from remaining_pct.
+        remaining_pct = float(getattr(pos, "remaining_pct", 1.0) or 1.0)
+        remaining_contracts = max(1, int(round(full_contracts * remaining_pct)))
+        leg_contracts = min(leg_contracts, remaining_contracts)
         margin_mode    = self.get_symbol_margin(symbol).upper() or "ISOLATED"
         body = {
-            "clientOid":    f"atf-tp1-{int(time.time()*1000)}",
+            "clientOid":    f"atf-partial-{int(time.time()*1000)}",
             "side":          side,
             "symbol":        symbol,
             "type":          "market",
             "size":          leg_contracts,
-            "leverage":      self._leverage,
+            "leverage":      pos_lev,
             "marginMode":    margin_mode,
             "positionSide":  position_side,
             "reduceOnly":    True,
         }
         ok, _, err = self._kucoin_lead_post(
-            body, label=f"TP1 PARTIAL {pair} ({close_pct*100:.0f}%)",
+            body, label=f"PARTIAL {pair} ({close_pct*100:.1f}% × {leg_contracts}c)",
         )
         if not ok:
             return False, err
 
         # ── Op#9 — rewrite on-exchange TP/SL after the partial ────────────
+        # Fire-and-forget so partial close doesn't block on the TP/SL push
+        # (saves ~600ms on the response, matching the manual-entry pattern).
         if isinstance(pos, FuturesPosition) and pos.tp2_price is not None:
-            self._push_live_tp_sl(symbol, pos.sl, pos.tp2_price, label="rewrite-after-tp1", pos=pos)
+            import threading as _t
+            _t.Thread(
+                target=self._push_live_tp_sl,
+                args=(symbol, pos.sl, pos.tp2_price),
+                kwargs={"label": "rewrite-after-partial", "pos": pos},
+                daemon=True,
+                name=f"partial-tpsl-{self.user_id}-{pair}",
+            ).start()
         return True, ""
 
     def _push_live_tp_sl(self, symbol: str, sl: float, tp: float, *, label: str = "rewrite",
