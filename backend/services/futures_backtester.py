@@ -449,11 +449,11 @@ def run_futures_backtest(
     Returns a dict matching the shape expected by the frontend results component.
     """
     # ── ZERO-FRICTION MODE for pure-strategy backtests ──────────────────
-    # When the user UNCHECKS "Include real trading costs" they want a
-    # backtest that matches TradingView's default (commission=0, slippage=0)
-    # so they can see the strategy's theoretical edge without execution
-    # drag eating profits. This shadows the module-level SLIPPAGE_BPS_*
-    # constants for the duration of THIS backtest call only.
+    # Shadow module-level SLIPPAGE_BPS_* to 0 when costs are off so the
+    # output matches TradingView. The early-return paths below (invalid
+    # timerange, no data) used to LEAK those zeros into subsequent calls;
+    # the explicit restore at every return point + finally guards below
+    # ensure the constants are always restored exactly once.
     global SLIPPAGE_BPS_STOP, SLIPPAGE_BPS_TP, SLIPPAGE_BPS_LIQ, SLIPPAGE_BPS_ENTRY, SLIPPAGE_BPS_FLIP
     _saved_slip = (SLIPPAGE_BPS_STOP, SLIPPAGE_BPS_TP, SLIPPAGE_BPS_LIQ, SLIPPAGE_BPS_ENTRY, SLIPPAGE_BPS_FLIP)
     if not deduct_real_costs:
@@ -463,6 +463,12 @@ def run_futures_backtest(
         SLIPPAGE_BPS_ENTRY = 0
         SLIPPAGE_BPS_FLIP = 0
 
+    def _restore_slip():
+        """Restore the module-level slippage constants. Called at every
+        return path so subsequent backtests see correct values."""
+        global SLIPPAGE_BPS_STOP, SLIPPAGE_BPS_TP, SLIPPAGE_BPS_LIQ, SLIPPAGE_BPS_ENTRY, SLIPPAGE_BPS_FLIP
+        SLIPPAGE_BPS_STOP, SLIPPAGE_BPS_TP, SLIPPAGE_BPS_LIQ, SLIPPAGE_BPS_ENTRY, SLIPPAGE_BPS_FLIP = _saved_slip
+
     # ── Parse timerange ───────────────────────────────────────────────────
     try:
         parts = timerange.split("-")
@@ -471,6 +477,7 @@ def run_futures_backtest(
         end_ts   = int(datetime(int(parts[1][:4]), int(parts[1][4:6]),
                                 int(parts[1][6:8])).timestamp())
     except Exception:
+        _restore_slip()
         return {"error": f"Invalid timerange '{timerange}'. Use YYYYMMDD-YYYYMMDD."}
 
     # ── Pick the signal function for this run ──────────────────────────
@@ -513,6 +520,7 @@ def run_futures_backtest(
         try:
             df = load_futures_ohlcv(pair, timeframe, start_ts, fetch_end_ts)
         except Exception as e:
+            _restore_slip()
             return {"error": f"Futures data download failed for {pair}: {e}"}
         # ── Load real funding rates over the same extended range ─────────
         funding_sorted = load_funding_history(pair, start_ts, fetch_end_ts)

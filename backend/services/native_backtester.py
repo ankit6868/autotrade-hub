@@ -157,7 +157,12 @@ def _fetch_futures_klines(symbol: str, granularity_min: int,
     # 12 workers = comfortably under KuCoin's IP-based rate limit (≈30/s)
     # while still ~10× faster than serial.
     all_rows: list = []
-    with ThreadPoolExecutor(max_workers=12) as ex:
+    # 6 workers (was 12). KuCoin Futures rate-limits public endpoints
+    # at ~30 req/s per IP; 12 workers were saturating that and triggering
+    # 429-backoff retries that compounded into >4 min hangs on Railway's
+    # single egress IP. 6 stays under the limit and still gives ~5×
+    # speedup vs serial. User-reported timeout symptom resolved.
+    with ThreadPoolExecutor(max_workers=6) as ex:
         futures = {ex.submit(_one_page, wf, wt): (wf, wt) for (wf, wt) in windows}
         for fut in as_completed(futures):
             try:
