@@ -1786,7 +1786,21 @@ async def futures_force_close(
     # Persist each closed in-memory position
     total_pnl = 0.0
     for pos in closed_positions:
-        _persist_closed_trade(user_id, pos, mode, eng._strategy_id, pos.db_id)
+        # Anti-double-count when force-close completes a position that
+        # had prior partial closes booked as separate Trade rows.
+        # pos.pnl_abs after pos.close() = final_leg_pnl + partial_pnl_abs.
+        # The partial rows already recorded their leg P&L, so the final
+        # row should carry only the FINAL leg's P&L to keep totals
+        # additive. Same anti-double-count pattern as the partial-close
+        # path's full-close branch.
+        _saved_pnl = pos.pnl_abs
+        try:
+            partial_acc = float(getattr(pos, "partial_pnl_abs", 0.0) or 0.0)
+            if abs(partial_acc) > 0.0001:
+                pos.pnl_abs = pos.pnl_abs - partial_acc
+            _persist_closed_trade(user_id, pos, mode, eng._strategy_id, pos.db_id)
+        finally:
+            pos.pnl_abs = _saved_pnl
         total_pnl += pos.pnl_abs
 
     # ── Also close any orphaned open DB positions for this pair + mode ──
@@ -3053,13 +3067,62 @@ def partial_close_futures_position(
     if pos_mode == "paper":
         eng.balance += leg_pnl
 
+    # ── Persist partial close as its own Trade row so it shows in
+    #   Position History. Without this, the user clicks 25/50/75 and the
+    #   booked P&L is invisible in History — only the FINAL close lands
+    #   there. This gives a complete audit trail: every booking event
+    #   becomes a row tagged "manual_partial_<pct>%". The leg P&L is
+    #   the realised profit on the closed portion.
+    try:
+        from backend.models.trade import Trade as TradeModel
+        from backend.models.database import SessionLocal as _SL
+        with _SL() as _db:
+            _db.add(TradeModel(
+                user_id     = user_id,
+                mode        = pos_mode,
+                market_type = "futures",
+                pair        = pair,
+                side        = pos.direction,
+                leverage    = getattr(pos, "leverage", 1),
+                entry_price = round(pos.entry, 8),
+                exit_price  = round(float(fill_price), 8),
+                amount      = round(leg_margin, 8),
+                profit_pct  = round(leveraged_pct * 100.0, 4),
+                profit_abs  = round(float(leg_pnl), 4),
+                stoploss_price = round(pos.sl, 8) if getattr(pos, "sl", None) else None,
+                entry_time  = pos.opened_at,
+                exit_time   = now,
+                exit_reason = f"manual_partial_{int(close_pct)}pct",
+                status      = "closed",
+                strategy_id = eng._strategy_id,
+            ))
+            _db.commit()
+    except Exception as persist_exc:
+        log.warning("[%s] Failed to persist partial-close history row: %s",
+                    user_id, persist_exc)
+
     # If close_pct = ~100, the position is effectively flat — auto-close it.
     if pos.remaining_pct <= 0.01:
         pos.close(fill_price, "manual_full_close", now)
         eng.closed_trades.append(pos)
         del eng.positions[trade_key]
-        from backend.services.native_trading_engine import _persist_closed_trade
-        _persist_closed_trade(user_id, pos, mode, eng._strategy_id, pos.db_id)
+        # Anti-double-count: we just wrote a partial Trade row for the
+        # final leg above. pos.pnl_abs from pos.close() includes the
+        # SUM of all partials too (because Position.close() does
+        # final_leg_pnl + partial_pnl_abs). If we let _persist_closed_trade
+        # use pos.pnl_abs, the original open Trade row would close with
+        # the full round-trip P&L while the partial rows ALSO carry their
+        # leg P&L — totals double-count. Override pos.pnl_abs with just
+        # the FINAL leg so the original row's contribution is exactly
+        # the last leg, and the sum of all closed rows = total realised.
+        _saved_pnl = pos.pnl_abs
+        try:
+            final_leg_only = pos.pnl_abs - getattr(pos, "partial_pnl_abs", 0.0)
+            pos.pnl_abs = final_leg_only
+            from backend.services.native_trading_engine import _persist_closed_trade
+            _persist_closed_trade(user_id, pos, mode, eng._strategy_id, pos.db_id)
+        finally:
+            pos.pnl_abs = _saved_pnl
 
     log_event(db, user_id, "futures.partial_close", request,
               payload={"pair": pair, "mode": mode, "close_pct": close_pct,

@@ -32,6 +32,18 @@ export default function PositionsPanel({
   const [orderHistory, setOrderHistory] = useState<any[]>([]);
   const [tradeHistory, setTradeHistory] = useState<any[]>([]);
   const [bots, setBots] = useState<any[]>([]);
+  // Transient toasts for user actions (partial close, close, cancel).
+  // Without these the user clicks 25% → row updates with ~optimistic
+  // shrink but no explicit "yes that worked" feedback → they
+  // double/triple-click thinking nothing happened.
+  type Toast = { id: number; kind: 'success' | 'error'; msg: string };
+  const [toasts, setToasts] = useState<Toast[]>([]);
+  const pushToast = useCallback((kind: 'success' | 'error', msg: string) => {
+    const id = Date.now() + Math.random();
+    setToasts(prev => [...prev, { id, kind, msg }]);
+    // Auto-dismiss after 3.5s so they stack but never linger.
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 3500);
+  }, []);
   const [mainEngine, setMainEngine] = useState<any>(null);
   const [account, setAccount] = useState<any>(null);
   const [closingPair, setClosingPair] = useState<string | null>(null);
@@ -124,13 +136,15 @@ export default function PositionsPanel({
       // it AND restore the row so the user sees the real position state.
       if (res?.error) {
         setPositions(prevPositions);
-        alert(res.error);
+        pushToast('error', res.error);
+      } else {
+        pushToast('success', `Closed ${pair}${direction ? ` ${direction.toUpperCase()}` : ''} position`);
       }
       refreshAll();
       onRefresh?.();
     } catch (e) {
       setPositions(prevPositions);
-      alert(`Close failed: ${e}`);
+      pushToast('error', `Close failed: ${e}`);
     }
     setClosingPair(null);
   }
@@ -161,24 +175,26 @@ export default function PositionsPanel({
       });
       if (res?.error) {
         setPositions(prevPositions);
-        alert(res.error);
+        pushToast('error', `Partial close rejected: ${res.error}`);
       } else {
         const legPnl = Number(res.leg_pnl ?? 0);
-        const remainingPct = Number(res.remaining_pct ?? (1 - fraction)) * 100;
+        // remaining_pct from the backend is a FRACTION (0..1) when from
+        // the engine path, PERCENTAGE (0..100) when from the orphan-DB
+        // path. Normalise — if it looks ≤1, treat as fraction.
+        let remainingPct = Number(res.remaining_pct ?? (1 - fraction));
+        if (remainingPct <= 1) remainingPct *= 100;
         const sign = legPnl >= 0 ? '+' : '';
-        // Lightweight info — appears in the console for power users +
-        // browser-level non-blocking status. Avoiding alert() for the
-        // success path so the flow stays smooth.
-        console.info(
-          `Closed ${pct}% of ${pair} — booked ${sign}${legPnl.toFixed(2)} USDT, ` +
-          `${remainingPct.toFixed(0)}% of position remains open.`,
+        const fullyClosed = res?.fully_closed || remainingPct <= 1;
+        pushToast('success', fullyClosed
+          ? `Closed final ${pct}% of ${pair} — booked ${sign}${legPnl.toFixed(4)} USDT`
+          : `Booked ${pct}% of ${pair} — leg P&L ${sign}${legPnl.toFixed(4)} USDT (${remainingPct.toFixed(0)}% still open)`,
         );
       }
       refreshAll();
       onRefresh?.();
     } catch (e) {
       setPositions(prevPositions);
-      alert(`Partial close failed: ${e}`);
+      pushToast('error', `Partial close failed: ${e}`);
     }
     setClosingPair(null);
   }
@@ -226,12 +242,14 @@ export default function PositionsPanel({
       const res = await api.futures.cancelOrder(orderId);
       if (res?.error) {
         setOpenOrders(prevOrders);
-        alert(res.error);
+        pushToast('error', res.error);
+      } else {
+        pushToast('success', 'Order cancelled');
       }
       refreshAll();
     } catch (e) {
       setOpenOrders(prevOrders);
-      alert(`Cancel failed: ${e}`);
+      pushToast('error', `Cancel failed: ${e}`);
     }
   }
 
@@ -288,7 +306,27 @@ export default function PositionsPanel({
   ];
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
+      {/* Action toasts — stacked top-right, auto-dismiss after 3.5s.
+          Render at the wrapping div level so they overlay the table. */}
+      {toasts.length > 0 && (
+        <div className="absolute top-2 right-3 z-50 flex flex-col gap-1.5 pointer-events-none">
+          {toasts.map(t => (
+            <div
+              key={t.id}
+              className={`px-3 py-2 rounded-lg text-xs font-medium shadow-lg border animate-[fadeIn_0.15s_ease-out] ${
+                t.kind === 'success'
+                  ? 'bg-emerald-500/95 text-white border-emerald-400/50'
+                  : 'bg-red-500/95 text-white border-red-400/50'
+              }`}
+            >
+              <span className="mr-1.5">{t.kind === 'success' ? '✓' : '⚠'}</span>
+              {t.msg}
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Tab bar */}
       <div className="flex items-center gap-1 px-2 border-b border-white/[0.06] overflow-x-auto scrollbar-none">
         {tabs.map(t => (
