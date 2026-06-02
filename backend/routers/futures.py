@@ -158,9 +158,35 @@ _LOT_SIZE_BY_SYMBOL: dict[str, float] = {
 
 def _futures_lot_size(kc_symbol: str) -> float:
     """Return the contract multiplier (underlying-per-lot) for a KuCoin futures
-    symbol. Falls back to 0.001 if unknown — safe-ish default but the caller
-    should still surface KuCoin's rejection if the guess is wrong."""
-    return _LOT_SIZE_BY_SYMBOL.get(kc_symbol.upper(), 0.001)
+    symbol.
+
+    Fast path: a hardcoded table for the common pairs (no network call).
+
+    Unknown symbols (anything outside the static table — SUI, PEPE, WIF, …)
+    fall back to a ONE-TIME KuCoin /contracts lookup (cached in
+    futures_engine._CONTRACT_MULTIPLIERS) and the result is memoised here so
+    the next call is instant. Previously these silently used BTC's 0.001
+    multiplier, which over- or under-sized the order — KuCoin then rejected
+    or clamped it, surfacing to the user as a slow/failed entry or close on
+    every non-listed coin. Resolving the real multiplier makes entry AND
+    close exact and consistent for every supported coin.
+
+    Total-failure fallback is still 0.001 (BTC) — better a conservative
+    guess than a crash; KuCoin's rejection will still surface if it's wrong.
+    """
+    key = kc_symbol.upper()
+    val = _LOT_SIZE_BY_SYMBOL.get(key)
+    if val is not None:
+        return val
+    try:
+        from backend.services.futures_engine import _get_contract_multiplier
+        mult, _lot = _get_contract_multiplier(key)
+        if mult and mult > 0:
+            _LOT_SIZE_BY_SYMBOL[key] = mult   # memoise for the next call
+            return mult
+    except Exception as e:
+        log.warning("dynamic lot-size lookup failed for %s (using BTC default): %s", key, e)
+    return 0.001
 
 
 def _compute_live_sizing(cost_usdt: float, leverage: int, price: float,
@@ -1594,10 +1620,10 @@ def futures_manual_entry(
     # ── Live mode: push TP/SL to KuCoin so the stops actually fire ───
     # Fire-and-forget on a background thread so the HTTP response
     # returns the moment the entry order succeeded (~300ms instead of
-    # ~900ms with TP/SL inline). The push itself takes ~600ms because
-    # it tries the primary endpoint then falls back to st-orders;
-    # blocking the response on that was the biggest single source of
-    # user-perceived latency on live manual buys.
+    # ~900ms with TP/SL inline). The push places up to two stop orders
+    # (TP + SL) on the Lead Trading orders endpoint; blocking the
+    # response on that was the biggest single source of user-perceived
+    # latency on live manual buys.
     #
     # Without the stops, the local sl/tp values are decoration — the
     # exchange's liquidation level is the only real protection. The
@@ -1819,8 +1845,20 @@ def futures_force_close(
                 side          = "sell" if pos.direction == "long" else "buy"
                 position_side = "LONG" if pos.direction == "long" else "SHORT"
                 pos_lev       = kc_leverage_real or int(getattr(pos, "leverage", eng._leverage or 10))
-                contract_size = pos.size * pos_lev
-                contracts     = max(1, int(contract_size / pos.entry * 1000))
+                # Bug-fix: per-symbol contract sizing. The old formula
+                #   contracts = pos.size * lev / entry * 1000
+                # bakes in BTC's 0.001 multiplier (×1000 == ÷0.001), so for
+                # every non-BTC symbol it over-sent contracts by 10×–1,000,000×
+                # (ETH 0.01, XRP 10, DOGE 1000 …). It only "worked" because
+                # KuCoin silently clamps an oversized reduceOnly order down to
+                # the open size — if the exchange ever rejected instead, the
+                # close would fail. Now match the entry path's _futures_lot_size
+                # multiplier and the position's remaining fraction so the size
+                # is exact and consistent with how the position was opened.
+                _lot          = _futures_lot_size(kc_symbol)
+                _remaining    = float(getattr(pos, "remaining_pct", 1.0) or 1.0)
+                _base_qty     = (pos.size * pos_lev) / pos.entry
+                contracts     = max(1, int(_base_qty / max(_lot, 1e-9) * _remaining))
                 body = {
                     "clientOid":   f"atf-close-{int(_time.time()*1000)}",
                     "side":         side,
@@ -2282,17 +2320,47 @@ def place_futures_order(
             if time_in_force:
                 body["timeInForce"] = time_in_force
 
-            # TP/SL stop orders use a different endpoint
+            # Conditional / stop orders: place on the REGULAR Lead Trading
+            # orders endpoint using the canonical stop-trigger fields.
+            #
+            # The old code POSTed to /api/v1/copy-trade/futures/st-orders with
+            # triggerStopUpPrice / triggerStopDownPrice. KuCoin's Lead Trading
+            # wrapper does NOT recognise those field names as a queued stop
+            # trigger, so it executed the order IMMEDIATELY as a market order
+            # the instant it was POSTed (and, because reduceOnly was force-set,
+            # it could close an existing position). See the long history note in
+            # /position/tp-sl. A real stop order needs:
+            #     stop:          "up" | "down"  — trigger direction
+            #     stopPrice:     "<price>"      — trigger price
+            #     stopPriceType: "TP"           — Last Trade Price source
+            # on /api/v1/copy-trade/futures/orders.
             if stop_price is not None or order_type in ("stop", "stop_limit"):
-                body["stopPriceType"] = "TP"
-                if stop_price:
-                    if side == "buy":
-                        body["triggerStopUpPrice"] = str(stop_price)
-                    else:
-                        body["triggerStopDownPrice"] = str(stop_price)
-                body["reduceOnly"] = True
+                # Trigger direction: "up" fires when the market rises THROUGH
+                # the stop price, "down" when it falls THROUGH it. Derive it
+                # from the stop price vs a reference price (the limit price the
+                # user set, else the current market) so the trigger lands on the
+                # correct side regardless of buy/sell. (The conditional and
+                # trailing-stop UIs both send a limit `price`.)
+                trig_ref = price
+                if trig_ref is None:
+                    pair_for_dir = (
+                        symbol.replace("XBTUSDTM", "BTC/USDT")
+                              .replace("USDTM", "/USDT")
+                              .replace("-USDT", "/USDT")
+                    )
+                    trig_ref = _futures_ticker_price(pair_for_dir)
+                if trig_ref:
+                    body["stop"] = "up" if float(stop_price) >= float(trig_ref) else "down"
+                else:
+                    # Fallback: buy-stop = upward breakout, sell-stop = breakdown.
+                    body["stop"] = "up" if side == "buy" else "down"
+                body["stopPrice"]     = str(stop_price)
+                body["stopPriceType"] = "TP"   # trigger from Last Trade Price
+                # NOTE: do NOT force reduceOnly here — these are entry triggers.
+                # reduceOnly is set above only when the caller explicitly
+                # requested it.
                 resp = _kucoin_post_signed(
-                    "/api/v1/copy-trade/futures/st-orders", body,
+                    "/api/v1/copy-trade/futures/orders", body,
                     eng._api_key, eng._api_sec, eng._api_pass,
                     base_url=KUCOIN_FUTURES_BASE,
                 )
@@ -4554,8 +4622,13 @@ def set_position_tp_sl(
 
     if matched_pos:
         kc_direction = matched_pos.direction
-        contract_size = matched_pos.size * kc_leverage
-        kc_contracts  = max(1, int(contract_size / matched_pos.entry * 1000))
+        # Per-symbol contract sizing (was BTC-only ×1000 — wrong for every
+        # non-BTC coin). closeOrder=True means the stop closes the whole
+        # position regardless of size, but we keep the size accurate and
+        # consistent with the entry/close paths anyway.
+        _lot          = _futures_lot_size(kc_symbol)
+        _base_qty     = (matched_pos.size * kc_leverage) / matched_pos.entry
+        kc_contracts  = max(1, int(_base_qty / max(_lot, 1e-9)))
         kc_mode       = getattr(matched_pos, "_mode", None) or eng._mode or "paper"
 
     # ── Step 2a: PAPER DB-orphan fallback ────────────────────────────────

@@ -1718,6 +1718,29 @@ class FuturesEngine(NativeTradingEngine):
         log.info("[%s] Lead Trading %s ok: %s", self.user_id, label, resp.get("data"))
         return True, resp.get("data") or {}, ""
 
+    def _live_order_allowed(self, pos=None) -> bool:
+        """True when a REAL KuCoin order should be placed for `pos`.
+
+        Bug-fix (manual-live TP/SL + partial-close not firing): the
+        engine-level ``self._mode`` is unreliable for the MAIN user engine.
+        That engine is constructed in 'paper' mode and never flipped to
+        'live' (only ``start_futures`` sets live mode, and the main engine
+        never runs a bot). Yet it HOLDS manual LIVE positions — each tagged
+        ``pos._mode='live'`` at /manual-entry with credentials loaded on
+        demand via ``_ensure_live_credentials``.
+
+        Gating live orders on ``self._mode == 'live'`` alone therefore made
+        every manual-live TP/SL push, partial-close and exit silently
+        no-op (KuCoin never received the order). The position's OWN ``_mode``
+        tag is authoritative; fall back to the engine mode when no position
+        is supplied (e.g. a bot engine that is genuinely live).
+        """
+        if not self._api_key:
+            return False
+        if self._mode == "live":
+            return True
+        return getattr(pos, "_mode", None) == "live"
+
     def _place_live_entry(self, pair: str, pos) -> tuple[bool, str]:
         """Place a real futures market order for the entry. Returns
         (ok, error_msg). On failure the caller MUST roll back local state
@@ -2111,7 +2134,7 @@ class FuturesEngine(NativeTradingEngine):
         what the position was opened with. Wrong leverage → wrong
         contract count → KuCoin closes the wrong size.
         """
-        if self._mode != "live" or not self._api_key or close_pct <= 0:
+        if not self._live_order_allowed(pos) or close_pct <= 0:
             return True, ""
         from .kucoin_futures_client import normalize_futures_symbol
         symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
@@ -2164,130 +2187,98 @@ class FuturesEngine(NativeTradingEngine):
 
     def _push_live_tp_sl(self, symbol: str, sl: float, tp: float, *, label: str = "rewrite",
                           pos=None) -> bool:
-        """Push fresh SL + TP to KuCoin Lead Trading.
+        """Push fresh SL + TP to KuCoin Lead Trading as queued reduce-only
+        stop orders, using the SAME proven mechanism as the manual TP/SL
+        editor (/position/tp-sl):
 
-        Verified against KuCoin docs (2026-05-23 check):
-          • Primary endpoint: POST /api/v1/copy-trade/futures/position/risk-limit/sl-tp
-            with {symbol, stopLossPrice, takeProfitPrice} — modifies the
-            position's built-in stops. Some lead-trading sub-accounts
-            don't expose this; the response then is non-200000.
-          • Documented fallback: POST /api/v1/copy-trade/futures/st-orders
-            places TWO separate conditional stop orders (one with
-            stopPriceType=TP, one with stopPriceType=SL) that fire when
-            triggered. Slightly slower but works on every lead-trading
-            account.
+          POST /api/v1/copy-trade/futures/orders with
+            stop:          "up" | "down"   — trigger direction
+            stopPrice:     "<price>"
+            stopPriceType: "TP"            — trigger from Last Trade Price
+            reduceOnly:    True
+            closeOrder:    True            — close the whole position on trigger
 
-        We try the primary first; if KuCoin returns a non-200000 code,
-        fall through to the st-orders path. Success on either is success
-        overall. The `pos` arg gives access to direction + leverage for
-        the st-orders body when fallback fires.
+        History / why NOT /st-orders: an earlier version posted to
+        /api/v1/copy-trade/futures/st-orders with triggerStopUpPrice /
+        triggerStopDownPrice. KuCoin did NOT recognise those as a queued
+        stop and instead executed an IMMEDIATE reduceOnly market close the
+        instant it was POSTed — closing the position right after entry
+        (the recurring "TP closed my trade immediately" bug). The canonical
+        stop + stopPrice fields below queue a real stop that waits for the
+        trigger price.
+
+        Returns True only when every requested leg (TP and/or SL) was
+        accepted by KuCoin.
         """
-        if self._mode != "live" or not self._api_key:
+        if not self._live_order_allowed(pos):
             return False
-        # ── 1. PRIMARY — modify position SL/TP in place ──────────────────
-        primary_ok = False
-        try:
-            from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
-            from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
-            import urllib.request as _ureq, json as _json
-            body = {
-                "symbol":          symbol,
-                "stopLossPrice":   str(round(sl, 4)),
-                "takeProfitPrice": str(round(tp, 4)),
-            }
-            body_str = _json.dumps(body)
-            ts2  = str(int(time.time() * 1000))
-            endpoint = "/api/v1/copy-trade/futures/position/risk-limit/sl-tp"
-            headers = _sign_request(
-                self._api_sec, self._api_pass, self._api_key,
-                ts2, "POST", endpoint, body=body_str,
-            )
-            headers["Content-Type"] = "application/json"
-            req2 = _ureq.Request(
-                f"{_base}{endpoint}", data=body_str.encode(),
-                headers=headers, method="POST",
-            )
-            with _proxy_urlopen(req2, timeout=8) as r2:
-                resp = _json.loads(r2.read().decode())
-            code = str(resp.get("code", ""))
-            if code == "200000":
-                log.info("[%s] Lead Trading TP/SL %s ok (primary)", self.user_id, label)
-                return True
-            log.info("[%s] TP/SL %s primary rejected (%s) — trying st-orders fallback",
-                     self.user_id, label, resp.get("msg") or f"code {code}")
-        except Exception as e:
-            log.info("[%s] TP/SL %s primary transport error (%s) — trying st-orders fallback",
-                     self.user_id, label, e)
-
-        # ── 2. FALLBACK — place two conditional stop orders ──────────────
-        # Documented endpoint per KuCoin's "Add Take Profit And Stop Loss
-        # Order" copy-trading doc. Requires direction + leverage; if pos
-        # wasn't passed in we can't run this fallback safely.
         if pos is None:
-            log.warning("[%s] TP/SL %s — no pos passed, skipping st-orders fallback",
+            log.warning("[%s] TP/SL %s — no pos passed, cannot place stop orders",
                         self.user_id, label)
             return False
         try:
             from .kucoin_futures_client import normalize_futures_symbol
-            sym = normalize_futures_symbol(symbol)
-            # For a LONG position: exit side is "sell"; SL trigger is BELOW entry,
-            # TP trigger is ABOVE entry. For a SHORT position: exit side is "buy";
-            # SL trigger is ABOVE entry, TP trigger is BELOW entry.
-            exit_side    = "sell" if pos.direction == "long" else "buy"
-            position_side = "LONG" if pos.direction == "long" else "SHORT"
-            remaining_pct = getattr(pos, "remaining_pct", 1.0) or 1.0
-            full_contracts = _stake_to_contracts(pos.size, self._leverage, pos.entry, sym)
+            sym           = normalize_futures_symbol(symbol)
+            direction     = pos.direction
+            position_side = "LONG" if direction == "long" else "SHORT"
+            close_side    = "sell" if direction == "long" else "buy"
+            # Position's OWN leverage — self._leverage is the engine default
+            # (often 1 on the main user engine that hosts manual live
+            # positions) and would size the leg at the wrong contract count.
+            pos_lev        = int(getattr(pos, "leverage", None) or self._leverage or 1)
+            remaining_pct  = getattr(pos, "remaining_pct", 1.0) or 1.0
+            full_contracts = _stake_to_contracts(pos.size, pos_lev, pos.entry, sym)
             contracts      = max(1, int(full_contracts * remaining_pct))
             margin_mode    = self.get_symbol_margin(sym).upper() or "ISOLATED"
-            common = {
-                "symbol":        sym,
-                "side":          exit_side,
-                "type":          "market",
-                "size":          contracts,
-                "leverage":      self._leverage,
-                "marginMode":    margin_mode,
-                "positionSide":  position_side,
-                "reduceOnly":    True,
-            }
-            sl_ok = self._post_st_order({
-                **common,
-                "clientOid":         f"atf-sl-{int(time.time()*1000)}",
-                "stopPriceType":     "SL",
-                "triggerStopDownPrice": str(round(sl, 4)) if pos.direction == "long" else "",
-                "triggerStopUpPrice":   str(round(sl, 4)) if pos.direction == "short" else "",
-            }, label=f"st-order SL {label}")
-            tp_ok = self._post_st_order({
-                **common,
-                "clientOid":         f"atf-tp-{int(time.time()*1000)+1}",
-                "stopPriceType":     "TP",
-                "triggerStopUpPrice":   str(round(tp, 4)) if pos.direction == "long" else "",
-                "triggerStopDownPrice": str(round(tp, 4)) if pos.direction == "short" else "",
-            }, label=f"st-order TP {label}")
-            return sl_ok and tp_ok
-        except Exception as e2:
-            log.warning("[%s] TP/SL %s st-orders fallback failed: %s",
-                        self.user_id, label, e2)
+
+            def _leg(kind: str, price: float, is_tp: bool) -> bool:
+                if not price or price <= 0:
+                    return True   # nothing to set for this leg
+                # Long TP / Short SL → trigger up; Long SL / Short TP → trigger down
+                trig_up = (direction == "long" and is_tp) or (direction == "short" and not is_tp)
+                body = {
+                    "clientOid":     f"atf-{kind}-{int(time.time()*1000)}",
+                    "symbol":         sym,
+                    "marginMode":     margin_mode,
+                    "leverage":       pos_lev,
+                    "positionSide":   position_side,
+                    "side":           close_side,
+                    "type":           "market",
+                    "size":           contracts,
+                    "stop":           "up" if trig_up else "down",
+                    "stopPrice":      str(float(round(price, 6))),
+                    "stopPriceType":  "TP",   # trigger from Last Trade Price
+                    "reduceOnly":     True,
+                    "closeOrder":     True,   # close entire position on trigger
+                }
+                return self._post_stop_order(body, label=f"{kind.upper()} {label}")
+
+            tp_ok = _leg("tp", tp, True)
+            sl_ok = _leg("sl", sl, False)
+            return tp_ok and sl_ok
+        except Exception as e:
+            log.warning("[%s] TP/SL %s push failed: %s", self.user_id, label, e)
             return False
 
-    def _post_st_order(self, body: dict, *, label: str) -> bool:
-        """Post a conditional stop order via the documented Copy Trading
-        "Add Take Profit And Stop Loss Order" endpoint."""
+    def _post_stop_order(self, body: dict, *, label: str) -> bool:
+        """Post a canonical reduce-only stop order to the Lead Trading
+        orders endpoint and verify business code 200000."""
         try:
             from .native_trading_engine import _kucoin_post_signed
             resp = _kucoin_post_signed(
-                "/api/v1/copy-trade/futures/st-orders", body,
+                "/api/v1/copy-trade/futures/orders", body,
                 self._api_key, self._api_sec, self._api_pass,
                 base_url=KUCOIN_FUTURES_BASE,
             )
             code = str((resp or {}).get("code", ""))
             if code == "200000":
-                log.info("[%s] st-order %s ok", self.user_id, label)
+                log.info("[%s] stop-order %s ok @ %s", self.user_id, label, body.get("stopPrice"))
                 return True
-            log.warning("[%s] st-order %s rejected: %s",
+            log.warning("[%s] stop-order %s rejected: %s",
                         self.user_id, label, (resp or {}).get("msg") or f"code {code}")
             return False
         except Exception as e:
-            log.warning("[%s] st-order %s transport error: %s", self.user_id, label, e)
+            log.warning("[%s] stop-order %s transport error: %s", self.user_id, label, e)
             return False
 
     def _place_live_exit(self, pair: str, pos, price: float) -> tuple[bool, str]:
@@ -2295,15 +2286,21 @@ class FuturesEngine(NativeTradingEngine):
         (ok, error_msg). ARM-aware sizing: only the REMAINING fraction is
         sent (closing the full original size after a TP1 partial would
         oversell and KuCoin would reject with insufficient-position)."""
-        if self._mode != "live" or not self._api_key:
+        if not self._live_order_allowed(pos):
             return True, ""
         from .kucoin_futures_client import normalize_futures_symbol
         symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
         side   = "sell" if pos.direction == "long" else "buy"
         position_side = "LONG" if pos.direction == "long" else "SHORT"
         remaining_pct = getattr(pos, "remaining_pct", 1.0) or 1.0
+        # Use the position's OWN leverage (mirrors _place_live_partial_close).
+        # self._leverage is the engine default — correct for bot positions
+        # (opened at engine leverage) but wrong if this is ever called for a
+        # manual position on the main user engine, where the engine default
+        # is often 1x. Wrong leverage → wrong contract count → wrong close.
+        pos_lev        = int(getattr(pos, "leverage", None) or self._leverage or 1)
         # Bug-fix: per-symbol multiplier (was BTC-only ×1000).
-        full_contracts = _stake_to_contracts(pos.size, self._leverage, pos.entry, symbol)
+        full_contracts = _stake_to_contracts(pos.size, pos_lev, pos.entry, symbol)
         contracts      = max(1, int(full_contracts * remaining_pct))
         margin_mode    = self.get_symbol_margin(symbol).upper() or "ISOLATED"
         body = {
@@ -2312,7 +2309,7 @@ class FuturesEngine(NativeTradingEngine):
             "symbol":        symbol,
             "type":          "market",
             "size":          contracts,
-            "leverage":      self._leverage,
+            "leverage":      pos_lev,
             "marginMode":    margin_mode,
             "positionSide":  position_side,
             "reduceOnly":    True,

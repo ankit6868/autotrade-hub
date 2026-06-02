@@ -201,7 +201,14 @@ class KuCoinFuturesClient:
         margin_mode: str = "ISOLATED",
         client_oid: str | None = None,
     ) -> dict:
-        """Place a TP/SL order via Lead Trading Futures API."""
+        """Place a TP/SL stop order via Lead Trading Futures API.
+
+        Uses the canonical stop-trigger fields (stop / stopPrice / stopPriceType)
+        on the REGULAR orders endpoint. Do NOT use triggerStopUpPrice /
+        triggerStopDownPrice against /st-orders — KuCoin's Lead Trading wrapper
+        does not recognise those as a queued trigger and fires the order
+        IMMEDIATELY as a market order on POST (see /position/tp-sl history note).
+        """
         body: dict[str, Any] = {
             "clientOid": client_oid or f"ath-tpsl-{int(time.time() * 1000)}",
             "symbol": symbol,
@@ -213,12 +220,15 @@ class KuCoinFuturesClient:
             "size": size,
             "stopPriceType": "TP",
             "reduceOnly": True,
+            "closeOrder": True,
         }
         if trigger_stop_up_price is not None:
-            body["triggerStopUpPrice"] = str(trigger_stop_up_price)
-        if trigger_stop_down_price is not None:
-            body["triggerStopDownPrice"] = str(trigger_stop_down_price)
-        data = await self._request("POST", "/api/v1/copy-trade/futures/st-orders", body=body)
+            body["stop"] = "up"
+            body["stopPrice"] = str(trigger_stop_up_price)
+        elif trigger_stop_down_price is not None:
+            body["stop"] = "down"
+            body["stopPrice"] = str(trigger_stop_down_price)
+        data = await self._request("POST", "/api/v1/copy-trade/futures/orders", body=body)
         return data.get("data", {})
 
     async def cancel_order(self, order_id: str) -> dict:
