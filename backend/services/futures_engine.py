@@ -879,16 +879,46 @@ class FuturesEngine(NativeTradingEngine):
 
         Two speeds:
           • FAST (5 s)  — positions open: catches TP / SL / liq instantly.
-          • SLOW (60 s) — flat: just scans for entry signals.
+          • SLOW (varies by TF) — flat: scans for entry signals.
+
+        Signal-scan cadence scales with the strategy's execution
+        timeframe so a 1m bot doesn't sit idle for 60 seconds after a
+        signal fires (the old hardcoded interval). Rule of thumb:
+        scan roughly every 15-25% of the bar length so we never miss
+        a fresh close by more than that fraction of a candle.
+
+          1m  →  10s   (was 60s — 6x faster signal-to-entry)
+          3m  →  15s
+          5m  →  20s
+          15m →  45s   (slightly under one tick per bar)
+          30m →  60s
+          1h+ →  60s   (bars are long; no point scanning faster)
+
+        For a flat 1m scalper this cuts the worst-case "signal fires
+        → bot acts" latency from 60s to ~10s, which is the difference
+        between missing the move and catching it.
         """
         import time as _time
 
         seen_signal:    dict[str, object] = {}  # pair → direction of last fired signal
         last_signal_ts: dict[str, float]  = {}
-        SIGNAL_INTERVAL = 60.0
 
-        log.info("[%s] Futures engine loop started — strategy=%s pairs=%s mode=%s tf=%s",
-                 self.user_id, self._strategy, self._pairs, self._mode, self._timeframe)
+        # Pick the loop / signal interval based on execution timeframe.
+        # Same value used for both `self._stop_evt.wait(...)` and the
+        # in-tick signal_interval guard so they stay coherent.
+        _tf = (self._timeframe or "15m").lower()
+        _tf_intervals = {
+            "1m": 10.0, "3m": 15.0, "5m": 20.0,
+            "15m": 45.0, "30m": 60.0, "1h": 60.0,
+            "2h": 60.0, "4h": 60.0, "6h": 60.0, "12h": 60.0, "1d": 60.0,
+        }
+        SIGNAL_INTERVAL = _tf_intervals.get(_tf, 60.0)
+        FLAT_SLEEP      = SIGNAL_INTERVAL
+
+        log.info("[%s] Futures engine loop started — strategy=%s pairs=%s mode=%s "
+                 "tf=%s signal_interval=%ds",
+                 self.user_id, self._strategy, self._pairs, self._mode,
+                 self._timeframe, int(SIGNAL_INTERVAL))
 
         last_reconcile_ts = 0.0
         RECONCILE_INTERVAL = 60.0    # check for live-position drift every 60s
@@ -925,10 +955,11 @@ class FuturesEngine(NativeTradingEngine):
                 self._stop_evt.wait(min(60, 5 * max(1, self.errors)))
                 continue
 
-            # Adaptive sleep — 5s when positions open, 60s when flat.
+            # Adaptive sleep — 5s when positions open (manage TP/SL fast),
+            # SIGNAL_INTERVAL when flat (scan cadence picked per TF above).
             with self._lock:
                 has_open = bool(self.positions)
-            self._stop_evt.wait(5.0 if has_open else 60.0)
+            self._stop_evt.wait(5.0 if has_open else FLAT_SLEEP)
 
         log.info("[%s] Futures engine loop exited.", self.user_id)
 
