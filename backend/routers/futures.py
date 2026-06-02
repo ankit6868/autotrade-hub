@@ -1130,6 +1130,12 @@ def futures_open_positions(
             "exchange_order_id": p.get("exchange_order_id"),
             "market_type":       "futures",
             "unrealized_pnl":    round(lev_pnl, 4),
+            # Booked profit on partial closes so far. The user clicks
+            # 25/50/75% to book a portion; this field surfaces the
+            # realized P&L on the closed portions while the remainder
+            # keeps running. Shown as "Booked" on each row.
+            "partial_pnl_abs":   round(float(p.get("partial_pnl_abs") or 0.0), 4),
+            "remaining_pct":     float(p.get("remaining_pct") or 100.0),
             # NEW: 'manual' vs 'bot' tag so the UI can keep the
             # Positions tab clean (manual only) and route bot
             # positions to the Bots tab. Without this, paper bot

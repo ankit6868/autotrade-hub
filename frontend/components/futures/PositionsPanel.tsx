@@ -163,8 +163,15 @@ export default function PositionsPanel({
         setPositions(prevPositions);
         alert(res.error);
       } else {
+        const legPnl = Number(res.leg_pnl ?? 0);
+        const remainingPct = Number(res.remaining_pct ?? (1 - fraction)) * 100;
+        const sign = legPnl >= 0 ? '+' : '';
+        // Lightweight info — appears in the console for power users +
+        // browser-level non-blocking status. Avoiding alert() for the
+        // success path so the flow stays smooth.
         console.info(
-          `Partial close ${pair} ${pct}%: leg P&L=${res.leg_pnl}, remaining=${res.remaining_pct}`,
+          `Closed ${pct}% of ${pair} — booked ${sign}${legPnl.toFixed(2)} USDT, ` +
+          `${remainingPct.toFixed(0)}% of position remains open.`,
         );
       }
       refreshAll();
@@ -450,6 +457,20 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                   <div className={`text-[10px] ${roi >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     ({roi >= 0 ? '+' : ''}{roi.toFixed(2)}%)
                   </div>
+                  {/* Booked P&L from prior partial closes on this row.
+                      Surfaces realized profit from 25/50/75% bookings
+                      so the user sees BOTH the remaining unrealized
+                      P&L AND what's already locked in. */}
+                  {Math.abs(p.partial_pnl_abs || 0) > 0.001 && (
+                    <div
+                      className={`text-[9px] mt-0.5 font-medium ${
+                        p.partial_pnl_abs >= 0 ? 'text-emerald-300' : 'text-red-300'
+                      }`}
+                      title={`Realized P&L from prior partial closes (${(100 - (p.remaining_pct ?? 100)).toFixed(0)}% of original margin already closed)`}
+                    >
+                      Booked: {p.partial_pnl_abs >= 0 ? '+' : ''}{p.partial_pnl_abs.toFixed(2)} USDT
+                    </div>
+                  )}
                 </td>
                 <td className="text-right px-2 py-2">
                   <div className="text-[10px] tabular-nums">
