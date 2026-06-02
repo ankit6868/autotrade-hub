@@ -3972,11 +3972,93 @@ def position_add_margin(
         user_id, pair, mode,
         direction=direction_req, position_id=position_id_req,
     )
+
+    # ── DB-orphan fallback ─────────────────────────────────────────────
+    # When the engine restarted (Railway redeploy etc.) the position may
+    # exist ONLY in the Trade table — the engine forgot it. The /open
+    # endpoint surfaces it via the DB-fallback path so the user sees the
+    # row, but _find_position_across_engines returns nothing. Without
+    # this branch the user clicks Margin → "No open position" error
+    # despite seeing the row right there. Now we update the Trade row
+    # directly (paper) or hit KuCoin (live, future support).
     if pos is None:
-        suffix = ""
+        target_db_id = None
+        if position_id_req and position_id_req.startswith("db:"):
+            try:
+                target_db_id = int(position_id_req[3:])
+            except ValueError:
+                target_db_id = None
+
+        orphan_q = select(Trade).where(
+            Trade.user_id    == user_id,
+            Trade.pair       == pair,
+            Trade.market_type == "futures",
+            Trade.mode       == mode,
+            Trade.status     == "open",
+        )
         if direction_req:
-            suffix = f" ({direction_req.upper()})"
-        return {"error": f"No open position for {pair}{suffix} in {mode} mode"}
+            orphan_q = orphan_q.where(Trade.side == direction_req)
+        if target_db_id is not None:
+            orphan_q = orphan_q.where(Trade.id == target_db_id)
+        else:
+            orphan_q = orphan_q.order_by(desc(Trade.entry_time)).limit(1)
+        orphan = db.execute(orphan_q).scalar_one_or_none()
+        if orphan is None:
+            suffix = f" ({direction_req.upper()})" if direction_req else ""
+            return {"error": f"No open position for {pair}{suffix} in {mode} mode"}
+
+        # Paper orphan: shrink the user's main paper balance, grow the
+        # row's amount, recompute the liq price from new effective lev.
+        if mode == "paper":
+            main_eng = futures_engine_registry.for_user(user_id)
+            if main_eng is None:
+                return {"error": "no engine for user"}
+            with main_eng._lock:
+                if float(main_eng.balance or 0) < amount:
+                    return {"error": f"Insufficient paper balance "
+                                     f"({main_eng.balance:.2f} USDT)"}
+                prev_margin = float(orphan.amount or 0)
+                new_margin = prev_margin + amount
+                main_eng.balance = float(main_eng.balance or 0) - amount
+                orphan.amount = round(new_margin, 8)
+                # Recompute liquidation_price from the new effective lev.
+                lev_old = float(orphan.leverage or 1)
+                new_eff_lev = (prev_margin * lev_old) / max(new_margin, 0.01)
+                if (orphan.side or "long") == "long":
+                    orphan.liquidation_price = round(
+                        orphan.entry_price * (1.0 - 1.0 / max(new_eff_lev, 1.0)), 8
+                    )
+                else:
+                    orphan.liquidation_price = round(
+                        orphan.entry_price * (1.0 + 1.0 / max(new_eff_lev, 1.0)), 8
+                    )
+            db.commit()
+            return {
+                "ok": True, "mode": "paper", "pair": pair,
+                "amount_added": amount,
+                "prev_margin": round(prev_margin, 4),
+                "new_margin": round(new_margin, 4),
+                "prev_leverage": round(lev_old, 2),
+                "new_effective_leverage": round(new_eff_lev, 2),
+                "new_liquidation_price": orphan.liquidation_price,
+                "source": "db_orphan",
+            }
+        # Live orphan: route through KuCoin's margin/deposit-margin.
+        # Falls through to the existing live block below by synthesising
+        # a minimal pos so the rest of the function works.
+        class _Stub:
+            pass
+        pos = _Stub()
+        pos.pair = pair
+        pos.direction = orphan.side
+        pos.entry = orphan.entry_price
+        pos.size = float(orphan.amount or 0)
+        pos.leverage = orphan.leverage or 1
+        pos.liquidation_price = orphan.liquidation_price
+        eng = futures_engine_registry.for_user(user_id)
+        # Mark so the live success block updates the DB row, not pos.size
+        # (pos here is a synthetic stub).
+        pos._orphan_trade = orphan
 
     if mode == "paper":
         with eng._lock:
@@ -4075,8 +4157,67 @@ def position_reduce_margin(
         user_id, pair, "paper",
         direction=direction_req, position_id=position_id_req,
     )
+
+    # ── DB-orphan fallback (same pattern as add-margin) ────────────────
     if pos is None:
-        return {"error": f"No open paper position for {pair}"}
+        target_db_id = None
+        if position_id_req and position_id_req.startswith("db:"):
+            try:
+                target_db_id = int(position_id_req[3:])
+            except ValueError:
+                target_db_id = None
+
+        orphan_q = select(Trade).where(
+            Trade.user_id    == user_id,
+            Trade.pair       == pair,
+            Trade.market_type == "futures",
+            Trade.mode       == "paper",
+            Trade.status     == "open",
+        )
+        if direction_req:
+            orphan_q = orphan_q.where(Trade.side == direction_req)
+        if target_db_id is not None:
+            orphan_q = orphan_q.where(Trade.id == target_db_id)
+        else:
+            orphan_q = orphan_q.order_by(desc(Trade.entry_time)).limit(1)
+        orphan = db.execute(orphan_q).scalar_one_or_none()
+        if orphan is None:
+            return {"error": f"No open paper position for {pair}"}
+
+        main_eng = futures_engine_registry.for_user(user_id)
+        prev_margin = float(orphan.amount or 0)
+        min_margin = max(0.5, prev_margin * 0.10)
+        if (prev_margin - amount) < min_margin:
+            return {"error": f"Cannot reduce below {min_margin:.2f} USDT "
+                             f"(10% safety floor)"}
+        new_margin = prev_margin - amount
+        orphan.amount = round(new_margin, 8)
+        # Recompute liq price on the orphan row.
+        lev_old = float(orphan.leverage or 1)
+        new_eff_lev = (prev_margin * lev_old) / max(new_margin, 0.01)
+        if (orphan.side or "long") == "long":
+            orphan.liquidation_price = round(
+                orphan.entry_price * (1.0 - 1.0 / max(new_eff_lev, 1.0)), 8
+            )
+        else:
+            orphan.liquidation_price = round(
+                orphan.entry_price * (1.0 + 1.0 / max(new_eff_lev, 1.0)), 8
+            )
+        if main_eng is not None:
+            with main_eng._lock:
+                main_eng.balance = float(main_eng.balance or 0) + amount
+        db.commit()
+        return {
+            "ok": True, "mode": "paper", "pair": pair,
+            "amount_reduced": amount,
+            "prev_margin": round(prev_margin, 4),
+            "new_margin": round(new_margin, 4),
+            "prev_leverage": round(lev_old, 2),
+            "new_effective_leverage": round(new_eff_lev, 2),
+            "new_liquidation_price": orphan.liquidation_price,
+            "new_balance": round(float(main_eng.balance if main_eng else 0), 4),
+            "source": "db_orphan",
+        }
 
     with eng._lock:
         prev_margin = float(getattr(pos, "size", 0) or 0)
