@@ -202,6 +202,11 @@ class FuturesPosition(Position):
         self.leverage           = leverage
         self.liquidation_price  = _calc_liquidation_price(self.entry, self.direction, leverage)
         self._market_type       = "futures"
+        # KuCoin contract count this position maps to (per-symbol multiplier).
+        # Stamped on EVERY position — paper and live — so paper is a true
+        # dry-run of live sizing (display-only; paper P&L stays price-ratio
+        # based on `size`). 0 until the engine/router computes it at entry.
+        self.contracts          = 0
 
         # ── Advanced Risk Management state ──────────────────────────────
         # Defaults are the "ARM-disabled" identity: a single-TP position
@@ -1563,6 +1568,18 @@ class FuturesEngine(NativeTradingEngine):
                         arm_be_buffer_pct = self._arm_be_buffer_pct,
                         arm_trail_to_tp1  = self._arm_trail_to_tp1,
                     )
+                # Paper sizing-parity: stamp the SAME KuCoin contract count
+                # the live path would send (per-symbol multiplier), so a paper
+                # bot is a true dry-run of live sizing for every coin. The live
+                # entry (_place_live_entry) recomputes the identical value from
+                # the same function, so the numbers always match — this is
+                # display-only and never affects paper P&L.
+                try:
+                    from .kucoin_futures_client import normalize_futures_symbol as _norm_sym
+                    _sym_parity = _norm_sym(pair.replace("/", "").replace("USDT", "USDTM"))
+                    pos.contracts = _stake_to_contracts(stake, self._leverage, entry, _sym_parity)
+                except Exception:
+                    pos.contracts = 0
                 pos.db_id = _persist_open_trade(
                     self.user_id, pos, self._mode, self._strategy_id,
                     leverage=self._leverage, market_type="futures",
@@ -1592,6 +1609,7 @@ class FuturesEngine(NativeTradingEngine):
                 self._log_action("opened", self.last_action,
                     pair=pair, price=entry, direction=direction,
                     leverage=self._leverage, sl=pos.sl, tp=pos.tp,
+                    contracts=getattr(pos, "contracts", 0),
                     tp1=pos.tp1_price, tp2=pos.tp2_price,
                     arm_active=pos.arm_active,
                     arm_tp1_close_pct=pos.tp1_close_pct if pos.arm_active else None,
@@ -1990,6 +2008,77 @@ class FuturesEngine(NativeTradingEngine):
     # position. 15 seconds is a comfortable margin.
     _RECONCILE_GRACE_SECS = 15.0
 
+    def _fetch_close_fill_price(self, symbol: str, direction: str) -> float | None:
+        """Best-effort: return the REAL fill price of the order that closed a
+        live position on KuCoin, so a TP/SL-triggered (or manual exchange-side)
+        close records the true fill instead of a last-price estimate.
+
+        Queries recent fills, filters to the CLOSING side for `direction`
+        (sell closes a long, buy closes a short), and size-weights the most
+        recent order's fills (a market stop can fill in several pieces under
+        one orderId). Returns None on any failure → the caller falls back to
+        the price estimate, so this can never block or corrupt a close.
+
+        Caveat: if the user closed an UNRELATED position on the same symbol at
+        almost the same moment, the most-recent close-side fill could be that
+        one. Acceptable for a best-effort accuracy bump over a pure estimate;
+        the trade itself already closed correctly on KuCoin regardless.
+        """
+        if not self._api_key:
+            return None
+        try:
+            from .native_trading_engine import _kucoin_get_signed
+            resp = _kucoin_get_signed(
+                "/api/v1/recentFills",
+                self._api_key, self._api_sec, self._api_pass,
+                params={"symbol": symbol},
+                base_url=KUCOIN_FUTURES_BASE,
+            )
+        except Exception as e:
+            log.debug("[%s] recentFills fetch failed for %s: %s",
+                      self.user_id, symbol, e)
+            return None
+        if str((resp or {}).get("code")) != "200000":
+            return None
+        close_side = "sell" if direction == "long" else "buy"
+        fills = [
+            f for f in (resp.get("data") or [])
+            if f.get("symbol") == symbol
+            and str(f.get("side", "")).lower() == close_side
+        ]
+        if not fills:
+            return None
+
+        def _ts(f) -> int:
+            try:
+                return int(f.get("tradeTime") or f.get("createdAt") or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        fills.sort(key=_ts, reverse=True)
+        # Group the most-recent order's fills — one logical close may split
+        # into several partial fills, all sharing the same orderId.
+        top_oid = fills[0].get("orderId")
+        cluster = [f for f in fills if f.get("orderId") == top_oid] if top_oid else [fills[0]]
+        tot_sz = 0.0
+        tot_val = 0.0
+        for f in cluster:
+            try:
+                px = float(f.get("price") or 0)
+                sz = float(f.get("size") or 0)
+            except (TypeError, ValueError):
+                continue
+            if px > 0 and sz > 0:
+                tot_sz += sz
+                tot_val += px * sz
+        if tot_sz > 0:
+            return tot_val / tot_sz
+        try:
+            px = float(fills[0].get("price") or 0)
+            return px if px > 0 else None
+        except (TypeError, ValueError):
+            return None
+
     def _reconcile_live_positions(self) -> None:
         """Periodic check: drop local positions that no longer exist on
         KuCoin (manually closed via the exchange UI, or auto-closed due
@@ -2072,41 +2161,60 @@ class FuturesEngine(NativeTradingEngine):
                     )
                     if self._reconcile_drift_counts[trade_key] >= self._RECONCILE_DRIFT_THRESHOLD:
                         drop.append(trade_key)
+                # Pop the dropped positions under the lock, but defer the
+                # close/persist (which makes a network call for the true fill)
+                # to OUTSIDE the lock so a slow KuCoin GET can't stall every
+                # other engine operation that needs the lock.
+                dropped: list[tuple[str, object]] = []
                 for trade_key in drop:
                     pos = self.positions.pop(trade_key, None)
                     self._reconcile_drift_counts.pop(trade_key, None)
-                    if pos is None:
-                        continue
-                    # Estimate the close fill: freshest price we have (WS /
-                    # 1m bar / REST) since the position likely exited at its
-                    # TP/SL trigger near the current price. Falls back to
-                    # entry only if no price is available (P&L≈0 then).
-                    fill = (self._last_prices.get(pos.pair)
-                            or self._get_live_price(pos.pair)
-                            or pos.entry)
-                    # Persist with the POSITION's own mode — the shared manual
-                    # engine is _mode='paper' but this position is live, and a
-                    # live close must be recorded as live in the history.
-                    pos_mode = getattr(pos, "_mode", None) or self._mode
-                    try:
-                        pos.close(fill, "reconciled_drift", datetime.now(timezone.utc))
+                    if pos is not None:
+                        dropped.append((trade_key, pos))
+            # ── Outside the lock: realized-fill lookup + book the close ──
+            for trade_key, pos in dropped:
+                # True realized fill: ask KuCoin for the ACTUAL price the
+                # closing order filled at (the TP/SL or manual exchange-side
+                # close), so history records the real P&L instead of a
+                # last-price estimate. Falls back to the freshest local price,
+                # then entry, if the lookup returns nothing.
+                sym = normalize_futures_symbol(
+                    pos.pair.replace("/", "").replace("USDT", "USDTM"),
+                )
+                true_fill = self._fetch_close_fill_price(sym, pos.direction)
+                fill = (true_fill
+                        or self._last_prices.get(pos.pair)
+                        or self._get_live_price(pos.pair)
+                        or pos.entry)
+                fill_src = "kucoin-fill" if true_fill else "price-estimate"
+                # Persist with the POSITION's own mode — the shared manual
+                # engine is _mode='paper' but this position is live, and a
+                # live close must be recorded as live in the history.
+                pos_mode = getattr(pos, "_mode", None) or self._mode
+                try:
+                    pos.close(fill, "reconciled_drift", datetime.now(timezone.utc))
+                    # Re-acquire the lock only for the quick shared-state
+                    # mutation (balance + closed list).
+                    with self._lock:
                         self.balance += pos.pnl_abs
                         self.closed_trades.append(pos)
-                        _persist_closed_trade(
-                            self.user_id, pos, pos_mode,
-                            self._strategy_id, pos.db_id,
-                        )
-                    except Exception:
-                        pass
-                    self.last_action = (
-                        f"RECONCILED-DRIFT {pos.pair} {pos.direction} — "
-                        f"no on-exchange position after "
-                        f"{self._RECONCILE_DRIFT_THRESHOLD} consecutive checks; "
-                        f"cleared local state."
+                    _persist_closed_trade(
+                        self.user_id, pos, pos_mode,
+                        self._strategy_id, pos.db_id,
                     )
-                    self._log_action("reconciled_drift", self.last_action,
-                        pair=pos.pair, direction=pos.direction)
-                    log.warning("[%s] %s", self.user_id, self.last_action)
+                except Exception:
+                    pass
+                self.last_action = (
+                    f"RECONCILED-DRIFT {pos.pair} {pos.direction} @ {fill:.6f} "
+                    f"({fill_src}) P&L={getattr(pos, 'pnl_abs', 0.0):+.2f} — no "
+                    f"on-exchange position after {self._RECONCILE_DRIFT_THRESHOLD} "
+                    f"consecutive checks; cleared local state."
+                )
+                self._log_action("reconciled_drift", self.last_action,
+                    pair=pos.pair, direction=pos.direction,
+                    fill=fill, fill_source=fill_src,
+                    pnl=getattr(pos, "pnl_abs", 0.0))
+                log.warning("[%s] %s", self.user_id, self.last_action)
         except Exception as e:
             log.debug("[%s] reconcile_live_positions: %s", self.user_id, e)
 

@@ -1121,6 +1121,7 @@ def futures_open_positions(
                 "sl":                round(p.effective_sl, 6) if hasattr(p, "effective_sl") else round(p.sl, 6),
                 "tp":                round(p.tp, 6),
                 "stake":             round(_effective_size, 2),
+                "contracts":         int(getattr(p, "contracts", 0) or 0),
                 "opened_at":         str(p.opened_at),
                 "leverage":          lev,
                 "liquidation_price": round(liq, 6) if liq else None,
@@ -1184,6 +1185,7 @@ def futures_open_positions(
             "entry_price":       entry,
             "current_price":     round(cur, 6),
             "amount":            stake,
+            "contracts":         p.get("contracts", 0),
             "leverage":          leverage,
             "liquidation_price": p.get("liquidation_price"),
             "stoploss_price":    p.get("sl"),
@@ -1501,6 +1503,7 @@ def futures_manual_entry(
     # without leaving a phantom position in the engine.
     exchange_order_id = None
     real_notional = real_margin = None
+    contracts = None   # KuCoin contract count — set by live sizing OR paper parity below
     if mode == "live":
         ok, err = _ensure_live_credentials(eng, user_id, db)
         if not ok:
@@ -1585,6 +1588,29 @@ def futures_manual_entry(
         # If we kept user_cost the app would show $1 while KuCoin shows $79.
         stake = real_margin
 
+    # ── Paper mode: compute the SAME KuCoin contract count for parity ──
+    # Display-only — paper P&L stays price-ratio based on `stake`. This makes
+    # paper a true dry-run: the user sees exactly how many contracts a LIVE
+    # order of this size would send for THIS coin (BTC or non-BTC) via the
+    # identical _compute_live_sizing path, so they can validate sizing
+    # risk-free before flipping to live. We DON'T block paper on a sub-minimum
+    # cost (paper is for experimentation) — we surface a note instead.
+    paper_sizing_note = None
+    if mode != "live":
+        kc_symbol_paper = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+        p_contracts, _p_margin, p_notional, p_err = _compute_live_sizing(
+            cost_usdt=user_cost, leverage=leverage,
+            price=entry_price, kc_symbol=kc_symbol_paper,
+        )
+        if p_err:
+            # Below the symbol's per-contract minimum at this leverage — a live
+            # order would be REJECTED. Surface the note (don't block paper).
+            contracts = 0
+            paper_sizing_note = p_err
+        else:
+            contracts = p_contracts
+            real_notional = p_notional   # show notional in the paper response too
+
     now = datetime.now(_tz.utc)
     pos = FuturesPosition(
         pair=pair, direction=direction,
@@ -1592,6 +1618,7 @@ def futures_manual_entry(
         size=stake, leverage=leverage, opened_at=now,
     )
     pos._mode = mode  # tag position with its mode for filtering
+    pos.contracts = int(contracts or 0)  # KuCoin contract count (parity)
     if exchange_order_id:
         # Stash the exchange order id on the position so /force-close can
         # reconcile with KuCoin even if the engine restarts.
@@ -1684,6 +1711,8 @@ def futures_manual_entry(
         "exchange_order_id": exchange_order_id,
         "margin": round(stake, 4),                   # what KuCoin actually locked
         "notional": real_notional,                    # position value at entry
+        "contracts": int(contracts or 0),             # KuCoin contract count (live + paper parity)
+        "sizing_note": paper_sizing_note,             # set only when paper cost < per-contract min
         # Position payload in the SAME shape /api/futures/open emits so
         # the frontend can optimistically prepend the new row instead of
         # waiting on a full panel refresh (~1-2 second perceived latency
@@ -1697,6 +1726,7 @@ def futures_manual_entry(
             "entry_price":       entry_price,
             "current_price":     entry_price,
             "amount":            round(stake, 4),
+            "contracts":         int(contracts or 0),
             "leverage":          leverage,
             "liquidation_price": pos.liquidation_price,
             "stoploss_price":    sl_price,

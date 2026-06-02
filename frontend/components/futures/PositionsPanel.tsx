@@ -499,6 +499,18 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                           <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
                           <path d="M7 11V7a5 5 0 0110 0v4" />
                         </svg>
+                        {/* KuCoin contract count. In PAPER this is the exact
+                            size a LIVE order of this margin would send for this
+                            coin — a true dry-run of live sizing, so the user can
+                            validate non-BTC sizing risk-free before going live. */}
+                        {p.contracts != null && p.contracts > 0 && (
+                          <span
+                            className="text-slate-500"
+                            title="KuCoin contract count. In paper mode this is exactly what a live order of the same margin would send for this coin — validate sizing here before going live."
+                          >
+                            · {p.contracts} ct
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
