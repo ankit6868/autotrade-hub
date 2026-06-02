@@ -1011,7 +1011,11 @@ def futures_open_positions(
     # it here on every UI poll (capped to once per 30s per engine).
     for _src, _key, _eng in engines_with_meta:
         try:
-            _eng.maybe_reconcile_live_positions(throttle_secs=30)
+            # 3s reconcile cadence (was 30s) — picks up manual closes on
+            # KuCoin's own UI within 3 seconds. False-removal race during
+            # the post-entry window is now defended by the grace period
+            # + drift threshold inside _reconcile_live_positions.
+            _eng.maybe_reconcile_live_positions(throttle_secs=3)
         except Exception:
             pass
 

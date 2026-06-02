@@ -1901,14 +1901,22 @@ class FuturesEngine(NativeTradingEngine):
                         closed += 1
         return closed
 
-    def maybe_reconcile_live_positions(self, *, throttle_secs: int = 30) -> bool:
+    def maybe_reconcile_live_positions(self, *, throttle_secs: int = 3) -> bool:
         """Throttled wrapper around _reconcile_live_positions, safe to call
         from HTTP endpoints that don't have a run loop (e.g. the user-
         shared manual-trade engine where _run_loop isn't running).
 
-        Returns True if a reconcile actually ran. Throttle protects against
-        the /open endpoint's 8-second poll from hammering KuCoin's
-        /positions endpoint."""
+        Reconcile cadence is now FAST (3s default, was 30s) so a manual
+        close on KuCoin's own UI reflects in our app within 3 seconds.
+        The race that previously made fresh positions vanish (KuCoin's
+        /positions endpoint hadn't surfaced them yet) is now defended
+        by the grace period + drift threshold in _reconcile_live_positions
+        — see those constants. So we can poll faster without false-
+        removing freshly-opened trades.
+
+        Returns True if a reconcile actually ran. Throttle still protects
+        KuCoin from being hammered when multiple /open polls land in
+        the same second (deduplicates the call across endpoints)."""
         if self._mode != "live" or not self._api_key:
             return False
         now = time.time()
@@ -1919,20 +1927,41 @@ class FuturesEngine(NativeTradingEngine):
         self._reconcile_live_positions()
         return True
 
+    # Per-position drift counter: KuCoin's /positions endpoint is
+    # eventually-consistent — a freshly-opened position can be missing
+    # from the response for a few seconds, and Lead Trading occasionally
+    # returns currentQty=0 for valid positions (known quirk we've hit
+    # on force-close). Removing on a SINGLE miss caused fresh trades
+    # to vanish from the UI. Require 3 consecutive misses across the
+    # fast 3s reconcile cadence (=9s of confirmed absence) before we
+    # treat a position as actually closed externally.
+    _RECONCILE_DRIFT_THRESHOLD = 3
+    # Per-position grace period — never drop a position younger than this
+    # many seconds regardless of drift counter. Covers the 1-3 sec window
+    # between order confirm and KuCoin's /positions reflecting the new
+    # row. With our pre-cached margin mode + leverage the entry round-
+    # trip is ~300ms; KuCoin then needs a moment to materialise the
+    # position. 15 seconds is a comfortable margin.
+    _RECONCILE_GRACE_SECS = 15.0
+
     def _reconcile_live_positions(self) -> None:
         """Periodic check: drop local positions that no longer exist on
         KuCoin (manually closed via the exchange UI, or auto-closed due
         to liquidation we missed, or never opened because the entry order
         was rejected after we already optimistically wrote local state).
 
-        Called from the run loop on the slow tick (~ once per minute).
         Live mode only; paper mode keeps the engine as source of truth.
 
-        On a discovered mismatch:
-          • Local position not on KuCoin → mark closed_reason='reconciled_drift'
-            and remove from self.positions + close DB row.
-          • Don't touch KuCoin-side positions that exist locally; the
-            engine continues managing them normally.
+        Anti-race semantics:
+          • Position younger than _RECONCILE_GRACE_SECS  → never dropped.
+          • Position seen missing once             → counter += 1.
+          • Counter ≥ _RECONCILE_DRIFT_THRESHOLD   → drop, mark
+            'reconciled_drift', persist closed Trade row.
+          • Position re-appears on KuCoin (counter resets to 0).
+
+        This combination makes the reconcile fast (caller can run it
+        every few seconds) without false-removing positions during the
+        eventual-consistency window after a fresh entry.
         """
         if self._mode != "live" or not self._api_key or not self.positions:
             return
@@ -1955,22 +1984,46 @@ class FuturesEngine(NativeTradingEngine):
                     continue
                 sym = p.get("symbol", "")
                 exchange_open.add((sym, "long" if qty > 0 else "short"))
-            # Walk local positions; drop any that KuCoin doesn't see.
-            drift: list[str] = []
+            # Persistent per-trade-key drift counter on the engine.
+            if not hasattr(self, "_reconcile_drift_counts"):
+                self._reconcile_drift_counts: dict[str, int] = {}
+            now_ts = time.time()
+            drop: list[str] = []
             with self._lock:
                 for trade_key, pos in list(self.positions.items()):
                     sym = normalize_futures_symbol(
                         pos.pair.replace("/", "").replace("USDT", "USDTM"),
                     )
-                    if (sym, pos.direction) not in exchange_open:
-                        drift.append(trade_key)
-                for trade_key in drift:
+                    on_exchange = (sym, pos.direction) in exchange_open
+                    if on_exchange:
+                        # Position is back (or always was) — clear counter.
+                        self._reconcile_drift_counts.pop(trade_key, None)
+                        continue
+                    # Position missing from KuCoin. Apply grace +
+                    # threshold before dropping.
+                    opened_at_ts = (
+                        pos.opened_at.timestamp()
+                        if getattr(pos, "opened_at", None) else now_ts
+                    )
+                    age = now_ts - opened_at_ts
+                    if age < self._RECONCILE_GRACE_SECS:
+                        # Brand-new position — KuCoin probably hasn't
+                        # surfaced it yet. Skip and let next reconcile
+                        # try again after the grace window.
+                        continue
+                    self._reconcile_drift_counts[trade_key] = (
+                        self._reconcile_drift_counts.get(trade_key, 0) + 1
+                    )
+                    if self._reconcile_drift_counts[trade_key] >= self._RECONCILE_DRIFT_THRESHOLD:
+                        drop.append(trade_key)
+                for trade_key in drop:
                     pos = self.positions.pop(trade_key, None)
+                    self._reconcile_drift_counts.pop(trade_key, None)
                     if pos is None:
                         continue
                     # Use last-known price as the close fill; net P&L is
-                    # whatever the bot saw before the drift. Persist so the
-                    # trade history shows the reconciliation.
+                    # whatever the bot saw before the drift. Persist so
+                    # the trade history shows the reconciliation.
                     fill = self._last_prices.get(pos.pair, pos.entry)
                     try:
                         pos.close(fill, "reconciled_drift", datetime.now(timezone.utc))
@@ -1984,7 +2037,9 @@ class FuturesEngine(NativeTradingEngine):
                         pass
                     self.last_action = (
                         f"RECONCILED-DRIFT {pos.pair} {pos.direction} — "
-                        f"no on-exchange position; cleared local state."
+                        f"no on-exchange position after "
+                        f"{self._RECONCILE_DRIFT_THRESHOLD} consecutive checks; "
+                        f"cleared local state."
                     )
                     self._log_action("reconciled_drift", self.last_action,
                         pair=pos.pair, direction=pos.direction)
