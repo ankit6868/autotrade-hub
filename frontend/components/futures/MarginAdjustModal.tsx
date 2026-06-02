@@ -213,6 +213,17 @@ export default function MarginAdjustModal({
 
           {/* Before / After table */}
           <div className="bg-[#0a1020] rounded-lg p-3 mb-4 border border-white/[0.04]">
+            {/* Tiny explainer — users were thinking "Leverage" was the
+                position-leverage setting being changed (it can't be).
+                The number shown is EFFECTIVE leverage, computed from
+                notional/margin. Position leverage itself stays at the
+                value the position was opened with. */}
+            <p className="text-[9px] text-slate-500 mb-2 leading-snug">
+              Position leverage is <span className="text-slate-300 font-medium">locked at {position.leverage.toFixed(0)}×</span> —
+              exchanges don't allow changing it on an open trade. The
+              "Effective Lev." row below is notional ÷ margin: it shrinks
+              when you add margin (your P&L volatility per tick goes down).
+            </p>
             <div className="grid grid-cols-3 gap-2 text-[11px]">
               <div className="text-slate-500"></div>
               <div className="text-right text-slate-400 font-medium">Current</div>
@@ -226,7 +237,19 @@ export default function MarginAdjustModal({
                   ? (tab === 'add' ? position.size + amt : position.size - amt).toFixed(2)
                   : '—'}
               </div>
-              <div className="text-slate-400">Leverage</div>
+              <div
+                className="text-slate-400 flex items-center gap-1"
+                title={
+                  "Position leverage is LOCKED at " + position.leverage.toFixed(0) + "x for the whole life " +
+                  "of this trade — exchanges (KuCoin included) don't let you change it on an open position. " +
+                  "The number shown here is EFFECTIVE leverage: notional ÷ margin. Adding margin to the " +
+                  "same notional drops it, which is the whole point — your P&L volatility per price tick " +
+                  "shrinks. The position itself is still a " + position.leverage.toFixed(0) + "x position."
+                }
+              >
+                Effective Lev.
+                <span className="text-[9px] px-1 py-0.5 rounded bg-slate-700/60 text-slate-400" title="Position leverage is locked at entry">🔒</span>
+              </div>
               <div className="text-right text-slate-200 tabular-nums">{position.leverage.toFixed(2)}x</div>
               <div className={`text-right tabular-nums ${isValid ? 'text-sky-300' : 'text-slate-600'}`}>
                 {isValid ? previewEffectiveLev.toFixed(2) + 'x' : '—'}
