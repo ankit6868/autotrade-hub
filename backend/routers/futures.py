@@ -5074,11 +5074,17 @@ def set_position_tp_sl(
             def _cancel_existing_stop(label: str) -> None:
                 order_type = f"stop_{label}"   # "stop_tp" | "stop_sl"
                 try:
+                    # Filter by close_side too: in hedge mode a pair holds a
+                    # long AND a short, each with its own reduceOnly stops
+                    # (recorded with side=close_side — "sell" for a long,
+                    # "buy" for a short). Without the side filter, editing one
+                    # leg's TP/SL would cancel the OTHER leg's stop as well.
                     rows = db.execute(
                         select(FuturesOrder).where(
                             FuturesOrder.user_id    == user_id,
                             FuturesOrder.symbol     == kc_symbol,
                             FuturesOrder.order_type == order_type,
+                            FuturesOrder.side       == close_side,
                             FuturesOrder.status     == "pending",
                         )
                     ).scalars().all()
