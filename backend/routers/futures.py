@@ -4484,12 +4484,11 @@ def position_add_margin(
             if main_eng is None:
                 return {"error": "no engine for user"}
             with main_eng._lock:
-                if float(main_eng.balance or 0) < amount:
-                    return {"error": f"Insufficient paper balance "
-                                     f"({main_eng.balance:.2f} USDT)"}
+                # See Model-B note in the engine path: adding margin must not
+                # deduct from balance, or the wallet drains by `amount` (closes
+                # never return margin). Only reallocate into the position.
                 prev_margin = float(orphan.amount or 0)
                 new_margin = prev_margin + amount
-                main_eng.balance = float(main_eng.balance or 0) - amount
                 orphan.amount = round(new_margin, 8)
                 # Recompute liquidation_price from the new effective lev.
                 lev_old = float(orphan.leverage or 1)
@@ -4532,13 +4531,16 @@ def position_add_margin(
 
     if mode == "paper":
         with eng._lock:
-            if eng.balance < amount:
-                return {"error": f"Insufficient paper balance "
-                                 f"({eng.balance:.2f} USDT)"}
+            # Realized-equity wallet model: margin is NOT drawn from balance
+            # on open (closes credit only realized P&L, never return margin),
+            # so adding margin must NOT touch balance either. It only
+            # reallocates equity into this position — lowering effective
+            # leverage and pushing the liq price away. Deducting here would
+            # permanently drain the wallet by `amount` (same bug class as the
+            # open-side margin drain fixed in 49f5b3e).
             prev_margin = float(getattr(pos, "size", 0) or 0)
             new_margin = prev_margin + amount
             pos.size = new_margin
-            eng.balance -= amount
             old_lev, new_eff_lev = _recompute_liq_price(pos, prev_margin, new_margin)
             try:
                 eng._log_action("margin_added",
@@ -4717,9 +4719,8 @@ def position_reduce_margin(
             orphan.liquidation_price = round(
                 orphan.entry_price * (1.0 + 1.0 / max(new_eff_lev, 1.0)), 8
             )
-        if main_eng is not None:
-            with main_eng._lock:
-                main_eng.balance = float(main_eng.balance or 0) + amount
+        # See Model-B note in the engine path: reducing margin must not
+        # credit balance, or the wallet inflates by `amount` of phantom money.
         db.commit()
         return {
             "ok": True, "mode": "paper", "pair": pair,
@@ -4741,7 +4742,10 @@ def position_reduce_margin(
                              f"(10% safety floor)"}
         new_margin = prev_margin - amount
         pos.size = new_margin
-        eng.balance += amount
+        # Realized-equity wallet model: reducing margin must NOT credit
+        # balance, or the wallet inflates by `amount` of phantom money
+        # (mirror of the add-margin drain). Margin reduction only raises
+        # effective leverage and moves the liq price closer.
         old_lev, new_eff_lev = _recompute_liq_price(pos, prev_margin, new_margin)
         try:
             eng._log_action("margin_reduced",
