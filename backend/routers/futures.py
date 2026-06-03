@@ -1317,26 +1317,43 @@ def futures_open_positions(
                     (t["pair"], (t.get("side") or t.get("direction") or "long"))
                     for t in merged
                 }
+                # Direction of a KuCoin position row, hedge-mode aware.
+                # Returns None for a flat (qty==0) row. In hedge mode KuCoin
+                # reports currentQty as a positive magnitude and carries the
+                # side in positionSide, so a hedge short (qty>0, side=SHORT)
+                # would be misclassified as long by sign alone — which would
+                # then drop the real short row as "stale/closed" below. Prefer
+                # positionSide; one-way mode omits it (or sends "BOTH") so we
+                # fall back to the signed-qty rule unchanged.
+                def _kc_direction(kp: dict):
+                    _q = float(kp.get("currentQty", 0) or 0)
+                    if _q == 0:
+                        return None
+                    _side = str(kp.get("positionSide", "") or "").upper()
+                    if _side == "LONG":
+                        return "long"
+                    if _side == "SHORT":
+                        return "short"
+                    return "long" if _q > 0 else "short"
                 # Authoritative set of (pair, direction) actually OPEN on
                 # KuCoin right now. Used both to skip re-adding rows we
                 # already show AND to drop stale LIVE rows below (bugs 1/3).
                 kc_open_keys: set[tuple[str, str]] = set()
                 for kp in (kc_resp.get("data") or []):
-                    _q = float(kp.get("currentQty", 0) or 0)
-                    if _q == 0:
+                    _dir = _kc_direction(kp)
+                    if _dir is None:
                         continue
                     _ksym = kp.get("symbol", "")
                     _kbase = _ksym.replace("USDTM", "").replace("XBT", "BTC")
-                    kc_open_keys.add((f"{_kbase}/USDT", "long" if _q > 0 else "short"))
+                    kc_open_keys.add((f"{_kbase}/USDT", _dir))
                 for kp in (kc_resp.get("data") or []):
-                    qty = float(kp.get("currentQty", 0))
-                    if qty == 0:
+                    direction = _kc_direction(kp)
+                    if direction is None:
                         continue   # closed / zero positions
                     kc_sym = kp.get("symbol", "")
                     # Reverse normalize: XBTUSDTM → BTCUSDTM → BTC/USDT
                     base = kc_sym.replace("USDTM", "").replace("XBT", "BTC")
                     pair = f"{base}/USDT"
-                    direction = "long" if qty > 0 else "short"
                     if (pair, direction) in keys_already_in_merged:
                         continue   # already tracking via engine/DB
                     # Skip positions we JUST closed via the app — KuCoin's
@@ -2220,6 +2237,7 @@ def futures_force_close(
                 )
                 pdata: dict = {}
                 qty = 0
+                row_dir = "long"
                 if str(pos_resp.get("code")) == "200000":
                     for _p in (pos_resp.get("data") or []):
                         if (_p.get("symbol") or "").upper() != kc_symbol.upper():
@@ -2227,16 +2245,27 @@ def futures_force_close(
                         _q = int(_p.get("currentQty", 0) or 0)
                         if _q == 0:
                             continue
-                        # Respect direction filter — qty > 0 is long, < 0 is short.
-                        if req_direction == "long" and _q < 0:
-                            continue
-                        if req_direction == "short" and _q > 0:
+                        # Hedge-mode aware direction: prefer positionSide
+                        # (hedge reports qty as a positive magnitude, side in
+                        # positionSide); fall back to qty sign for one-way mode.
+                        # Without this, a hedge short (qty>0) would be filtered
+                        # as long and could be closed with the wrong side.
+                        _pside = str(_p.get("positionSide", "") or "").upper()
+                        if _pside == "LONG":
+                            _row_dir = "long"
+                        elif _pside == "SHORT":
+                            _row_dir = "short"
+                        else:
+                            _row_dir = "long" if _q > 0 else "short"
+                        # Respect direction filter.
+                        if req_direction in ("long", "short") and _row_dir != req_direction:
                             continue
                         pdata = _p
                         qty = _q
+                        row_dir = _row_dir
                         break
                 if qty != 0:
-                    direction = "long" if qty > 0 else "short"
+                    direction = row_dir
                     side          = "sell" if direction == "long" else "buy"
                     position_side = "LONG" if direction == "long" else "SHORT"
                     contracts     = abs(qty)
@@ -4954,16 +4983,33 @@ def set_position_tp_sl(
             return {"error": f"KuCoin rejected position lookup: {pos_resp.get('msg', pos_resp)}"}
         pdata: dict = {}
         qty = 0
+        kc_direction = "long"
         for _p in (pos_resp.get("data") or []):
-            if (_p.get("symbol") or "").upper() == kc_symbol.upper():
-                _q = int(_p.get("currentQty", 0) or 0)
-                if _q != 0:
-                    pdata = _p
-                    qty = _q
-                    break
+            if (_p.get("symbol") or "").upper() != kc_symbol.upper():
+                continue
+            _q = int(_p.get("currentQty", 0) or 0)
+            if _q == 0:
+                continue
+            # Hedge-mode aware direction: prefer positionSide (hedge reports
+            # qty as a positive magnitude); fall back to qty sign for one-way.
+            _pside = str(_p.get("positionSide", "") or "").upper()
+            if _pside == "LONG":
+                _row_dir = "long"
+            elif _pside == "SHORT":
+                _row_dir = "short"
+            else:
+                _row_dir = "long" if _q > 0 else "short"
+            # In hedge mode both sides can be open on one symbol — respect the
+            # requested direction so TP/SL lands on the intended leg instead of
+            # whichever the LIST returns first.
+            if direction_req in ("long", "short") and _row_dir != direction_req:
+                continue
+            pdata = _p
+            qty = _q
+            kc_direction = _row_dir
+            break
         if qty == 0:
             return {"error": f"No open position for {pair} on KuCoin Lead Trading either. Open one before setting TP/SL."}
-        kc_direction = "long" if qty > 0 else "short"
         kc_contracts = abs(qty)
         # Prefer the real per-symbol leverage KuCoin returns; falls back to
         # configured if KuCoin's value is missing or zero.

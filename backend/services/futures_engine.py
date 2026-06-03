@@ -2142,7 +2142,21 @@ class FuturesEngine(NativeTradingEngine):
                 if qty == 0:
                     continue
                 sym = p.get("symbol", "")
-                exchange_open.add((sym, "long" if qty > 0 else "short"))
+                # Hedge mode: KuCoin returns a positionSide ("LONG"/"SHORT")
+                # and may report currentQty as a positive magnitude, so a
+                # hedge short (qty>0, side=SHORT) would be misclassified as
+                # long by sign alone — the reconcile would then never match
+                # (or wrongly match) it. Prefer positionSide when present;
+                # one-way mode omits it (or sends "BOTH") so we fall back to
+                # the signed-qty rule, leaving that path's behavior unchanged.
+                pos_side = str(p.get("positionSide", "") or "").upper()
+                if pos_side == "LONG":
+                    direction = "long"
+                elif pos_side == "SHORT":
+                    direction = "short"
+                else:
+                    direction = "long" if qty > 0 else "short"
+                exchange_open.add((sym, direction))
             # Persistent per-trade-key drift counter on the engine.
             if not hasattr(self, "_reconcile_drift_counts"):
                 self._reconcile_drift_counts: dict[str, int] = {}
