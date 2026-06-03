@@ -197,6 +197,28 @@ _OHLCV_CACHE: dict[tuple, tuple[float, "pd.DataFrame"]]   = {}
 _FUNDING_CACHE: dict[tuple, tuple[float, list]] = {}
 _CACHE_TTL_SECS = 600  # 10 minutes
 
+# Hard caps so these never grow unbounded. Each OHLCV entry is a full
+# DataFrame (a 1m × 6-month frame is ~250k rows / tens of MB), and every
+# distinct backtest/auto-tune combo adds one. Without eviction the dict
+# retained every frame forever — the TTL was only checked on READ, never
+# freeing memory — which on Railway's capped container is a slow march to
+# an OOM kill that takes the whole trading backend down with it.
+_OHLCV_CACHE_MAX   = 24    # ~tens of MB each → keep the working set small
+_FUNDING_CACHE_MAX = 128   # tiny lists → can afford more
+
+
+def _prune_cache(cache: dict, max_entries: int, now: float) -> None:
+    """Drop expired entries, then FIFO-evict oldest until under `max_entries`.
+    Dicts preserve insertion order, so the first keys are the oldest inserts.
+    Call this right before inserting a new entry."""
+    expired = [k for k, (ts, _) in cache.items() if now - ts >= _CACHE_TTL_SECS]
+    for k in expired:
+        cache.pop(k, None)
+    # Leave room for the about-to-be-inserted entry.
+    while len(cache) >= max_entries:
+        oldest = next(iter(cache))
+        cache.pop(oldest, None)
+
 
 def load_futures_ohlcv(pair: str, timeframe: str, start_ts: int, end_ts: int) -> pd.DataFrame:
     """Load FUTURES OHLCV for the perpetual contract of `pair`.
@@ -233,6 +255,7 @@ def load_futures_ohlcv(pair: str, timeframe: str, start_ts: int, end_ts: int) ->
                 .drop_duplicates(subset=["date"])
                 .sort_values("date")
                 .reset_index(drop=True))
+    _prune_cache(_OHLCV_CACHE, _OHLCV_CACHE_MAX, now)
     _OHLCV_CACHE[key] = (now, result)
     return result.copy()
 
@@ -277,6 +300,7 @@ def load_funding_history(pair: str, start_ts: int, end_ts: int) -> list[tuple[in
         except (KeyError, TypeError, ValueError):
             continue
     out.sort(key=lambda x: x[0])
+    _prune_cache(_FUNDING_CACHE, _FUNDING_CACHE_MAX, now)
     _FUNDING_CACHE[key] = (now, out)
     return list(out)
 

@@ -6,8 +6,13 @@ dockerfilePath = "Dockerfile.backend"
 startCommand = "/usr/local/bin/entrypoint.sh"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 90
-restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 3
+# 24/7 trading app: always restart on exit (crash, OOM kill, clean exit)
+# and give it plenty of retries. The old on_failure×3 meant three transient
+# crashes (e.g. an OOM during bot auto-resume) would exhaust the budget and
+# leave the service permanently down until a manual redeploy — exactly the
+# "everything is 502 / X-Railway-Fallback" outage this is meant to avoid.
+restartPolicyType = "always"
+restartPolicyMaxRetries = 10
 
 [[services]]
 name = "backend"

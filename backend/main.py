@@ -3196,7 +3196,7 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
     log = logging.getLogger(log_label)
     from sqlalchemy import select, desc
     from backend.models.trade import StrategyInstance
-    from backend.models.user import Config
+    from backend.models.config import Config
     from backend.services.futures_engine import futures_engine_registry
     from backend.utils.encryption import decrypt
 
