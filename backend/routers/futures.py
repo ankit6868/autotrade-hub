@@ -4556,11 +4556,15 @@ def position_add_margin(
         kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
         if not (kk and ks and kp):
             return {"error": "KuCoin credentials missing"}
-        sym = normalize_futures_symbol(pair)
+        # `pair` is "BASE/USDT" — apply the full futures-symbol transform
+        # (normalize_futures_symbol alone only maps BTCUSDTM→XBTUSDTM and
+        # would pass "ETH/USDT" through unchanged → KuCoin rejects it).
+        sym = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
         biz_no = f"add-margin-{user_id[-8:]}-{int(_time.time() * 1000)}"
         result = _kucoin_post_signed(
-            "/api/v1/position/margin/deposit-margin", kk, ks, kp,
-            body={"symbol": sym, "margin": amount, "bizNo": biz_no},
+            "/api/v1/position/margin/deposit-margin",
+            {"symbol": sym, "margin": amount, "bizNo": biz_no},
+            kk, ks, kp,
             base_url=KUCOIN_FUTURES_BASE,
         )
         if str(result.get("code")) != "200000":

@@ -582,7 +582,13 @@ class FuturesEngine(NativeTradingEngine):
             from .kucoin_futures_client import normalize_futures_symbol
             from ._kucoin_proxy import urlopen as _proxy_urlopen
             import urllib.request, json
-            sym = normalize_futures_symbol(pair)
+            # `pair` is "BASE/USDT" here (same key mtf_candles uses). The
+            # KuCoin ticker needs the futures symbol, so apply the SAME
+            # transform every other helper uses — normalize_futures_symbol
+            # alone only maps BTCUSDTM→XBTUSDTM and would leave "ETH/USDT"
+            # untouched, producing a malformed ?symbol=ETH/USDT that KuCoin
+            # rejects (broke this last-resort fallback for every coin).
+            sym = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
             url = f"https://api-futures.kucoin.com/api/v1/ticker?symbol={sym}"
             req = urllib.request.Request(url, headers={"User-Agent": "autotrade-hub/1.0"})
             with _proxy_urlopen(req, timeout=8) as resp:
