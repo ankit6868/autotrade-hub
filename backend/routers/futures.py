@@ -1412,6 +1412,13 @@ def futures_open_positions(
                 _kept: list[dict] = []
                 _stale_db_ids: set[int] = set()
                 _stale_eng_keys: set[str] = set()
+                # (kc_symbol_upper, close_side) of legs confirmed CLOSED on
+                # KuCoin — used to retire their now-dead pending TP/SL stop
+                # rows so a later position on the same leg doesn't inherit a
+                # stale TP/SL via the overlay. Safe because KuCoin auto-cancels
+                # reduceOnly/closeOrder stops when the position closes, so the
+                # stop is already gone on the exchange.
+                _stale_stop_keys: set[tuple[str, str]] = set()
                 for _row in merged:
                     # Only reconcile MANUAL live rows here. Bot live positions
                     # are owned by their bot engine's own reconcile loop (which
@@ -1463,6 +1470,13 @@ def futures_open_positions(
                         _pid = _row.get("position_id") or ""
                         if isinstance(_pid, str) and _pid.startswith("eng:"):
                             _stale_eng_keys.add(_pid[4:])
+                        try:
+                            from backend.services.kucoin_futures_client import normalize_futures_symbol as _nfs_drop
+                            _dsym = _nfs_drop(_row["pair"].replace("/", "").replace("USDT", "USDTM")).upper()
+                            _dcs  = "sell" if _rdir == "long" else "buy"
+                            _stale_stop_keys.add((_dsym, _dcs))
+                        except Exception:
+                            pass
                         log.info("[%s] /open dropped stale LIVE %s %s — closed on "
                                  "KuCoin (db_id=%s)", user_id, _row["pair"], _rdir, _did)
                         # dropped: do NOT append to _kept
@@ -1498,8 +1512,118 @@ def futures_open_positions(
                         db.rollback()
                         log.warning("[%s] Could not close stale DB rows %s: %s",
                                     user_id, _stale_db_ids, _close_err)
+
+                # Retire the now-dead TP/SL stop rows for legs confirmed
+                # closed on KuCoin (KuCoin already cancelled the reduceOnly
+                # stops), so the overlay below won't show a stale TP/SL.
+                if _stale_stop_keys:
+                    try:
+                        stale_stop_rows = db.execute(
+                            select(FuturesOrder).where(
+                                FuturesOrder.user_id == user_id,
+                                FuturesOrder.mode == "live",
+                                FuturesOrder.order_type.in_(["stop_tp", "stop_sl"]),
+                                FuturesOrder.status == "pending",
+                            )
+                        ).scalars().all()
+                        _retired = False
+                        for _sr in stale_stop_rows:
+                            if ((_sr.symbol or "").upper(), (_sr.side or "").lower()) in _stale_stop_keys:
+                                _sr.status = "cancelled"
+                                _sr.cancelled_at = datetime.utcnow()
+                                _retired = True
+                        if _retired:
+                            db.commit()
+                    except Exception as _sk_err:
+                        db.rollback()
+                        log.warning("[%s] Could not retire stale live stop rows: %s",
+                                    user_id, _sk_err)
         except Exception as e:
             log.warning("[%s] KuCoin position reconcile failed: %s", user_id, e)
+
+    # ── Paper: retire orphaned stop rows whose position is gone ──────────
+    # Paper TP/SL is recorded as pending "stop_tp"/"stop_sl" FuturesOrder
+    # rows so it shows under Advanced Orders. When the position closes
+    # (manual close or an auto TP/SL hit via the watchdog), those rows would
+    # linger forever and clutter the tab. Retire any pending paper stop that
+    # no longer has a matching OPEN paper position (by symbol + close-side).
+    if mode == "paper":
+        try:
+            from backend.services.kucoin_futures_client import normalize_futures_symbol as _nfs_cl
+            open_keys: set[tuple[str, str]] = set()
+            for _pp in merged:
+                if (_pp.get("mode") or "").lower() != "paper":
+                    continue
+                try:
+                    _s = _nfs_cl(_pp["pair"].replace("/", "").replace("USDT", "USDTM")).upper()
+                except Exception:
+                    continue
+                _cs = "sell" if (_pp.get("side") or _pp.get("direction") or "long") == "long" else "buy"
+                open_keys.add((_s, _cs))
+            paper_stops = db.execute(
+                select(FuturesOrder).where(
+                    FuturesOrder.user_id == user_id,
+                    FuturesOrder.mode == "paper",
+                    FuturesOrder.order_type.in_(["stop_tp", "stop_sl"]),
+                    FuturesOrder.status == "pending",
+                )
+            ).scalars().all()
+            _dirty = False
+            for _so in paper_stops:
+                if ((_so.symbol or "").upper(), (_so.side or "").lower()) not in open_keys:
+                    _so.status = "cancelled"
+                    _so.cancelled_at = datetime.utcnow()
+                    _dirty = True
+            if _dirty:
+                db.commit()
+        except Exception as _cl_err:
+            db.rollback()
+            log.warning("[%s] paper stop cleanup failed: %s", user_id, _cl_err)
+
+    # ── Overlay TP/SL onto position rows from recorded stop orders ──────
+    # A position's TP/SL on KuCoin lives as separate reduceOnly STOP orders
+    # ("Advanced Orders"), NOT as a field on the position itself — so a TP/SL
+    # the user set showed up only under Advanced Orders, never on the
+    # position ROW (the exact bug reported). Here we project the active
+    # recorded stops back onto each row by (symbol, close-side) so the
+    # Positions tab shows the real TP/SL. Works for live (KuCoin-only rows
+    # that previously hard-coded None) AND paper. KuCoin is the ultimate
+    # source of truth for live; the frontend additionally projects
+    # KuCoin-UI-placed stops it sees in the Open Orders list.
+    try:
+        from backend.services.kucoin_futures_client import normalize_futures_symbol as _nfs
+        stop_rows = db.execute(
+            select(FuturesOrder).where(
+                FuturesOrder.user_id == user_id,
+                FuturesOrder.order_type.in_(["stop_tp", "stop_sl"]),
+                FuturesOrder.status == "pending",
+            )
+        ).scalars().all()
+        if stop_rows:
+            # Index: (symbol_upper, close_side, "tp"|"sl") -> stop price
+            _stop_idx: dict[tuple[str, str, str], float] = {}
+            for _s in stop_rows:
+                _kind = "tp" if _s.order_type == "stop_tp" else "sl"
+                _price = _s.stop_price
+                if _price is None:
+                    _price = _s.tp_price if _kind == "tp" else _s.sl_price
+                if _price is None:
+                    continue
+                _stop_idx[((_s.symbol or "").upper(), (_s.side or "").lower(), _kind)] = float(_price)
+            for _row in merged:
+                try:
+                    _sym = _nfs(_row["pair"].replace("/", "").replace("USDT", "USDTM")).upper()
+                except Exception:
+                    continue
+                _cside = "sell" if (_row.get("side") or _row.get("direction") or "long") == "long" else "buy"
+                _tp = _stop_idx.get((_sym, _cside, "tp"))
+                _sl = _stop_idx.get((_sym, _cside, "sl"))
+                if _tp is not None:
+                    _row["tp_price"] = _tp
+                if _sl is not None:
+                    _row["stoploss_price"] = _sl
+    except Exception as _ov_err:
+        log.warning("[%s] TP/SL overlay failed: %s", user_id, _ov_err)
 
     return {"trades": merged}
 
@@ -3906,8 +4030,18 @@ def get_futures_orders(
         query = query.where(FuturesOrder.mode == mode)
     query = query.order_by(desc(FuturesOrder.created_at)).limit(100)
 
-    db_orders = [
-        {
+    db_orders = []
+    for o in db.execute(query).scalars().all():
+        is_stop = o.order_type in ("stop_tp", "stop_sl")
+        # LIVE advanced orders (TP/SL stops) come from KuCoin's stopOrders
+        # LIST above (`stop_orders`) — KuCoin is the source of truth — so
+        # skip the DB mirror to avoid double-listing the same stop. PAPER
+        # has no exchange, so the DB rows ARE the source: render them as
+        # `kind="stop"` so the frontend shows them under Advanced Orders and
+        # projects them onto the position's TP/SL column, exactly like live.
+        if is_stop and o.mode != "paper":
+            continue
+        row = {
             "order_id": o.client_oid or str(o.id),
             "db_id": o.id,
             "symbol": o.symbol,
@@ -3926,8 +4060,19 @@ def get_futures_orders(
             "sl_price": o.sl_price,
             "created_at": str(o.created_at),
         }
-        for o in db.execute(query).scalars().all()
-    ]
+        if is_stop:
+            is_tp = o.order_type == "stop_tp"
+            # Trigger side: long TP / short SL → up; long SL / short TP → down.
+            trig_up = (o.side == "sell" and is_tp) or (o.side == "buy" and not is_tp)
+            row.update({
+                "kind":            "stop",          # frontend Advanced-Orders marker
+                "tp_or_sl":        "tp" if is_tp else "sl",
+                "stop":            "up" if trig_up else "down",
+                "stop_price_type": "TP",            # Last Trade Price (parity w/ live)
+                "reduce_only":     True,
+                "close_order":     True,
+            })
+        db_orders.append(row)
 
     # Always return DB orders — the previous logic returned `engine_orders`
     # for pending status, gated by `eng._mode == mode`. That was buggy:
@@ -5129,7 +5274,13 @@ def set_position_tp_sl(
                                 size=kc_contracts,
                                 stop_price=float(price),
                                 leverage=lev,
-                                margin_mode=margin_mode,
+                                # DB CheckConstraint requires lowercase
+                                # ('cross','isolated'); kc_margin is .upper()'d
+                                # for the KuCoin API body, so normalise here or
+                                # the insert silently rolls back — which would
+                                # leave the /open overlay with no stop row and
+                                # break the TP/SL-on-row display.
+                                margin_mode=(margin_mode or "isolated").lower(),
                                 mode="live",
                                 status="pending",
                                 tp_price=float(price) if is_tp else None,
@@ -5157,10 +5308,29 @@ def set_position_tp_sl(
             # the new stop from being placed.
             from backend.services.kucoin_futures_client import _sign_request as _sign_cancel
             from backend.services._kucoin_proxy import urlopen as _cancel_urlopen
-            import urllib.request as _ureq, json as _cjson
+            import urllib.request as _ureq, urllib.error as _uerr, json as _cjson
             from urllib.parse import urlencode as _cancel_urlencode
 
-            def _cancel_existing_stop(label: str) -> None:
+            def _cancel_existing_stop(label: str) -> bool:
+                """Cancel the recorded pending stop(s) for this leg BEFORE
+                placing the replacement, so an edit UPDATES the TP/SL instead
+                of stacking a second Advanced Order.
+
+                Returns True when it's safe to place the replacement (every
+                prior stop was cancelled OR is already gone from KuCoin), and
+                False when a prior stop is confirmed STILL ACTIVE on KuCoin —
+                in which case the caller must NOT place a duplicate.
+
+                The previous version marked the DB row 'cancelled'
+                unconditionally and tried only ONE cancel endpoint. When that
+                endpoint failed, the stop survived on KuCoin while the DB
+                thought it was gone — so the next edit couldn't find it to
+                cancel and every edit stacked another live stop (the exact
+                "different Advanced orders are creating" bug). We now try BOTH
+                documented Lead Trading cancel routes (by orderId AND by
+                clientOid, query-param form) and only flip the DB row once
+                KuCoin confirms the cancel (or reports the order already gone).
+                """
                 order_type = f"stop_{label}"   # "stop_tp" | "stop_sl"
                 try:
                     # Filter by close_side too: in hedge mode a pair holds a
@@ -5180,13 +5350,21 @@ def set_position_tp_sl(
                 except Exception as q_err:
                     log.warning("[%s] Could not query stale %s stops: %s",
                                 user_id, order_type, q_err)
-                    return
-                for row in rows:
-                    ex_id = row.exchange_order_id
+                    return True   # nothing we can see to cancel — allow placing
+
+                def _cancel_one(ex_id, c_oid, sym) -> tuple[bool, bool]:
+                    """Cancel ONE live stop. Returns (cancelled_ok, already_gone)."""
+                    routes: list[tuple[str, dict]] = []
                     if ex_id:
+                        routes.append(("/api/v1/copy-trade/futures/orders",
+                                       {"orderId": ex_id}))
+                    if c_oid and sym:
+                        routes.append(("/api/v1/copy-trade/futures/orders/client-order",
+                                       {"symbol": sym, "clientOid": c_oid}))
+                    for endpoint, q in routes:
+                        ep = endpoint + "?" + _cancel_urlencode(q)
                         try:
                             ts = str(int(_t.time() * 1000))
-                            ep = "/api/v1/copy-trade/futures/orders?" + _cancel_urlencode({"orderId": ex_id})
                             headers = _sign_cancel(
                                 eng._api_sec, eng._api_pass, eng._api_key,
                                 ts, "DELETE", ep,
@@ -5195,26 +5373,72 @@ def set_position_tp_sl(
                                 f"{KUCOIN_FUTURES_BASE}{ep}", headers=headers, method="DELETE")
                             with _cancel_urlopen(req_obj, timeout=8) as r:
                                 c_resp = _cjson.loads(r.read().decode())
-                            log.info("[%s] Cancelled stale %s stop %s before replace: code=%s",
-                                     user_id, order_type, ex_id, str(c_resp.get("code")))
+                            if str(c_resp.get("code")) == "200000":
+                                return True, False
+                            msg = str(c_resp.get("msg") or "").lower()
+                            if any(s in msg for s in ("not exist", "does not exist",
+                                                      "not found", "already")):
+                                return False, True   # already off the book
+                        except _uerr.HTTPError as he:
+                            if he.code == 404:
+                                return False, True
+                            try:
+                                body = _cjson.loads(he.read().decode() or "{}")
+                                msg = str(body.get("msg") or "").lower()
+                                if any(s in msg for s in ("not exist", "does not exist",
+                                                          "not found", "already")):
+                                    return False, True
+                            except Exception:
+                                pass
                         except Exception as ce:
-                            log.warning("[%s] Could not cancel stale %s stop %s "
-                                        "(placing new stop anyway): %s",
-                                        user_id, order_type, ex_id, ce)
-                    row.status = "cancelled"
-                    row.cancelled_at = datetime.utcnow()
+                            log.warning("[%s] cancel %s for stop %s errored: %s",
+                                        user_id, endpoint, ex_id, ce)
+                    return False, False
+
+                safe = True
+                for row in rows:
+                    if row.exchange_order_id:
+                        cancelled, gone = _cancel_one(
+                            row.exchange_order_id, row.client_oid, row.symbol or kc_symbol)
+                        if cancelled or gone:
+                            row.status = "cancelled"
+                            row.cancelled_at = datetime.utcnow()
+                            log.info("[%s] Replaced stale %s stop %s (cancelled=%s gone=%s)",
+                                     user_id, order_type, row.exchange_order_id,
+                                     cancelled, gone)
+                        else:
+                            safe = False
+                            log.warning("[%s] Stale %s stop %s still ACTIVE on KuCoin — "
+                                        "not stacking a duplicate", user_id, order_type,
+                                        row.exchange_order_id)
+                    else:
+                        # No exchange id recorded (shouldn't happen for live) —
+                        # mark cancelled so it stops shadowing future edits.
+                        row.status = "cancelled"
+                        row.cancelled_at = datetime.utcnow()
                 if rows:
                     try:
                         db.commit()
                     except Exception:
                         db.rollback()
+                return safe
 
             if tp_price is not None:
-                _cancel_existing_stop("tp")
-                _place_stop("tp", float(tp_price), True)
+                if _cancel_existing_stop("tp"):
+                    _place_stop("tp", float(tp_price), True)
+                else:
+                    kc_results["tp"] = {"error": (
+                        "The existing take-profit stop is still active on KuCoin "
+                        "and could not be cancelled, so a new one was not placed "
+                        "to avoid duplicates. Please try again in a moment.")}
             if sl_price is not None:
-                _cancel_existing_stop("sl")
-                _place_stop("sl", float(sl_price), False)
+                if _cancel_existing_stop("sl"):
+                    _place_stop("sl", float(sl_price), False)
+                else:
+                    kc_results["sl"] = {"error": (
+                        "The existing stop-loss is still active on KuCoin and "
+                        "could not be cancelled, so a new one was not placed to "
+                        "avoid duplicates. Please try again in a moment.")}
 
             # If BOTH sides failed, surface a clear error to the frontend.
             # If at least one succeeded, the partial success is reported in
@@ -5227,12 +5451,90 @@ def set_position_tp_sl(
                 return {"error": f"KuCoin rejected TP/SL — TP: {tp_msg or 'n/a'} | SL: {sl_msg or 'n/a'}",
                         "kucoin": kc_results}
 
+    # ── Step 3 (paper): record DB-only TP/SL stop orders ────────────────
+    # Paper has no exchange, but we still create "stop_tp"/"stop_sl"
+    # FuturesOrder rows so the Advanced Orders tab AND the position's TP/SL
+    # column behave EXACTLY like live — letting the user dry-run the whole
+    # basic/advanced-order flow risk-free. Editing cancels the prior leg
+    # stop first, so an update REPLACES the TP/SL instead of stacking a
+    # duplicate (mirrors the live fix above). The manual-position watchdog
+    # already auto-closes the paper position when pos.tp/pos.sl is hit; the
+    # /open paper-cleanup then retires these rows so the tab stays honest.
+    elif kc_mode == "paper" and kc_direction is not None:
+        paper_close_side = "sell" if kc_direction == "long" else "buy"
+        paper_lev        = max(1, int(kc_leverage or 1))
+        paper_margin     = (kc_margin or "ISOLATED")
+
+        def _cancel_paper_stop(label: str) -> None:
+            order_type = f"stop_{label}"
+            try:
+                rows = db.execute(
+                    select(FuturesOrder).where(
+                        FuturesOrder.user_id    == user_id,
+                        FuturesOrder.symbol     == kc_symbol,
+                        FuturesOrder.order_type == order_type,
+                        FuturesOrder.side       == paper_close_side,
+                        FuturesOrder.mode       == "paper",
+                        FuturesOrder.status     == "pending",
+                    )
+                ).scalars().all()
+            except Exception:
+                return
+            for row in rows:
+                row.status = "cancelled"
+                row.cancelled_at = datetime.utcnow()
+            if rows:
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+
+        def _record_paper_stop(label: str, price: float, is_tp: bool) -> None:
+            try:
+                db.add(FuturesOrder(
+                    user_id=user_id,
+                    client_oid=f"paper-{label}-{int(_t.time() * 1000)}",
+                    exchange_order_id=None,
+                    symbol=kc_symbol,
+                    side=paper_close_side,
+                    order_type=f"stop_{label}",   # "stop_tp" / "stop_sl"
+                    size=kc_contracts,
+                    stop_price=float(price),
+                    leverage=paper_lev,
+                    # Lowercase to satisfy the margin_mode CheckConstraint
+                    # ('cross','isolated'); paper_margin is uppercase.
+                    margin_mode=(paper_margin or "isolated").lower(),
+                    mode="paper",
+                    status="pending",
+                    tp_price=float(price) if is_tp else None,
+                    sl_price=float(price) if not is_tp else None,
+                    created_at=datetime.utcnow(),
+                ))
+                db.commit()
+            except Exception as e:
+                log.warning("[%s] Failed to record paper %s stop: %s", user_id, label, e)
+                db.rollback()
+
+        if tp_price is not None:
+            _cancel_paper_stop("tp")
+            _record_paper_stop("tp", float(tp_price), True)
+            kc_results["tp"] = {"code": "paper", "stop_price": float(tp_price)}
+        if sl_price is not None:
+            _cancel_paper_stop("sl")
+            _record_paper_stop("sl", float(sl_price), False)
+            kc_results["sl"] = {"code": "paper", "stop_price": float(sl_price)}
+
     # ── Step 4: persist on the DB Trade row (paper reconciliation + UI) ──
+    # Direction-filtered so a hedge user's long/short legs don't clobber
+    # each other's stop-loss on the most-recent row for the pair.
+    trade_q = select(Trade).where(
+        Trade.user_id == user_id, Trade.pair == pair,
+        Trade.market_type == "futures", Trade.status == "open",
+    )
+    if direction_req:
+        trade_q = trade_q.where(Trade.side == direction_req)
     trade = db.execute(
-        select(Trade).where(
-            Trade.user_id == user_id, Trade.pair == pair,
-            Trade.market_type == "futures", Trade.status == "open",
-        ).order_by(desc(Trade.entry_time)).limit(1)
+        trade_q.order_by(desc(Trade.entry_time)).limit(1)
     ).scalar_one_or_none()
     if trade:
         if sl_price is not None:

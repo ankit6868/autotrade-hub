@@ -284,15 +284,30 @@ export default function PositionsPanel({
   // KuCoin's "Take Profit & Stop Loss" column. This is purely client-side
   // — no backend changes needed and no risk to the working /open endpoint.
   const positionsWithTpSl = positions.map(p => {
+    const isLong = (p.side || p.direction) === 'long';
     const stops = openOrders.filter(o =>
-      o?.kind === 'stop' && _displayPair(o.symbol) === p.pair
+      o?.kind === 'stop' && _displayPair(o.symbol) === p.pair &&
+      // Direction-aware: a stop's close side maps to the position side —
+      // 'sell' closes a long, 'buy' closes a short. Without this, a hedge
+      // user's long + short on the same pair would cross-show each other's
+      // TP/SL. Stops with no side fall through (legacy rows).
+      (!o.side || (o.side === 'sell') === isLong)
     );
     const tpStop = stops.find(s => s.tp_or_sl === 'tp');
     const slStop = stops.find(s => s.tp_or_sl === 'sl');
+    const tpFromStop = tpStop?.stop_price ? Number(tpStop.stop_price) : null;
+    const slFromStop = slStop?.stop_price ? Number(slStop.stop_price) : null;
+    // Use the stop value whenever the row has no positive TP/SL of its own.
+    // The backend now overlays the real TP/SL onto the row from recorded
+    // stops; this is the secondary projection for KuCoin-UI-placed stops.
+    // NOTE: `??` is wrong here — a 0 engine-default is not nullish, so it
+    // would shadow a real stop and the cell would render "—".
+    const hasTp = Number(p.tp_price) > 0;
+    const hasSl = Number(p.stoploss_price) > 0;
     return {
       ...p,
-      tp_price:       p.tp_price       ?? (tpStop?.stop_price ? Number(tpStop.stop_price) : null),
-      stoploss_price: p.stoploss_price ?? (slStop?.stop_price ? Number(slStop.stop_price) : null),
+      tp_price:       hasTp ? p.tp_price       : tpFromStop,
+      stoploss_price: hasSl ? p.stoploss_price : slFromStop,
     };
   });
 
