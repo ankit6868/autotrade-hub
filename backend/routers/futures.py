@@ -3087,50 +3087,66 @@ def cancel_all_futures_orders(
     failed: list[dict] = []
     kucoin_attempted = 0
 
+    # Load live credentials once if the batch contains any LIVE orders — the
+    # per-order cancel needs eng._api_key populated. Previously this relied on
+    # eng._api_key already being set; when it wasn't (no live bot started this
+    # session) the live DELETE was silently skipped yet the row was still
+    # marked cancelled, leaving a real order alive on KuCoin but "cancelled"
+    # in the UI.
+    has_live = any(o.mode == "live" and o.exchange_order_id for o in orders)
+    live_creds_ok = True
+    if has_live:
+        live_creds_ok, _creds_err = _ensure_live_credentials(eng, user_id, db)
+
     for o in orders:
-        # 1. Mark DB row cancelled
+        # For LIVE orders, attempt the KuCoin cancel FIRST and finalize the DB
+        # row only when KuCoin confirms (code 200000). Marking the row
+        # cancelled before/without confirmation showed the user "cancelled"
+        # while the order was still live on KuCoin — the same bug the
+        # single-order cancel route fixes. Failed cancels stay 'pending' so
+        # the user can retry and KuCoin stays the source of truth.
+        if o.mode == "live" and o.exchange_order_id:
+            kucoin_attempted += 1
+            if not live_creds_ok or not eng._api_key:
+                failed.append({
+                    "order_id": o.id, "exchange_id": o.exchange_order_id,
+                    "error": "Live credentials unavailable — cannot cancel on KuCoin",
+                })
+                continue
+            try:
+                import urllib.request, json as _json
+                from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
+                from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+                from urllib.parse import urlencode
+                ts = str(int(_time.time() * 1000))
+                qs = urlencode({"orderId": o.exchange_order_id})
+                endpoint = f"/api/v1/copy-trade/futures/orders?{qs}"
+                headers = _sign_request(
+                    eng._api_sec, eng._api_pass, eng._api_key,
+                    ts, "DELETE", endpoint,
+                )
+                url = f"{_base}{endpoint}"
+                req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
+                with _proxy_urlopen(req_obj, timeout=8) as resp:
+                    cancel_resp = _json.loads(resp.read().decode())
+                code = str(cancel_resp.get("code", ""))
+                if code != "200000":
+                    failed.append({
+                        "order_id": o.id, "exchange_id": o.exchange_order_id,
+                        "error": cancel_resp.get("msg") or f"KuCoin code {code}",
+                    })
+                    continue   # leave row pending — don't count as cancelled
+            except Exception as e:
+                failed.append({"order_id": o.id, "exchange_id": o.exchange_order_id, "error": str(e)})
+                continue
+
+        # Paper order, or live cancel confirmed → finalize the row + engine.
         o.status = "cancelled"
         o.cancelled_at = now
-
-        # 2. Drop from in-memory engine (paper or live's local pending list)
         try:
             eng.cancel_pending_order(o.client_oid or f"db-{o.id}")
         except Exception:
             pass
-
-        # 3. For LIVE orders that hit KuCoin, attempt the exchange-side cancel
-        # using the same DELETE /api/v1/copy-trade/futures/orders?orderId=X
-        # path the single-order cancel uses (proven working in commit 9e7eb76).
-        if o.mode == "live" and o.exchange_order_id:
-            kucoin_attempted += 1
-            try:
-                from backend.utils.encryption import decrypt
-                cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
-                if cfg and eng._api_key:
-                    import urllib.request, json as _json
-                    from backend.services.kucoin_futures_client import _sign_request, KUCOIN_FUTURES_BASE as _base
-                    from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
-                    from urllib.parse import urlencode
-                    ts = str(int(_time.time() * 1000))
-                    qs = urlencode({"orderId": o.exchange_order_id})
-                    endpoint = f"/api/v1/copy-trade/futures/orders?{qs}"
-                    headers = _sign_request(
-                        eng._api_sec, eng._api_pass, eng._api_key,
-                        ts, "DELETE", endpoint,
-                    )
-                    url = f"{_base}{endpoint}"
-                    req_obj = urllib.request.Request(url, headers=headers, method="DELETE")
-                    with _proxy_urlopen(req_obj, timeout=8) as resp:
-                        cancel_resp = _json.loads(resp.read().decode())
-                    code = str(cancel_resp.get("code", ""))
-                    if code != "200000":
-                        failed.append({
-                            "order_id": o.id, "exchange_id": o.exchange_order_id,
-                            "error": cancel_resp.get("msg") or f"KuCoin code {code}",
-                        })
-            except Exception as e:
-                failed.append({"order_id": o.id, "exchange_id": o.exchange_order_id, "error": str(e)})
-
         cancelled += 1
 
     db.commit()
