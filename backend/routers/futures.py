@@ -1307,8 +1307,16 @@ def futures_open_positions(
                 base_url=KUCOIN_FUTURES_BASE,
             )
             if str(kc_resp.get("code")) == "200000":
-                # Map KuCoin futures symbol → app pair: XBTUSDTM → BTC/USDT
-                pairs_already_in_merged = {t["pair"] for t in merged}
+                # Map KuCoin futures symbol → app pair: XBTUSDTM → BTC/USDT.
+                # Key by (pair, direction) — NOT pair alone. In hedge mode a
+                # pair can hold a long AND a short; deduping by pair would let
+                # an app-tracked long suppress a real-money KuCoin short on the
+                # same pair (a hidden live position). (pair, direction) matches
+                # the granularity of kc_open_keys below.
+                keys_already_in_merged = {
+                    (t["pair"], (t.get("side") or t.get("direction") or "long"))
+                    for t in merged
+                }
                 # Authoritative set of (pair, direction) actually OPEN on
                 # KuCoin right now. Used both to skip re-adding rows we
                 # already show AND to drop stale LIVE rows below (bugs 1/3).
@@ -1328,7 +1336,8 @@ def futures_open_positions(
                     # Reverse normalize: XBTUSDTM → BTCUSDTM → BTC/USDT
                     base = kc_sym.replace("USDTM", "").replace("XBT", "BTC")
                     pair = f"{base}/USDT"
-                    if pair in pairs_already_in_merged:
+                    direction = "long" if qty > 0 else "short"
+                    if (pair, direction) in keys_already_in_merged:
                         continue   # already tracking via engine/DB
                     # Skip positions we JUST closed via the app — KuCoin's
                     # /positions is eventually consistent and may still
@@ -1336,10 +1345,8 @@ def futures_open_positions(
                     # this guard, the user clicks Close, the row vanishes
                     # via optimistic UI, then reappears on the next /open
                     # refresh because KuCoin hadn't propagated yet.
-                    _kc_dir = "long" if qty > 0 else "short"
-                    if _was_recently_closed(user_id, pair, _kc_dir):
+                    if _was_recently_closed(user_id, pair, direction):
                         continue
-                    direction = "long" if qty > 0 else "short"
                     entry     = float(kp.get("avgEntryPrice", 0))
                     cur       = float(kp.get("markPrice", 0)) or entry
                     margin    = float(kp.get("posMargin", 0) or kp.get("maintMargin", 0))
@@ -2111,7 +2118,14 @@ def futures_force_close(
                 continue
             ep = exit_price or pos.entry
             pos.close(ep, "force_closed", now)
-            eng.balance += pos.pnl_abs
+            # Credit the wallet only for paper positions on the paper engine.
+            # The shared manual engine is paper-mode; a LIVE force-close must
+            # not pollute the paper wallet (KuCoin owns live equity). Final leg
+            # only — any prior partial already credited balance and is included
+            # in pos.pnl_abs, so adding it whole would double-count.
+            pos_mode = getattr(pos, "_mode", None) or eng._mode
+            if pos_mode == eng._mode:
+                eng.balance += pos.pnl_abs - getattr(pos, "partial_pnl_abs", 0.0)
             eng.closed_trades.append(pos)
             closed_positions.append(pos)
 
@@ -3444,11 +3458,16 @@ def partial_close_futures_position(
         "leg_fraction_of_original": round(leg_remaining_fraction, 4),
         "pnl_abs":    round(float(leg_pnl), 4),
     })
-    # Credit the wallet ONLY for paper. Live: KuCoin's account-overview
-    # is the source of truth and the engine.balance for the main user
-    # engine is just the paper wallet (don't pollute it with live P&L).
-    pos_mode = getattr(pos, "_mode", getattr(eng, "_mode", "paper"))
-    if pos_mode == "paper":
+    # Credit the wallet only when the position's mode matches this engine's
+    # wallet mode. The shared manual engine is paper-mode, so a LIVE manual
+    # partial must NOT pollute the paper wallet (KuCoin owns live equity).
+    # A live BOT engine (_mode="live") DOES track its own live P&L locally,
+    # matching the engine's _tick close paths — using `== eng._mode` (rather
+    # than a literal "paper") keeps the partial credit consistent with the
+    # final-close subtraction of partial_pnl_abs, so the leg is counted once.
+    eng_mode = getattr(eng, "_mode", "paper")
+    pos_mode = getattr(pos, "_mode", eng_mode)
+    if pos_mode == eng_mode:
         eng.balance += leg_pnl
 
     # ── Persist partial close as its own Trade row so it shows in

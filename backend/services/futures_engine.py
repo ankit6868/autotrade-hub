@@ -1034,7 +1034,11 @@ class FuturesEngine(NativeTradingEngine):
                     if isinstance(pos, FuturesPosition):
                         if pos.check_liquidation(live_price):
                             pos.close(live_price, "liquidated", now)
-                            self.balance += pos.pnl_abs
+                            # Credit only the FINAL leg: any partial booked at
+                            # TP1 already credited balance, and pos.pnl_abs
+                            # includes partial_pnl_abs — adding it whole would
+                            # double-count the partial leg.
+                            self.balance += pos.pnl_abs - getattr(pos, "partial_pnl_abs", 0.0)
                             self.closed_trades.append(pos)
                             del self.positions[trade_key]
                             # Reset to None (Phase 2 edge detection stores direction).
@@ -1128,7 +1132,9 @@ class FuturesEngine(NativeTradingEngine):
                     if exit_info:
                         exit_price, reason = exit_info
                         pos.close(exit_price, reason, now)
-                        self.balance += pos.pnl_abs
+                        # Final leg only — partial_pnl_abs was already credited
+                        # at TP1 and is included in pos.pnl_abs.
+                        self.balance += pos.pnl_abs - getattr(pos, "partial_pnl_abs", 0.0)
                         self.closed_trades.append(pos)
                         del self.positions[trade_key]
                         # Count stop-losses for the daily-stops breaker.
@@ -1484,7 +1490,8 @@ class FuturesEngine(NativeTradingEngine):
                         continue
                     exit_price = live_price
                     old_pos.close(exit_price, "stop_and_reverse", now)
-                    self.balance += old_pos.pnl_abs
+                    # Final leg only (partial_pnl_abs already credited at TP1).
+                    self.balance += old_pos.pnl_abs - getattr(old_pos, "partial_pnl_abs", 0.0)
                     self.closed_trades.append(old_pos)
                     del self.positions[trade_key]
                     self.last_action = (
@@ -1591,7 +1598,12 @@ class FuturesEngine(NativeTradingEngine):
                     leverage=self._leverage, market_type="futures",
                 )
                 self.positions[trade_key] = pos
-                self.balance -= stake
+                # Realized-P&L wallet model (matches the manual paper path):
+                # margin is NOT deducted on open. Closes credit realized P&L
+                # only, so deducting here would permanently drain the wallet
+                # by `stake` every round-trip even on winning trades. The
+                # old `balance -= stake` was spot-era code where `size` was the
+                # full (un-leveraged) cost; it was wrong for leveraged margin.
                 # Track the DIRECTION (not just bool) so edge detection on
                 # the next signal scan knows whether this is a same-side
                 # repeat or a genuine flip.
@@ -1646,7 +1658,9 @@ class FuturesEngine(NativeTradingEngine):
                         # delete the DB row (best-effort), reset signal flag
                         # so the next bar can re-attempt cleanly.
                         self.positions.pop(trade_key, None)
-                        self.balance += stake
+                        # No balance refund — entry no longer deducts margin on
+                        # open (realized-P&L wallet model), so there is nothing
+                        # to give back here.
                         self._day_trades = max(0, self._day_trades - 1)
                         seen_signal[pair] = None
                         try:
@@ -1906,7 +1920,8 @@ class FuturesEngine(NativeTradingEngine):
                     # 1. Liquidation
                     if isinstance(pos, FuturesPosition) and pos.check_liquidation(live_price):
                         pos.close(live_price, "liquidated", now)
-                        self.balance += pos.pnl_abs
+                        # Final leg only (partial_pnl_abs already credited at TP1).
+                        self.balance += pos.pnl_abs - getattr(pos, "partial_pnl_abs", 0.0)
                         self.closed_trades.append(pos)
                         del self.positions[trade_key]
                         self.last_action = (
@@ -1932,7 +1947,8 @@ class FuturesEngine(NativeTradingEngine):
                     if exit_info:
                         exit_price, reason = exit_info
                         pos.close(exit_price, reason, now)
-                        self.balance += pos.pnl_abs
+                        # Final leg only (partial_pnl_abs already credited at TP1).
+                        self.balance += pos.pnl_abs - getattr(pos, "partial_pnl_abs", 0.0)
                         self.closed_trades.append(pos)
                         del self.positions[trade_key]
                         self.last_action = (
@@ -2202,7 +2218,14 @@ class FuturesEngine(NativeTradingEngine):
                     # Re-acquire the lock only for the quick shared-state
                     # mutation (balance + closed list).
                     with self._lock:
-                        self.balance += pos.pnl_abs
+                        # Credit the wallet only when the position's mode
+                        # matches this engine's wallet mode. The shared manual
+                        # engine is paper-mode and must NOT absorb a LIVE
+                        # manual position's P&L into the paper wallet (KuCoin
+                        # is the source of truth for live equity). Final leg
+                        # only — partial_pnl_abs was already credited at TP1.
+                        if pos_mode == self._mode:
+                            self.balance += pos.pnl_abs - getattr(pos, "partial_pnl_abs", 0.0)
                         self.closed_trades.append(pos)
                     _persist_closed_trade(
                         self.user_id, pos, pos_mode,
@@ -2717,13 +2740,9 @@ class FuturesEngine(NativeTradingEngine):
                 )
                 trade_key = f"{pair}#filled#{oid}"
                 self.positions[trade_key] = pos
-                # Deduct USDT margin from balance, not raw size (which may be BTC)
-                usdt_cost = getattr(order, "cost_usdt", 0) or 0
-                if usdt_cost > 0:
-                    margin = usdt_cost  # cost_usdt is already the USDT stake
-                else:
-                    margin = order.size  # legacy: size is in USDT for paper
-                self.balance -= margin
+                # Realized-P&L wallet model: do NOT deduct margin on fill.
+                # The close path credits realized P&L only; deducting here
+                # would drain the wallet by the full margin each round-trip.
                 self.last_action = f"FILLED order {oid} → {direction} {pair} @ {fill_price:.4f} {lev}x"
                 log.info("[%s] %s", self.user_id, self.last_action)
 
