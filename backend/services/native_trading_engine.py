@@ -242,6 +242,45 @@ def _kucoin_get_signed(path: str, api_key: str, api_secret: str,
     return result
 
 
+def _kucoin_delete_signed(path: str, api_key: str, api_secret: str,
+                          passphrase: str, params: dict | None = None,
+                          base_url: str = KUCOIN_BASE) -> dict:
+    """Authenticated DELETE to KuCoin private REST API.
+
+    KuCoin's Lead-Trading cancel takes orderId as a QUERY param
+    (DELETE /api/v1/copy-trade/futures/orders?orderId=X), so the query
+    string is part of the signed payload — `str_to_sign` must include it
+    exactly as it appears on the wire."""
+    import base64, hashlib, hmac as _hmac
+    from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
+    qs = ("?" + urllib.parse.urlencode(params)) if params else ""
+    ts = str(int(time.time() * 1000))
+    str_to_sign = f"{ts}DELETE{path}{qs}"
+    sig = base64.b64encode(_hmac.new(
+        api_secret.encode(), str_to_sign.encode(), hashlib.sha256
+    ).digest()).decode()
+    pp_sig = base64.b64encode(_hmac.new(
+        api_secret.encode(), passphrase.encode(), hashlib.sha256
+    ).digest()).decode()
+    headers = {
+        "KC-API-KEY":         api_key,
+        "KC-API-SIGN":        sig,
+        "KC-API-TIMESTAMP":   ts,
+        "KC-API-PASSPHRASE":  pp_sig,
+        "KC-API-KEY-VERSION": "2",
+        "Content-Type":       "application/json",
+        "User-Agent":         "AutoTradeHub/2.0",
+    }
+    url = f"{base_url}{path}{qs}"
+    req = urllib.request.Request(url, headers=headers, method="DELETE")
+    _t0 = time.perf_counter()
+    with _proxy_urlopen(req, timeout=8) as resp:
+        result = json.loads(resp.read().decode())
+    _ms = (time.perf_counter() - _t0) * 1000
+    log.info("KC DEL  %s → code=%s  %.0fms", path, result.get("code"), _ms)
+    return result
+
+
 def _fetch_candles(symbol: str, ktype: str, limit: int = CANDLE_HISTORY) -> list[dict]:
     """Fetch the last `limit` closed candles from KuCoin."""
     now = int(time.time())

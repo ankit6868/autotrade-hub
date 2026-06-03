@@ -171,7 +171,7 @@ class FuturesOrder(Base):
 
     __table_args__ = (
         CheckConstraint("side IN ('buy', 'sell')"),
-        CheckConstraint("order_type IN ('limit', 'market', 'stop', 'stop_limit', 'trailing_stop', 'twap')"),
+        CheckConstraint("order_type IN ('limit', 'market', 'stop', 'stop_limit', 'trailing_stop', 'twap', 'stop_tp', 'stop_sl')"),
         CheckConstraint("status IN ('pending', 'active', 'filled', 'partially_filled', 'cancelled', 'triggered')"),
         CheckConstraint("margin_mode IN ('cross', 'isolated')"),
         CheckConstraint("mode IN ('paper', 'live')"),

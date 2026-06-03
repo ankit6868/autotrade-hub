@@ -2399,7 +2399,8 @@ class FuturesEngine(NativeTradingEngine):
                     "reduceOnly":     True,
                     "closeOrder":     True,   # close entire position on trigger
                 }
-                return self._post_stop_order(body, label=f"{kind.upper()} {label}")
+                return self._post_stop_order(
+                    body, label=f"{kind.upper()} {label}", kind=kind, is_tp=is_tp)
 
             tp_ok = _leg("tp", tp, True)
             sl_ok = _leg("sl", sl, False)
@@ -2408,9 +2409,115 @@ class FuturesEngine(NativeTradingEngine):
             log.warning("[%s] TP/SL %s push failed: %s", self.user_id, label, e)
             return False
 
-    def _post_stop_order(self, body: dict, *, label: str) -> bool:
-        """Post a canonical reduce-only stop order to the Lead Trading
-        orders endpoint and verify business code 200000."""
+    def _cancel_recorded_stops(self, symbol: str, close_side: str,
+                                order_type: str) -> None:
+        """Cancel any prior pending stop we recorded for this exact leg
+        (symbol + close_side + order_type) on KuCoin, then mark the rows
+        cancelled.
+
+        WHY this exists: every place that pushes a stop — entry-time
+        (_push_live_tp_sl), the ARM/trailing rewrite, and the manual TP/SL
+        editor (/position/tp-sl) — records a FuturesOrder row with the SAME
+        order_type convention ("stop_tp"/"stop_sl") and side=close_side. So
+        any path can cancel any other path's stop. Without this, a new stop
+        was stacked on top of the old one and KuCoin held two — the stale
+        one still fired, which is exactly the "automated SL not changing"
+        bug. Filtering on close_side keeps hedge-mode legs independent."""
+        from backend.models.database import SessionLocal
+        from backend.models.trade import FuturesOrder
+        from sqlalchemy import select as _select
+        from .native_trading_engine import _kucoin_delete_signed
+        from datetime import datetime as _dt
+        try:
+            db = SessionLocal()
+            try:
+                rows = db.execute(
+                    _select(FuturesOrder).where(
+                        FuturesOrder.user_id    == self.user_id,
+                        FuturesOrder.symbol     == symbol,
+                        FuturesOrder.order_type == order_type,
+                        FuturesOrder.side       == close_side,
+                        FuturesOrder.status     == "pending",
+                    )
+                ).scalars().all()
+                for row in rows:
+                    if row.exchange_order_id:
+                        try:
+                            _kucoin_delete_signed(
+                                "/api/v1/copy-trade/futures/orders",
+                                self._api_key, self._api_sec, self._api_pass,
+                                params={"orderId": row.exchange_order_id},
+                                base_url=KUCOIN_FUTURES_BASE,
+                            )
+                        except Exception as ce:
+                            log.warning("[%s] could not cancel stale %s stop %s "
+                                        "(placing new anyway): %s", self.user_id,
+                                        order_type, row.exchange_order_id, ce)
+                    row.status = "cancelled"
+                    row.cancelled_at = _dt.utcnow()
+                if rows:
+                    db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            log.warning("[%s] stale-stop cleanup for %s failed: %s",
+                        self.user_id, order_type, e)
+
+    def _record_stop(self, body: dict, exchange_order_id: str,
+                      order_type: str, is_tp: bool) -> None:
+        """Persist a placed stop as a pending FuturesOrder so a later
+        edit/ARM-rewrite/exit can find and cancel it (see
+        _cancel_recorded_stops)."""
+        from backend.models.database import SessionLocal
+        from backend.models.trade import FuturesOrder
+        from datetime import datetime as _dt
+        try:
+            db = SessionLocal()
+            try:
+                db.add(FuturesOrder(
+                    user_id=self.user_id,
+                    client_oid=body.get("clientOid"),
+                    exchange_order_id=str(exchange_order_id),
+                    symbol=body.get("symbol"),
+                    side=body.get("side"),
+                    order_type=order_type,
+                    size=float(body.get("size") or 0),
+                    stop_price=float(body.get("stopPrice") or 0),
+                    leverage=int(body.get("leverage") or 1),
+                    margin_mode=(body.get("marginMode") or "cross").lower(),
+                    mode="live",
+                    status="pending",
+                    tp_price=float(body.get("stopPrice")) if is_tp else None,
+                    sl_price=float(body.get("stopPrice")) if not is_tp else None,
+                    created_at=_dt.utcnow(),
+                ))
+                db.commit()
+            finally:
+                db.close()
+        except Exception as e:
+            log.warning("[%s] failed to record %s stop: %s",
+                        self.user_id, order_type, e)
+
+    def _post_stop_order(self, body: dict, *, label: str,
+                          kind: str | None = None, is_tp: bool = False) -> bool:
+        """Cancel any prior recorded stop for this leg, post a fresh
+        canonical reduce-only stop to the Lead Trading orders endpoint, and
+        record the new one so future edits can cancel it. Verifies business
+        code 200000.
+
+        `kind` is "tp"/"sl" → order_type "stop_tp"/"stop_sl" (the SAME
+        convention as the manual TP/SL editor, so each path cancels the
+        other's stops). When kind is None the order is posted with no DB
+        bookkeeping (legacy/ad-hoc callers)."""
+        order_type = f"stop_{kind}" if kind else None
+        close_side = body.get("side")
+        symbol     = body.get("symbol")
+
+        # 1. Self-clean: never stack a second stop on the same leg.
+        if order_type:
+            self._cancel_recorded_stops(symbol, close_side, order_type)
+
+        # 2. Place the fresh stop.
         try:
             from .native_trading_engine import _kucoin_post_signed
             resp = _kucoin_post_signed(
@@ -2418,16 +2525,22 @@ class FuturesEngine(NativeTradingEngine):
                 self._api_key, self._api_sec, self._api_pass,
                 base_url=KUCOIN_FUTURES_BASE,
             )
-            code = str((resp or {}).get("code", ""))
-            if code == "200000":
-                log.info("[%s] stop-order %s ok @ %s", self.user_id, label, body.get("stopPrice"))
-                return True
-            log.warning("[%s] stop-order %s rejected: %s",
-                        self.user_id, label, (resp or {}).get("msg") or f"code {code}")
-            return False
         except Exception as e:
             log.warning("[%s] stop-order %s transport error: %s", self.user_id, label, e)
             return False
+        code = str((resp or {}).get("code", ""))
+        if code != "200000":
+            log.warning("[%s] stop-order %s rejected: %s",
+                        self.user_id, label, (resp or {}).get("msg") or f"code {code}")
+            return False
+        log.info("[%s] stop-order %s ok @ %s", self.user_id, label, body.get("stopPrice"))
+
+        # 3. Record it so it can be cancelled later.
+        if order_type:
+            kc_order_id = ((resp or {}).get("data") or {}).get("orderId")
+            if kc_order_id:
+                self._record_stop(body, kc_order_id, order_type, is_tp)
+        return True
 
     def _place_live_exit(self, pair: str, pos, price: float) -> tuple[bool, str]:
         """Close a futures position via KuCoin Lead Trading API. Returns
