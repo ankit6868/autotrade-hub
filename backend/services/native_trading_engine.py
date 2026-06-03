@@ -63,7 +63,7 @@ def _persist_open_trade(user_id: str, pos: "Position", mode: str,
                 liquidation_price = getattr(pos, "liquidation_price", None),
                 entry_price       = round(pos.entry, 8),
                 amount            = round(pos.size, 8),
-                stoploss_price    = round(pos.sl, 8),
+                stoploss_price    = round(pos.sl, 8) if pos.sl else None,
                 entry_time        = pos.opened_at,
                 status            = "open",
                 strategy_id       = strategy_id,
@@ -128,7 +128,7 @@ def _persist_closed_trade(user_id: str, pos: "Position", mode: str,
                     amount         = round(pos.size, 8),
                     profit_pct     = round(pos.pnl_pct, 4),
                     profit_abs     = round(pos.pnl_abs, 4),
-                    stoploss_price = round(pos.sl, 8),
+                    stoploss_price = round(pos.sl, 8) if pos.sl else None,
                     entry_time     = pos.opened_at,
                     exit_time      = pos.closed_at or datetime.now(timezone.utc),
                     exit_reason    = pos.exit_reason or "unknown",
@@ -466,16 +466,23 @@ class Position:
             return min(self.sl, self.trail_lock)
 
     def check_exit(self, high: float, low: float) -> Optional[tuple[float, str]]:
-        """Return (exit_price, reason) if this candle triggers an exit."""
+        """Return (exit_price, reason) if this candle triggers an exit.
+
+        SL/TP are OPTIONAL. A falsy (0/None) stop or target means the user
+        did not set one, so it must NEVER trigger an exit — otherwise a
+        position opened without SL/TP would phantom-close immediately at
+        price 0 (which read as low<=0 / high>=0 forever).
+        """
+        esl = self.effective_sl
         if self.direction == "long":
-            if low <= self.effective_sl:
-                return self.effective_sl, "stop_loss"
-            if high >= self.tp:
+            if esl and low <= esl:
+                return esl, "stop_loss"
+            if self.tp and high >= self.tp:
                 return self.tp, "take_profit"
         else:
-            if high >= self.effective_sl:
-                return self.effective_sl, "stop_loss"
-            if low <= self.tp:
+            if esl and high >= esl:
+                return esl, "stop_loss"
+            if self.tp and low <= self.tp:
                 return self.tp, "take_profit"
         return None
 

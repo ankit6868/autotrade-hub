@@ -718,74 +718,81 @@ function TpSlEditor({ position, onClose, onSaved }: {
   const isLong = (position.side || position.direction) === 'long';
   const leverage = Number(position.leverage) || 1;
   const margin = Number(position.amount) || 0;       // USDT margin locked
-  const notional = margin * leverage;                 // position value
   // KuCoin parity: show Last Price + Liquidation Price in the header.
   const lastPrice = Number(position.current_price) || entry;
   const liqPrice  = Number(position.liquidation_price) || 0;
 
-  // Slider state — 0-100% (capped at 100, but in practice 1-50% is the
-  // useful range). 0 means "no TP/SL set".
-  const [tpPct, setTpPct] = useState<number>(() =>
-    position.tp_price && entry > 0
-      ? Math.abs(((position.tp_price - entry) / entry) * 100)
-      : 0
-  );
-  const [slPct, setSlPct] = useState<number>(() =>
-    position.stoploss_price && entry > 0
-      ? Math.abs(((position.stoploss_price - entry) / entry) * 100)
-      : 0
-  );
+  // Slider state is ROI — the profit/loss expressed as a PERCENTAGE OF THE
+  // MARGIN (the capital) committed to this position, NOT the coin's price-
+  // move %. This is what the user actually asked for: "+50%" means "make
+  // 50% of the USDT I put in", regardless of leverage. The coin's price
+  // only needs to move ROI/leverage to get there (a 50% ROI at 10× needs
+  // just a 5% price move). 0 means "no TP/SL set".
+  const TP_MAX_ROI = 500;   // slider ceiling for take-profit ROI
+  const SL_MAX_ROI = 100;   // slider ceiling for stop-loss ROI (100% = full margin)
+  const roiFromPrice = (price: number) =>
+    price && entry > 0 && leverage > 0
+      ? Math.abs(((price - entry) / entry) * 100) * leverage
+      : 0;
+  const [tpRoi, setTpRoi] = useState<number>(() => roiFromPrice(Number(position.tp_price) || 0));
+  const [slRoi, setSlRoi] = useState<number>(() => roiFromPrice(Number(position.stoploss_price) || 0));
 
-  // Derived prices from percentages (single source of truth = the slider).
-  const tpPrice = tpPct > 0
-    ? (isLong ? entry * (1 + tpPct / 100) : entry * (1 - tpPct / 100))
+  // Price move % implied by the chosen ROI at this leverage.
+  const tpMove = leverage > 0 ? tpRoi / leverage : 0;
+  const slMove = leverage > 0 ? slRoi / leverage : 0;
+
+  // Derived trigger prices (single source of truth = the ROI slider).
+  const tpPrice = tpRoi > 0
+    ? (isLong ? entry * (1 + tpMove / 100) : entry * (1 - tpMove / 100))
     : 0;
-  const slPrice = slPct > 0
-    ? (isLong ? entry * (1 - slPct / 100) : entry * (1 + slPct / 100))
+  const slPrice = slRoi > 0
+    ? (isLong ? entry * (1 - slMove / 100) : entry * (1 + slMove / 100))
     : 0;
 
-  // Est. P&L at trigger = notional × pct/100 (leveraged gain/loss in USDT).
-  const tpPnl = tpPct > 0 ? (notional * tpPct) / 100 : 0;
-  const slPnl = slPct > 0 ? -(notional * slPct) / 100 : 0;
-  // ROI on margin = pct × leverage
-  const tpRoi = tpPct * leverage;
-  const slRoi = -slPct * leverage;
+  // Est. P&L at trigger = margin × ROI/100 (USDT gained/lost on the capital
+  // committed). margin is the user's locked USDT; ROI is a % of THAT.
+  const tpPnl = tpRoi > 0 ? (margin * tpRoi) / 100 : 0;
+  const slPnl = slRoi > 0 ? -(margin * slRoi) / 100 : 0;
 
   // Text-field state — only used for typed overrides. Empty means "follow
   // the slider". Editing it updates the slider too.
   const [tpInput, setTpInput] = useState<string>('');
   const [slInput, setSlInput] = useState<string>('');
 
+  // User types a target PRICE → convert the price move into an ROI
+  // (price-move % × leverage). We do NOT clamp typed prices — an exact
+  // price the user enters is honoured even if its ROI exceeds the slider
+  // ceiling (the slider thumb just maxes out visually).
   function handleTpInput(v: string) {
     setTpInput(v);
     const num = parseFloat(v);
     if (!isFinite(num) || num <= 0 || entry <= 0) return;
-    const pct = isLong
+    const move = isLong
       ? ((num - entry) / entry) * 100
       : ((entry - num) / entry) * 100;
-    if (pct > 0) setTpPct(Math.min(pct, 100));
+    if (move > 0) setTpRoi(move * leverage);
   }
 
   function handleSlInput(v: string) {
     setSlInput(v);
     const num = parseFloat(v);
     if (!isFinite(num) || num <= 0 || entry <= 0) return;
-    const pct = isLong
+    const move = isLong
       ? ((entry - num) / entry) * 100
       : ((num - entry) / entry) * 100;
-    if (pct > 0) setSlPct(Math.min(pct, 100));
+    if (move > 0) setSlRoi(move * leverage);
   }
 
-  // When slider moves, sync the readout field so the user sees the price.
+  // When the ROI slider moves, sync the price readout field.
   useEffect(() => {
-    if (tpPct > 0) setTpInput(tpPrice.toFixed(2));
+    if (tpRoi > 0) setTpInput(tpPrice.toFixed(2));
     else setTpInput('');
-  }, [tpPct, tpPrice]);
+  }, [tpRoi, tpPrice]);
 
   useEffect(() => {
-    if (slPct > 0) setSlInput(slPrice.toFixed(2));
+    if (slRoi > 0) setSlInput(slPrice.toFixed(2));
     else setSlInput('');
-  }, [slPct, slPrice]);
+  }, [slRoi, slPrice]);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>('');
@@ -793,8 +800,8 @@ function TpSlEditor({ position, onClose, onSaved }: {
   async function save() {
     setSubmitting(true);
     setError('');
-    const tpNum = tpPct > 0 ? tpPrice : undefined;
-    const slNum = slPct > 0 ? slPrice : undefined;
+    const tpNum = tpRoi > 0 ? tpPrice : undefined;
+    const slNum = slRoi > 0 ? slPrice : undefined;
     if (!tpNum && !slNum) {
       setError('Set at least one of Take Profit or Stop Loss.');
       setSubmitting(false);
@@ -832,9 +839,9 @@ function TpSlEditor({ position, onClose, onSaved }: {
     }
   }
 
-  // Quick-set chips for common percentages.
-  const TP_CHIPS = [1, 3, 5, 10, 20];
-  const SL_CHIPS = [1, 2, 3, 5, 10];
+  // Quick-set chips — ROI (profit/loss as a % of the margin committed).
+  const TP_CHIPS = [25, 50, 100, 200, 500];
+  const SL_CHIPS = [10, 25, 50, 75, 100];
 
   return (
     <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={onClose}>
@@ -877,37 +884,37 @@ function TpSlEditor({ position, onClose, onSaved }: {
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-[11px] font-medium text-emerald-400">Take Profit</label>
             <span className="text-[10px] text-slate-500 tabular-nums">
-              {tpPct > 0
-                ? `+${tpPct.toFixed(2)}% from entry · ROI ${tpRoi >= 0 ? '+' : ''}${tpRoi.toFixed(1)}%`
+              {tpRoi > 0
+                ? `+${tpRoi.toFixed(1)}% ROI · price ${tpPrice.toFixed(2)}`
                 : 'not set'}
             </span>
           </div>
-          {/* Native range slider — continuous, full 0-100% range. */}
+          {/* Native range slider — ROI (% of margin), not coin price move. */}
           <div className="relative h-6 mb-2">
             <div className="absolute top-1/2 left-0 right-0 h-[3px] bg-slate-700 -translate-y-1/2 rounded" />
             <div
               className="absolute top-1/2 left-0 h-[3px] bg-emerald-500 -translate-y-1/2 rounded transition-[width]"
-              style={{ width: `${tpPct}%` }}
+              style={{ width: `${Math.min(tpRoi, TP_MAX_ROI) / TP_MAX_ROI * 100}%` }}
             />
             <input
-              type="range" min={0} max={100} step={0.1} value={tpPct}
-              onChange={e => setTpPct(Number(e.target.value))}
-              aria-label="Take profit percentage"
+              type="range" min={0} max={TP_MAX_ROI} step={1} value={Math.min(tpRoi, TP_MAX_ROI)}
+              onChange={e => setTpRoi(Number(e.target.value))}
+              aria-label="Take profit ROI percent of margin"
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
             />
             <div
               className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-emerald-500 border-2 border-white shadow pointer-events-none transition-[left]"
-              style={{ left: `${tpPct}%` }}
+              style={{ left: `${Math.min(tpRoi, TP_MAX_ROI) / TP_MAX_ROI * 100}%` }}
             />
           </div>
-          {/* Quick chips */}
+          {/* Quick chips — ROI % of margin */}
           <div className="flex gap-1 mb-2">
             {TP_CHIPS.map(pct => (
               <button
                 key={`tp-${pct}`}
-                onClick={() => setTpPct(pct)}
+                onClick={() => setTpRoi(pct)}
                 className={`flex-1 py-1 rounded text-[10px] font-medium border transition-colors ${
-                  Math.abs(tpPct - pct) < 0.05
+                  Math.abs(tpRoi - pct) < 0.05
                     ? 'bg-emerald-500/20 border-emerald-500/40 text-emerald-300'
                     : 'border-white/10 text-slate-400 hover:border-emerald-500/30 hover:text-emerald-400'
                 }`}
@@ -916,7 +923,7 @@ function TpSlEditor({ position, onClose, onSaved }: {
               </button>
             ))}
             <button
-              onClick={() => setTpPct(0)}
+              onClick={() => setTpRoi(0)}
               className="px-2 py-1 rounded text-[10px] font-medium border border-white/10 text-slate-500 hover:text-slate-300"
               title="Clear take-profit"
             >
@@ -934,22 +941,22 @@ function TpSlEditor({ position, onClose, onSaved }: {
               />
               <span className="text-[10px] text-slate-500">USDT</span>
             </div>
-            <div className="w-20 flex items-center gap-1 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 focus-within:border-emerald-500">
+            <div className="w-24 flex items-center gap-1 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 focus-within:border-emerald-500">
               <input
                 type="number" step="any"
-                value={tpPct > 0 ? tpPct.toFixed(2).replace(/\.?0+$/, '') : ''}
+                value={tpRoi > 0 ? tpRoi.toFixed(1).replace(/\.?0+$/, '') : ''}
                 onChange={e => {
                   const v = parseFloat(e.target.value);
-                  if (e.target.value === '') setTpPct(0);
-                  else if (isFinite(v) && v >= 0) setTpPct(Math.min(v, 100));
+                  if (e.target.value === '') setTpRoi(0);
+                  else if (isFinite(v) && v >= 0) setTpRoi(v);
                 }}
                 placeholder="0"
                 className="flex-1 bg-transparent text-sm text-white focus:outline-none tabular-nums min-w-0 text-right"
               />
-              <span className="text-[10px] text-slate-500">%</span>
+              <span className="text-[10px] text-slate-500">% ROI</span>
             </div>
           </div>
-          {tpPct > 0 && lastPrice > 0 && (
+          {tpRoi > 0 && lastPrice > 0 && (
             (isLong && tpPrice <= lastPrice) || (!isLong && tpPrice >= lastPrice)
           ) && (
             <div className="text-[10px] text-amber-400 mt-1.5 leading-snug">
@@ -957,11 +964,13 @@ function TpSlEditor({ position, onClose, onSaved }: {
               <b className="tabular-nums">{lastPrice.toFixed(2)}</b> — otherwise it triggers immediately.
             </div>
           )}
-          {tpPct > 0 && (
+          {tpRoi > 0 && (
             <div className="text-[10px] text-slate-400 mt-1.5 leading-snug">
-              A market order will be executed when the price reaches{' '}
-              <b className="text-emerald-300 tabular-nums">{tpPrice.toFixed(2)}</b>, with an
-              estimated profit of <b className="text-emerald-400 tabular-nums">+{tpPnl.toFixed(2)} USDT</b>.
+              Closes at <b className="text-emerald-300 tabular-nums">{tpPrice.toFixed(2)}</b> when
+              profit reaches <b className="text-emerald-400 tabular-nums">+{tpPnl.toFixed(2)} USDT</b>
+              {' '}— that&apos;s <b className="text-emerald-400">+{tpRoi.toFixed(1)}%</b> of your{' '}
+              <b className="tabular-nums">{margin.toFixed(2)} USDT</b> margin
+              {' '}(price moves {tpMove.toFixed(2)}% at {leverage}×).
             </div>
           )}
         </div>
@@ -971,8 +980,8 @@ function TpSlEditor({ position, onClose, onSaved }: {
           <div className="flex items-center justify-between mb-1.5">
             <label className="text-[11px] font-medium text-red-400">Stop Loss</label>
             <span className="text-[10px] text-slate-500 tabular-nums">
-              {slPct > 0
-                ? `−${slPct.toFixed(2)}% from entry · ROI ${slRoi.toFixed(1)}%`
+              {slRoi > 0
+                ? `−${slRoi.toFixed(1)}% ROI · price ${slPrice.toFixed(2)}`
                 : 'not set'}
             </span>
           </div>
@@ -980,26 +989,26 @@ function TpSlEditor({ position, onClose, onSaved }: {
             <div className="absolute top-1/2 left-0 right-0 h-[3px] bg-slate-700 -translate-y-1/2 rounded" />
             <div
               className="absolute top-1/2 left-0 h-[3px] bg-red-500 -translate-y-1/2 rounded transition-[width]"
-              style={{ width: `${slPct}%` }}
+              style={{ width: `${Math.min(slRoi, SL_MAX_ROI) / SL_MAX_ROI * 100}%` }}
             />
             <input
-              type="range" min={0} max={100} step={0.1} value={slPct}
-              onChange={e => setSlPct(Number(e.target.value))}
-              aria-label="Stop loss percentage"
+              type="range" min={0} max={SL_MAX_ROI} step={1} value={Math.min(slRoi, SL_MAX_ROI)}
+              onChange={e => setSlRoi(Number(e.target.value))}
+              aria-label="Stop loss ROI percent of margin"
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
             />
             <div
               className="absolute top-1/2 -translate-y-1/2 -translate-x-1/2 w-3.5 h-3.5 rounded-full bg-red-500 border-2 border-white shadow pointer-events-none transition-[left]"
-              style={{ left: `${slPct}%` }}
+              style={{ left: `${Math.min(slRoi, SL_MAX_ROI) / SL_MAX_ROI * 100}%` }}
             />
           </div>
           <div className="flex gap-1 mb-2">
             {SL_CHIPS.map(pct => (
               <button
                 key={`sl-${pct}`}
-                onClick={() => setSlPct(pct)}
+                onClick={() => setSlRoi(pct)}
                 className={`flex-1 py-1 rounded text-[10px] font-medium border transition-colors ${
-                  Math.abs(slPct - pct) < 0.05
+                  Math.abs(slRoi - pct) < 0.05
                     ? 'bg-red-500/20 border-red-500/40 text-red-300'
                     : 'border-white/10 text-slate-400 hover:border-red-500/30 hover:text-red-400'
                 }`}
@@ -1008,7 +1017,7 @@ function TpSlEditor({ position, onClose, onSaved }: {
               </button>
             ))}
             <button
-              onClick={() => setSlPct(0)}
+              onClick={() => setSlRoi(0)}
               className="px-2 py-1 rounded text-[10px] font-medium border border-white/10 text-slate-500 hover:text-slate-300"
               title="Clear stop-loss"
             >
@@ -1026,23 +1035,23 @@ function TpSlEditor({ position, onClose, onSaved }: {
               />
               <span className="text-[10px] text-slate-500">USDT</span>
             </div>
-            <div className="w-20 flex items-center gap-1 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 focus-within:border-red-500">
+            <div className="w-24 flex items-center gap-1 bg-[#06091a] border border-[#243153] rounded px-2 py-1.5 focus-within:border-red-500">
               <input
                 type="number" step="any"
-                value={slPct > 0 ? slPct.toFixed(2).replace(/\.?0+$/, '') : ''}
+                value={slRoi > 0 ? slRoi.toFixed(1).replace(/\.?0+$/, '') : ''}
                 onChange={e => {
                   const v = parseFloat(e.target.value);
-                  if (e.target.value === '') setSlPct(0);
-                  else if (isFinite(v) && v >= 0) setSlPct(Math.min(v, 100));
+                  if (e.target.value === '') setSlRoi(0);
+                  else if (isFinite(v) && v >= 0) setSlRoi(v);
                 }}
                 placeholder="0"
                 className="flex-1 bg-transparent text-sm text-white focus:outline-none tabular-nums min-w-0 text-right"
               />
-              <span className="text-[10px] text-slate-500">%</span>
+              <span className="text-[10px] text-slate-500">% ROI</span>
             </div>
           </div>
           {/* Inline validation — KuCoin shows the same kind of warning. */}
-          {slPct > 0 && lastPrice > 0 && (
+          {slRoi > 0 && lastPrice > 0 && (
             (isLong && slPrice >= lastPrice) || (!isLong && slPrice <= lastPrice)
           ) && (
             <div className="text-[10px] text-amber-400 mt-1.5 leading-snug">
@@ -1050,11 +1059,13 @@ function TpSlEditor({ position, onClose, onSaved }: {
               <b className="tabular-nums">{lastPrice.toFixed(2)}</b>.
             </div>
           )}
-          {slPct > 0 && (
+          {slRoi > 0 && (
             <div className="text-[10px] text-slate-400 mt-1.5 leading-snug">
-              A market order will be executed when the price reaches{' '}
-              <b className="text-red-300 tabular-nums">{slPrice.toFixed(2)}</b>, with an
-              estimated profit of <b className="text-red-400 tabular-nums">{slPnl.toFixed(2)} USDT</b>.
+              Closes at <b className="text-red-300 tabular-nums">{slPrice.toFixed(2)}</b> when
+              loss reaches <b className="text-red-400 tabular-nums">{slPnl.toFixed(2)} USDT</b>
+              {' '}— that&apos;s <b className="text-red-400">−{slRoi.toFixed(1)}%</b> of your{' '}
+              <b className="tabular-nums">{margin.toFixed(2)} USDT</b> margin
+              {' '}(price moves {slMove.toFixed(2)}% at {leverage}×).
             </div>
           )}
         </div>
@@ -1070,7 +1081,7 @@ function TpSlEditor({ position, onClose, onSaved }: {
           </button>
           <button
             onClick={save}
-            disabled={submitting || (tpPct === 0 && slPct === 0)}
+            disabled={submitting || (tpRoi === 0 && slRoi === 0)}
             className="flex-1 px-3 py-2 rounded-lg bg-emerald-500 text-white text-sm font-medium hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             {submitting ? 'Saving…' : 'Save'}

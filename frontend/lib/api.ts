@@ -362,6 +362,8 @@ export const api = {
       mode?: 'paper' | 'live',
       costUsdt?: number,
       allowHedge?: boolean,
+      tpPrice?: number,
+      slPrice?: number,
     ) =>
       request<any>('/api/futures/manual-entry', {
         method: 'POST',
@@ -370,6 +372,10 @@ export const api = {
         // the engine's paper wallet, not the real KuCoin balance). Paper
         // mode keeps using stake_pct since there's no real exchange call.
         // allow_hedge=true lets long + short coexist on the same pair.
+        //
+        // tp_price/sl_price are OPTIONAL. They are sent ONLY when the user
+        // explicitly set them — the backend no longer auto-adds stops the
+        // user didn't ask for (bug 4). Omitting them = "no stop".
         body: JSON.stringify({
           pair, direction,
           stake_pct: stakePct,
@@ -377,6 +383,8 @@ export const api = {
           ...(leverage ? { leverage } : {}),
           ...(mode ? { mode } : {}),
           ...(allowHedge ? { allow_hedge: true } : {}),
+          ...(tpPrice && tpPrice > 0 ? { tp_price: tpPrice } : {}),
+          ...(slPrice && slPrice > 0 ? { sl_price: slPrice } : {}),
         }),
       }),
     orderbook: (symbol: string) => request<any>(`/api/futures/orderbook/${symbol}`),

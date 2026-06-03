@@ -187,9 +187,15 @@ export default function ManualOrderPanel({
         // 1000 USDT paper when no live bot is running, causing "Order
         // quantity is too high, insufficient available margin" rejections
         // from KuCoin).
+        //
+        // TP/SL are OPTIONAL. Only send them when the user explicitly ticked
+        // the box AND typed a price — otherwise the backend used to silently
+        // add stops of its own (bug 4). undefined here = "no stop".
+        const tpVal = tpEnabled && parseFloat(tpPrice) > 0 ? parseFloat(tpPrice) : undefined;
+        const slVal = slEnabled && parseFloat(slPrice) > 0 ? parseFloat(slPrice) : undefined;
         const r = await api.futures.manualEntry(
           pair, direction, Math.min(stakePct, 100),
-          leverage, mode, costUsdt_, hedgeMode,
+          leverage, mode, costUsdt_, hedgeMode, tpVal, slVal,
         );
         if (r.error) setError(r.error);
         else {

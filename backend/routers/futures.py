@@ -80,6 +80,23 @@ def _was_recently_closed(user_id: str, pair: str, direction: str) -> bool:
     return True
 
 
+# ── Stale LIVE-position reconcile (bugs 1 & 3) ───────────────────────────────
+# A LIVE row shown in Positions can be stale: closed on KuCoin's own UI, or
+# its owning engine was lost on a backend restart so nothing flipped the DB
+# row from "open" to "closed". KuCoin's /api/v1/positions LIST is the source
+# of truth — a LIVE (pair, direction) NOT present there (currentQty != 0) is
+# closed. BUT that endpoint is eventually consistent and has a documented
+# transient "returns currentQty=0 for a real position" quirk, so a single
+# absence is not proof. We require N CONSECUTIVE misses (across /open polls)
+# before dropping a row + closing its DB record. A row confirmed present on
+# KuCoin resets its counter. A freshly-opened position (within the grace
+# window) is never counted as missing — KuCoin may not have propagated the
+# open yet.
+_live_miss: dict[tuple[str, str, str], int] = {}
+_LIVE_MISS_DROP_THRESHOLD = 3    # consecutive /open polls confirming "gone"
+_LIVE_FRESH_GRACE_SECS = 20.0    # never reconcile-drop a position younger than this
+
+
 def _futures_ticker_price(pair: str) -> float | None:
     """Bug-fix helper: get the FUTURES perp last price for a pair.
 
@@ -1292,6 +1309,17 @@ def futures_open_positions(
             if str(kc_resp.get("code")) == "200000":
                 # Map KuCoin futures symbol → app pair: XBTUSDTM → BTC/USDT
                 pairs_already_in_merged = {t["pair"] for t in merged}
+                # Authoritative set of (pair, direction) actually OPEN on
+                # KuCoin right now. Used both to skip re-adding rows we
+                # already show AND to drop stale LIVE rows below (bugs 1/3).
+                kc_open_keys: set[tuple[str, str]] = set()
+                for kp in (kc_resp.get("data") or []):
+                    _q = float(kp.get("currentQty", 0) or 0)
+                    if _q == 0:
+                        continue
+                    _ksym = kp.get("symbol", "")
+                    _kbase = _ksym.replace("USDTM", "").replace("XBT", "BTC")
+                    kc_open_keys.add((f"{_kbase}/USDT", "long" if _q > 0 else "short"))
                 for kp in (kc_resp.get("data") or []):
                     qty = float(kp.get("currentQty", 0))
                     if qty == 0:
@@ -1342,6 +1370,110 @@ def futures_open_positions(
                         "source":            "manual",
                         "bot_key":           None,
                     })
+
+                # ── Drop stale LIVE rows confirmed CLOSED on KuCoin ────────
+                # (bugs 1 & 3). KuCoin's LIST is authoritative: any LIVE row
+                # whose (pair, direction) is NOT in kc_open_keys is closed on
+                # the exchange — whether the user closed it in KuCoin's own UI
+                # or its owning engine was lost on a restart (DB row stuck at
+                # status="open"). Guards: a position younger than the grace
+                # window is never dropped (KuCoin open-propagation lag), and a
+                # row must be missing for N consecutive polls (transient
+                # currentQty=0 quirk protection). When a row crosses the
+                # threshold we drop it from the response, flip its DB row to
+                # "closed" so it can't resurrect, and evict it from any engine
+                # still holding it.
+                import time as _t_recon
+                _now_s = _t_recon.time()
+                _kept: list[dict] = []
+                _stale_db_ids: set[int] = set()
+                _stale_eng_keys: set[str] = set()
+                for _row in merged:
+                    # Only reconcile MANUAL live rows here. Bot live positions
+                    # are owned by their bot engine's own reconcile loop (which
+                    # books realized P&L on close) — evicting them here would
+                    # drop the trade without accounting. Non-live + bot rows
+                    # pass straight through untouched.
+                    _is_live   = (_row.get("mode") or "").lower() == "live"
+                    _is_manual = (_row.get("source") or "manual") == "manual"
+                    if not (_is_live and _is_manual):
+                        _kept.append(_row)
+                        continue
+                    _rdir = _row.get("side") or _row.get("direction") or "long"
+                    _rkey = (_row["pair"], _rdir)
+                    _miss_key = (user_id, _row["pair"], _rdir)
+                    if _rkey in kc_open_keys:
+                        _live_miss.pop(_miss_key, None)   # confirmed alive
+                        _kept.append(_row)
+                        continue
+                    # Not on KuCoin. Protect freshly-opened positions whose
+                    # open KuCoin may not have propagated yet.
+                    _age = None
+                    try:
+                        _et = _row.get("entry_time")
+                        if _et and str(_et).strip() and str(_et) != "None":
+                            _ds = str(_et).replace("Z", "+00:00")
+                            _dt = datetime.fromisoformat(_ds)
+                            if _dt.tzinfo is None:
+                                from datetime import timezone as _tzu
+                                _dt = _dt.replace(tzinfo=_tzu.utc)
+                            _age = _now_s - _dt.timestamp()
+                    except Exception:
+                        _age = None
+                    if _age is not None and _age < _LIVE_FRESH_GRACE_SECS:
+                        _kept.append(_row)   # too new to judge
+                        continue
+                    # Recently closed in-app → already handled, drop silently.
+                    if _was_recently_closed(user_id, _row["pair"], _rdir):
+                        _miss = _LIVE_MISS_DROP_THRESHOLD
+                    else:
+                        _miss = _live_miss.get(_miss_key, 0) + 1
+                        _live_miss[_miss_key] = _miss
+                    if _miss >= _LIVE_MISS_DROP_THRESHOLD:
+                        _live_miss.pop(_miss_key, None)
+                        _did = _row.get("_db_id")
+                        if not isinstance(_did, int) and isinstance(_row.get("id"), int):
+                            _did = _row["id"]
+                        if isinstance(_did, int):
+                            _stale_db_ids.add(_did)
+                        _pid = _row.get("position_id") or ""
+                        if isinstance(_pid, str) and _pid.startswith("eng:"):
+                            _stale_eng_keys.add(_pid[4:])
+                        log.info("[%s] /open dropped stale LIVE %s %s — closed on "
+                                 "KuCoin (db_id=%s)", user_id, _row["pair"], _rdir, _did)
+                        # dropped: do NOT append to _kept
+                    else:
+                        _kept.append(_row)   # tentative — keep until threshold
+                merged = _kept
+
+                # Evict stale positions from any engine still holding them so
+                # the next poll doesn't re-surface them from engine state and
+                # the manual watchdog stops ticking them.
+                if _stale_eng_keys:
+                    for _src, _bk, _e in engines_with_meta:
+                        with _e._lock:
+                            for _k in list(_stale_eng_keys):
+                                if _k in _e.positions:
+                                    _e.positions.pop(_k, None)
+
+                # Flip stale DB rows to closed so they never resurrect.
+                if _stale_db_ids:
+                    try:
+                        from sqlalchemy import update as _sql_update
+                        from datetime import timezone as _tzu2
+                        db.execute(
+                            _sql_update(Trade)
+                            .where(Trade.user_id == user_id, Trade.id.in_(_stale_db_ids),
+                                   Trade.status == "open")
+                            .values(status="closed",
+                                    exit_time=datetime.now(_tzu2.utc),
+                                    exit_reason="closed_on_kucoin")
+                        )
+                        db.commit()
+                    except Exception as _close_err:
+                        db.rollback()
+                        log.warning("[%s] Could not close stale DB rows %s: %s",
+                                    user_id, _stale_db_ids, _close_err)
         except Exception as e:
             log.warning("[%s] KuCoin position reconcile failed: %s", user_id, e)
 
@@ -1435,9 +1567,26 @@ def futures_manual_entry(
     # Use explicit mode from request first, then engine mode, then default
     mode     = req_mode if req_mode in ("paper", "live") else (eng._mode or "paper")
     balance  = eng.balance   if eng.balance   else 1000.0
-    sl_pct   = abs(eng._stoploss or 0.015)
-    _raw_tp = getattr(eng, "_take_profit", None) or getattr(eng, "_take_profit_pct", None)
-    tp_pct   = float(_raw_tp) * 100 if (_raw_tp and float(_raw_tp) <= 1) else (float(_raw_tp) if _raw_tp else 3.0)
+
+    # ── SL/TP are now OPTIONAL and USER-DRIVEN ────────────────────────────
+    # Previously this function ALWAYS computed an SL/TP from the engine's
+    # default stoploss/take-profit %, so every manual trade silently got
+    # stops the user never asked for (bug 4). Now we ONLY apply stops the
+    # user explicitly sent. The frontend passes either:
+    #   • sl_price / tp_price — an absolute price (preferred), or
+    #   • sl_pct  / tp_pct    — a price-move % off entry (convenience).
+    # Anything absent/zero means "no stop" → stored as 0 → never fires
+    # (Position.check_exit and _push_live_tp_sl both skip falsy legs).
+    def _opt_float(v):
+        try:
+            f = float(v)
+            return f if f > 0 else None
+        except (TypeError, ValueError):
+            return None
+    req_sl_price = _opt_float(req.get("sl_price"))
+    req_tp_price = _opt_float(req.get("tp_price"))
+    req_sl_pct   = _opt_float(req.get("sl_pct"))
+    req_tp_pct   = _opt_float(req.get("tp_pct"))
 
     # Fetch current FUTURES price (was hitting spot — basis bug).
     entry_price = _futures_ticker_price(pair)
@@ -1464,12 +1613,23 @@ def futures_manual_entry(
     # rounding); for paper mode it stays equal to user_cost.
     stake = user_cost
 
-    if direction == "long":
-        sl_price = round(entry_price * (1 - sl_pct), 6)
-        tp_price = round(entry_price * (1 + tp_pct / 100), 6)
+    # Resolve final SL/TP prices from the user's request ONLY. Absolute
+    # price wins; otherwise derive from a price-move %. 0 = not set.
+    if req_sl_price is not None:
+        sl_price = round(req_sl_price, 6)
+    elif req_sl_pct is not None:
+        sl_price = round(entry_price * (1 - req_sl_pct / 100), 6) if direction == "long" \
+                   else round(entry_price * (1 + req_sl_pct / 100), 6)
     else:
-        sl_price = round(entry_price * (1 + sl_pct), 6)
-        tp_price = round(entry_price * (1 - tp_pct / 100), 6)
+        sl_price = 0.0   # no stop-loss requested
+
+    if req_tp_price is not None:
+        tp_price = round(req_tp_price, 6)
+    elif req_tp_pct is not None:
+        tp_price = round(entry_price * (1 + req_tp_pct / 100), 6) if direction == "long" \
+                   else round(entry_price * (1 - req_tp_pct / 100), 6)
+    else:
+        tp_price = 0.0   # no take-profit requested
 
     # Hedge mode: when allow_hedge=true we permit opposite directions
     # on the same pair (long + short coexist for hedging). Default is
@@ -4896,9 +5056,69 @@ def set_position_tp_sl(
                     log.warning("[%s] Lead Trading %s rejected: %s",
                                 user_id, label.upper(), resp)
 
+            # ── Cancel EXISTING stop orders for the legs we're replacing ──
+            # Bug 6 ("automated sl is also not changing"): updating TP/SL used
+            # to place a SECOND stop order on KuCoin while the OLD one stayed
+            # live. KuCoin then held two stops for the same leg — the stale
+            # one could still trigger first, so the user's change appeared to
+            # have no effect. We now cancel the prior pending stop for each
+            # leg (by its recorded exchange orderId) BEFORE placing the new
+            # one. orderId is a QUERY param (same correction as the cancel
+            # route). Best-effort: a failed cancel is logged but doesn't block
+            # the new stop from being placed.
+            from backend.services.kucoin_futures_client import _sign_request as _sign_cancel
+            from backend.services._kucoin_proxy import urlopen as _cancel_urlopen
+            import urllib.request as _ureq, json as _cjson
+            from urllib.parse import urlencode as _cancel_urlencode
+
+            def _cancel_existing_stop(label: str) -> None:
+                order_type = f"stop_{label}"   # "stop_tp" | "stop_sl"
+                try:
+                    rows = db.execute(
+                        select(FuturesOrder).where(
+                            FuturesOrder.user_id    == user_id,
+                            FuturesOrder.symbol     == kc_symbol,
+                            FuturesOrder.order_type == order_type,
+                            FuturesOrder.status     == "pending",
+                        )
+                    ).scalars().all()
+                except Exception as q_err:
+                    log.warning("[%s] Could not query stale %s stops: %s",
+                                user_id, order_type, q_err)
+                    return
+                for row in rows:
+                    ex_id = row.exchange_order_id
+                    if ex_id:
+                        try:
+                            ts = str(int(_t.time() * 1000))
+                            ep = "/api/v1/copy-trade/futures/orders?" + _cancel_urlencode({"orderId": ex_id})
+                            headers = _sign_cancel(
+                                eng._api_sec, eng._api_pass, eng._api_key,
+                                ts, "DELETE", ep,
+                            )
+                            req_obj = _ureq.Request(
+                                f"{KUCOIN_FUTURES_BASE}{ep}", headers=headers, method="DELETE")
+                            with _cancel_urlopen(req_obj, timeout=8) as r:
+                                c_resp = _cjson.loads(r.read().decode())
+                            log.info("[%s] Cancelled stale %s stop %s before replace: code=%s",
+                                     user_id, order_type, ex_id, str(c_resp.get("code")))
+                        except Exception as ce:
+                            log.warning("[%s] Could not cancel stale %s stop %s "
+                                        "(placing new stop anyway): %s",
+                                        user_id, order_type, ex_id, ce)
+                    row.status = "cancelled"
+                    row.cancelled_at = datetime.utcnow()
+                if rows:
+                    try:
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+
             if tp_price is not None:
+                _cancel_existing_stop("tp")
                 _place_stop("tp", float(tp_price), True)
             if sl_price is not None:
+                _cancel_existing_stop("sl")
                 _place_stop("sl", float(sl_price), False)
 
             # If BOTH sides failed, surface a clear error to the frontend.
