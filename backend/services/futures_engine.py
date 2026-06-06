@@ -480,7 +480,15 @@ class FuturesEngine(NativeTradingEngine):
         # signal may fire on this pair (set on every close).
         # day_counters tracks trades opened today (resets at UTC midnight)
         # and trips the daily-DD breaker.
-        self._cooldown_until:    dict[str, float] = {}
+        # Keyed by (pair, direction) so the post-close cooldown is per-side:
+        # in hedge mode closing the LONG must not block re-opening the SHORT,
+        # and the cooldown's documented intent is "don't re-enter the SAME
+        # signal after a forced exit". Single mode is one side per pair, so
+        # this is equivalent to the old per-pair key for same-direction
+        # re-entry; it only stops a same-pair OPPOSITE signal (a genuine
+        # reversal, which stop-and-reverse already handles cooldown-free)
+        # from being needlessly suppressed.
+        self._cooldown_until:    dict[tuple[str, str], float] = {}
         self._max_trades_per_day:int   = 8
         self._cooldown_seconds:  int   = 0
         self._day_key:           str   = ""           # YYYY-MM-DD UTC
@@ -1066,7 +1074,9 @@ class FuturesEngine(NativeTradingEngine):
                             seen_signal[pair] = None
                             # Phase 8: arm cooldown so the bot doesn't immediately
                             # re-enter on the same signal after a forced exit.
-                            self._cooldown_until[pair] = time.time() + self._cooldown_seconds
+                            # Keyed per-side so a closed long only cools down the
+                            # long; the opposite hedge leg is unaffected.
+                            self._cooldown_until[(pair, pos.direction)] = time.time() + self._cooldown_seconds
                             self.last_action = (
                                 f"LIQUIDATED {pair} @ {live_price:.4f} "
                                 f"liq={pos.liquidation_price:.4f} P&L={pos.pnl_abs:+.2f}"
@@ -1167,7 +1177,8 @@ class FuturesEngine(NativeTradingEngine):
                         # Reset to None (Phase 2 edge detection stores direction).
                         seen_signal[pair] = None
                         # Phase 8: arm cooldown after every close (TP, SL, manual).
-                        self._cooldown_until[pair] = time.time() + self._cooldown_seconds
+                        # Keyed per-side (pair, direction) — see liquidation path.
+                        self._cooldown_until[(pair, pos.direction)] = time.time() + self._cooldown_seconds
                         # Include ARM partial-history in the summary when present.
                         arm_summary = ""
                         if isinstance(pos, FuturesPosition) and pos.partial_exits:
@@ -1414,7 +1425,7 @@ class FuturesEngine(NativeTradingEngine):
 
             # ── Phase 8: cooldown + max-trades-per-day + daily DD trip ────
             # Cooldown: skip if we're still inside the post-close window.
-            cooldown_end = self._cooldown_until.get(pair, 0.0)
+            cooldown_end = self._cooldown_until.get((pair, direction), 0.0)
             if now_epoch < cooldown_end:
                 remain = int(cooldown_end - now_epoch)
                 self.last_action = (
@@ -1496,25 +1507,37 @@ class FuturesEngine(NativeTradingEngine):
 
             self.signal_count += 1
 
-            # ── Position-mode: hedge same-side guard ────────────────────
-            # In hedge mode a LONG and a SHORT may coexist on a pair, but we
-            # never pyramid the SAME side. If a same-direction position is
-            # already open, skip this signal. Single mode is unaffected — it
-            # relies on the stop-and-reverse block below instead.
-            if self._position_mode == "hedge":
-                with self._lock:
-                    same_dir_open = any(
-                        p.pair == pair and p.direction == direction
-                        for p in self.positions.values()
-                    )
-                if same_dir_open:
-                    self.last_action = (
-                        f"HEDGE SKIP {pair} {direction} — a {direction} position "
-                        f"is already open (hedge keeps 1 long + 1 short per pair)"
-                    )
-                    self._log_action("hedge_same_dir_skip", self.last_action,
-                        pair=pair, direction=direction)
-                    continue
+            # ── Same-side guard (universal — single AND hedge) ──────────
+            # Never pyramid the SAME direction on a pair. The documented
+            # contract is _max_per_pair = 1 per side, so if a same-direction
+            # position is already open we skip this signal in BOTH modes:
+            #   • single → without this, a flickering signal (off for one
+            #     candle → seen_signal[pair] reset to None → on again the
+            #     next candle) could stack a 2nd same-side position on top
+            #     of an open one. The prev_dir==direction guard above only
+            #     catches CONSECUTIVE same-direction candles; it misses the
+            #     reset-then-refire case. Stop-and-reverse below only handles
+            #     OPPOSITE flips, never same-side stacking — so this is the
+            #     sole enforcer of "1 position per side" on re-entry edges.
+            #   • hedge  → a LONG and a SHORT may coexist, but only one of
+            #     each: this keeps it to 1 long + 1 short per pair.
+            # Re-entry after a CLOSE still works: a closed position is gone
+            # from self.positions, so same_dir_open is False and we re-open.
+            with self._lock:
+                same_dir_open = any(
+                    p.pair == pair and p.direction == direction
+                    for p in self.positions.values()
+                )
+            if same_dir_open:
+                _skip_tag = "HEDGE SKIP" if self._position_mode == "hedge" else "SKIP"
+                self.last_action = (
+                    f"{_skip_tag} {pair} {direction} — a {direction} position is "
+                    f"already open (max 1 {direction} per pair)"
+                )
+                self._log_action("same_dir_skip", self.last_action,
+                    pair=pair, direction=direction,
+                    position_mode=self._position_mode)
+                continue
 
             # If we hold an opposite-direction position on this pair AND the
             # mode is stop-and-reverse ("single"), close the old position now
