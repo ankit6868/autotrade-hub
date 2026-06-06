@@ -127,6 +127,12 @@ class StrategyInstance(Base):
     session_start_hr_utc = Column(Integer, default=12)
     session_end_hr_utc   = Column(Integer, default=21)
     equal_price_thresh   = Column(Float,   default=0.001)
+    # ── Position mode (Phase 9 — hedge support, added 2026-06-06) ──────
+    # "single" (default) = stop-and-reverse; "hedge" = allow a LONG and a
+    # SHORT to coexist on the same pair. Persisted so auto-resume restarts
+    # a hedge bot in hedge mode after a backend restart. Default "single"
+    # keeps every pre-existing bot's behaviour unchanged.
+    position_mode      = Column(Text,    default="single")
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

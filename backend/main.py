@@ -3253,6 +3253,9 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
                     session_start_hr_utc = getattr(i, "session_start_hr_utc", None),
                     session_end_hr_utc   = getattr(i, "session_end_hr_utc", None),
                     equal_price_thresh   = getattr(i, "equal_price_thresh", None),
+                    # Phase 9 — restore hedge mode on resume (None/legacy
+                    # rows normalise to "single" inside start_futures).
+                    position_mode        = getattr(i, "position_mode", None),
                 )
                 resumed += 1
                 # Re-apply paused state if the bot was paused before the

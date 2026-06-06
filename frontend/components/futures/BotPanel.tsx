@@ -730,14 +730,23 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   // partial-close N% + move SL to break-even, and optionally trail SL up to
   // TP1 once price crosses midpoint(TP1, TP2).
   //
-  // NOTE: Phase 1 ships the UI + sends the params to the backend, which
-  // accepts them but the live engine does NOT yet act on them. The backtest
-  // engine does. Phase 3 will wire these into FuturesPosition's exit logic.
+  // NOTE: ARM is now fully wired end-to-end. The live/paper engine enforces
+  // TP1 partial-close + break-even move + trail-to-TP1 on every position
+  // (FuturesEngine._place_live_partial_close), so these settings affect LIVE,
+  // PAPER and BACKTEST identically — not backtest-only.
   const [armEnabled,     setArmEnabled]     = useState(false);
   const [armTp1ClosePct, setArmTp1ClosePct] = useState(50);
   const [armBeMode,      setArmBeMode]      = useState<'leverage' | 'manual_pct' | 'entry'>('leverage');
   const [armBeBufferPct, setArmBeBufferPct] = useState(1.0);
   const [armTrailToTp1,  setArmTrailToTp1]  = useState(true);
+
+  // ── Position model (Phase 9 — hedge support) ─────────────────────────────
+  // "single" = TV-default stop-and-reverse (opposite signal closes the open
+  // position and opens the new one; pair nets to one position).
+  // "hedge"  = a LONG and a SHORT may coexist on the same pair — opposite
+  // signals open the OTHER side instead of closing. The live/paper engine
+  // honours this via FuturesEngine._position_mode (gated stop-and-reverse).
+  const [positionMode, setPositionMode] = useState<'single' | 'hedge'>('single');
 
   // ── Phase 5e: Strategy preview state ─────────────────────────────────────
   // Tracked here so we can disable the Create button in LIVE mode when the
@@ -856,8 +865,12 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         takeprofit: takeprofit ? parseFloat(takeprofit) / 100 : 0.015,
         drawdown_tolerance: drawdownTolerance,
         max_position_pct: maxPositionPct,
-        // Advanced Risk Management — backend stores them so Phase 3 can
-        // read & enforce in the live engine. UI panel matches the backtest.
+        // Position model — "single" (stop-and-reverse) or "hedge" (LONG +
+        // SHORT coexist). Backend persists it on the StrategyInstance and the
+        // live/paper engine honours it (gated stop-and-reverse).
+        position_mode: positionMode,
+        // Advanced Risk Management — backend stores AND enforces these in the
+        // live/paper engine (TP1 partial-close + BE-trail). UI matches backtest.
         arm_enabled:        armEnabled,
         arm_tp1_close_pct:  armTp1ClosePct,
         arm_be_mode:        armBeMode,
@@ -995,6 +1008,7 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
               <div className="flex justify-between"><span className="text-slate-400">Leverage</span><span className="text-white">{leverage}x</span></div>
               <div className="flex justify-between"><span className="text-slate-400">Investment</span><span className="text-white">{parseFloat(investment) || 1000} USDT</span></div>
               <div className="flex justify-between"><span className="text-slate-400">Risk/Trade</span><span className="text-white">{maxPositionPct}%</span></div>
+              <div className="flex justify-between"><span className="text-slate-400">Position model</span><span className={positionMode === 'hedge' ? 'text-purple-300' : 'text-sky-300'}>{positionMode === 'hedge' ? 'Hedge (long + short)' : 'Single (TV)'}</span></div>
               {armEnabled && (
                 <div className="flex justify-between"><span className="text-slate-400">ARM</span><span className="text-purple-300">TP1 {armTp1ClosePct}% + BE trail</span></div>
               )}
@@ -1165,10 +1179,13 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
             {/* Wallet % Risk Control — always visible */}
             <div>
               <div className="flex items-center justify-between mb-1.5">
-                <span className="text-xs font-bold text-white">Risk per Trade</span>
+                <span className="text-xs font-bold text-white">Position Size</span>
                 <span className="text-xs text-emerald-400 font-bold">{maxPositionPct}% of wallet</span>
               </div>
-              <p className="text-[10px] text-slate-500 mb-2">How much of your wallet balance each trade will use</p>
+              <p className="text-[10px] text-slate-500 mb-2">
+                Margin staked per trade — this is what actually sizes every position.
+                Any "risk %" inside the strategy's own rules is a signal/SL parameter and does <b>not</b> change this.
+              </p>
               <div className="flex gap-1.5">
                 {[2, 5, 10, 15, 25].map(pct => (
                   <button
@@ -1313,12 +1330,55 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                     </div>
                   </div>
 
-                  {/* Notice — engine wiring is Phase 3 */}
-                  <div className="text-[9px] text-amber-300/80 bg-amber-500/5 border border-amber-500/20 rounded px-2 py-1.5">
-                    ⓘ Settings are saved with the bot. Live partial-close enforcement ships in the next update — until then, this affects backtest results only.
+                  {/* Notice — ARM is now enforced live + paper + backtest */}
+                  <div className="text-[9px] text-emerald-300/80 bg-emerald-500/5 border border-emerald-500/20 rounded px-2 py-1.5">
+                    ✓ Enforced on this bot in <b>live, paper and backtest</b>. At TP1 the engine books the partial close (reduce-only on live KuCoin) and moves SL to break-even automatically.
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* ── Position model: Single (TV) | Hedge (Phase 9) ──────────────
+                Single = TV-default stop-and-reverse (opposite signal closes
+                the open position and opens the new one — pair nets to one
+                position). Hedge = a LONG and a SHORT may coexist on the same
+                pair; opposite signals open the OTHER side instead of closing.
+                The live/paper engine honours this (gated stop-and-reverse). */}
+            <div className="rounded-lg border border-[#2a3a52] p-2.5">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-white">Position model</span>
+                <span className={`text-[8px] font-medium px-1.5 py-0.5 rounded-full ${
+                  positionMode === 'hedge' ? 'bg-purple-500/20 text-purple-300' : 'bg-sky-500/20 text-sky-300'}`}>
+                  {positionMode === 'hedge' ? 'LONG + SHORT' : 'stop-and-reverse'}
+                </span>
+              </div>
+              <div className="inline-flex rounded-md border border-[#2a3a52] overflow-hidden text-[11px] font-medium w-full">
+                <button
+                  type="button"
+                  onClick={() => setPositionMode('single')}
+                  className={`flex-1 px-2 py-1.5 ${positionMode === 'single'
+                    ? 'bg-sky-500/20 text-sky-300'
+                    : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                  title="TV-default: one position per pair. An opposite signal closes the existing position AND opens the new one (stop-and-reverse)."
+                >
+                  Single (TV)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPositionMode('hedge')}
+                  className={`flex-1 px-2 py-1.5 border-l border-[#2a3a52] ${positionMode === 'hedge'
+                    ? 'bg-purple-500/20 text-purple-300'
+                    : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                  title="A LONG and a SHORT can be open at the same time on the same pair. Opposite signals open the other side instead of closing. Each position runs to its own SL/TP/ARM. Best for mean-reversion strategies (Bollinger Bands)."
+                >
+                  Hedge (LONG + SHORT)
+                </button>
+              </div>
+              <p className="text-[10px] text-slate-500 mt-2 leading-snug">
+                {positionMode === 'hedge'
+                  ? <>Opposite signals open a <b className="text-purple-300">new</b> position — the existing side is never force-closed. Max 1 long + 1 short per pair.</>
+                  : <>An opposite signal <b className="text-sky-300">flips</b> the position (closes the old, opens the new). One position per pair.</>}
+              </p>
             </div>
 
             {/* Advanced Settings */}

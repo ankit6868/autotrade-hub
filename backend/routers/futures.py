@@ -5768,6 +5768,9 @@ def list_futures_bots(
                 session_start_hr_utc = int(getattr(i, "session_start_hr_utc", 12) or 12),
                 session_end_hr_utc   = int(getattr(i, "session_end_hr_utc",   21) or 21),
                 equal_price_thresh   = float(getattr(i, "equal_price_thresh", 0.001) or 0.001),
+                # Phase 9 — restore hedge mode on resume (None/legacy rows
+                # normalise to "single" inside start_futures).
+                position_mode        = str(getattr(i, "position_mode", "single") or "single"),
             )
             log.info("Auto-resumed bot %s for user %s (ARM=%s)",
                      i.engine_key, user_id, getattr(i, "arm_enabled", False))
@@ -5895,6 +5898,7 @@ def list_futures_bots(
             "risk_pct": i.risk_pct,
             "stoploss": i.stoploss,
             "takeprofit": i.takeprofit,
+            "position_mode": getattr(i, "position_mode", "single") or "single",
             "engine_key": i.engine_key,
             "created_at": str(i.created_at),
         })
@@ -5958,6 +5962,15 @@ def create_futures_bot(
     session_start_hr_utc  = max(0, min(23, int(req.get("session_start_hr_utc", 12))))
     session_end_hr_utc    = max(0, min(23, int(req.get("session_end_hr_utc", 21))))
     equal_price_thresh    = max(0.0001, min(0.05, float(req.get("equal_price_thresh_pct", 0.1)) / 100.0))
+
+    # ── Position mode (Phase 9 — hedge support) ───────────────────────
+    # "single" (default) = stop-and-reverse (TV default; pair nets to one
+    # position). "hedge" = a LONG and a SHORT may coexist on the same pair.
+    # Normalised to a known value so a bad payload can't change risk
+    # behaviour; anything unexpected falls back to "single".
+    position_mode = str(req.get("position_mode", "single") or "single").strip().lower()
+    if position_mode not in ("single", "hedge"):
+        position_mode = "single"
 
     strat = None
     if strategy_id:
@@ -6139,6 +6152,9 @@ def create_futures_bot(
         session_start_hr_utc = session_start_hr_utc,
         session_end_hr_utc   = session_end_hr_utc,
         equal_price_thresh   = equal_price_thresh,
+        # Phase 9 — persist position mode so auto-resume restarts hedge
+        # bots in hedge mode (not the safe-default "single").
+        position_mode        = position_mode,
     )
     db.add(instance)
     db.commit()
@@ -6182,11 +6198,13 @@ def create_futures_bot(
         equal_price_thresh   = equal_price_thresh,
         max_hold_candles     = max_hold_candles,
         max_stops_per_day    = max_stops_per_day,
+        position_mode        = position_mode,
     )
 
     log_event(db, user_id, "futures.create_bot", request, payload={
         "instance_id": instance.id, "strategy": strategy_name, "leverage": leverage,
         "mode": mode, "max_position_pct": max_position_pct,
+        "position_mode": position_mode,
         "arm_enabled": arm_enabled,
         "arm_tp1_close_pct": arm_tp1_close_pct if arm_enabled else None,
         "arm_be_mode": arm_be_mode if arm_enabled else None,
@@ -6423,6 +6441,8 @@ def futures_bot_performance(
         "session_start_hr_utc": getattr(instance, "session_start_hr_utc", 12),
         "session_end_hr_utc":   getattr(instance, "session_end_hr_utc",   21),
         "equal_price_thresh":   getattr(instance, "equal_price_thresh",   0.001),
+        # Position mode (Phase 9 — hedge support)
+        "position_mode":        getattr(instance, "position_mode", "single") or "single",
         "signal_criteria": signal_criteria,
         "trades": [
             {

@@ -452,6 +452,18 @@ class FuturesEngine(NativeTradingEngine):
         self.action_log: list[dict] = []
         self.signal_count: int = 0
         self._winding_down: bool = False
+        # ── Position mode (Phase 9 — hedge support for live/paper bots) ──
+        # "single"  → stop-and-reverse: an opposite signal CLOSES the open
+        #             position before opening the new one (TV default; the
+        #             pair nets to one position). This is the default so all
+        #             existing bots keep their exact behaviour.
+        # "hedge"   → a LONG and a SHORT may coexist on the same pair. An
+        #             opposite signal opens the other side instead of
+        #             closing; same-side pyramiding is refused (max 1 long
+        #             + 1 short per pair).
+        # Only the "hedge" branch changes engine behaviour; every other
+        # value (including "concurrent") keeps the single-mode path.
+        self._position_mode: str = "single"
         # ── Advanced Risk Management config (Phase 3) ───────────────────
         # Set by start_futures from the bot create payload. When ARM is
         # off, these are ignored and positions use single-TP behaviour.
@@ -707,6 +719,10 @@ class FuturesEngine(NativeTradingEngine):
         # these (most don't) get the legacy unbounded behaviour.
         max_hold_candles:    int   = 0,    # close trade after N bars open
         max_stops_per_day:   int   = 0,    # halt new entries after N stops today
+        # ── Phase 9 — position mode (hedge support) ───────────────────
+        # "single" (default) = stop-and-reverse; "hedge" = allow a LONG and
+        # a SHORT to coexist on the same pair. See __init__ for details.
+        position_mode:       str   = "single",
         **_kwargs,
     ) -> dict:
         # Always do a clean stop before (re)starting.
@@ -729,6 +745,11 @@ class FuturesEngine(NativeTradingEngine):
         self._market_type  = "futures"
         self._max_open     = max_open_trades
         self._max_per_pair = 1   # ← STRICT: only 1 open position per pair at a time
+        # Position mode — normalise to a known value; anything unexpected
+        # falls back to the safe "single" (stop-and-reverse) path so a bad
+        # payload can never silently change risk behaviour.
+        _pm = str(position_mode or "single").strip().lower()
+        self._position_mode = _pm if _pm in ("single", "hedge", "concurrent") else "single"
         self._risk_pct     = max_position_pct / 100.0
         self._api_key      = kucoin_key
         self._api_sec      = kucoin_secret
@@ -1475,11 +1496,33 @@ class FuturesEngine(NativeTradingEngine):
 
             self.signal_count += 1
 
-            # If we hold an opposite-direction position on this pair AND
-            # the user picked "1 per pair + stop-and-reverse", close the
-            # old position now so the new one can open below.
+            # ── Position-mode: hedge same-side guard ────────────────────
+            # In hedge mode a LONG and a SHORT may coexist on a pair, but we
+            # never pyramid the SAME side. If a same-direction position is
+            # already open, skip this signal. Single mode is unaffected — it
+            # relies on the stop-and-reverse block below instead.
+            if self._position_mode == "hedge":
+                with self._lock:
+                    same_dir_open = any(
+                        p.pair == pair and p.direction == direction
+                        for p in self.positions.values()
+                    )
+                if same_dir_open:
+                    self.last_action = (
+                        f"HEDGE SKIP {pair} {direction} — a {direction} position "
+                        f"is already open (hedge keeps 1 long + 1 short per pair)"
+                    )
+                    self._log_action("hedge_same_dir_skip", self.last_action,
+                        pair=pair, direction=direction)
+                    continue
+
+            # If we hold an opposite-direction position on this pair AND the
+            # mode is stop-and-reverse ("single"), close the old position now
+            # so the new one can open below. In hedge mode opposite_keys is
+            # forced empty so BOTH legs stay open — we never close the
+            # opposite side on a flip.
             with self._lock:
-                opposite_keys = [
+                opposite_keys = [] if self._position_mode == "hedge" else [
                     k for k, p in self.positions.items()
                     if p.pair == pair and p.direction != direction
                 ]
