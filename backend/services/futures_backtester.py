@@ -590,6 +590,17 @@ def run_futures_backtest(
         precision_resolved_path_infer = 0
         precision_resolved_heuristic  = 0   # fallback when precision off
 
+        # Defaults that MUST exist for every code path (user-strategy success,
+        # name-matched fallback, or compile failure) so the per-bar loop never
+        # hits an undefined variable. pair_max_hold_candles was previously set
+        # only inside the user-strategy try block — a strategy that failed to
+        # compile (→ _guess_strategy fallback) crashed the loop with an
+        # UnboundLocalError. The exit-signal trio is the same contract.
+        pair_max_hold_candles = 0
+        use_exit_signals = False
+        exit_long_arr = None
+        exit_short_arr = None
+
         # ── User-strategy path: exec their generated_code and pre-populate
         # enter_long / enter_short signal columns on the dataframe ─────
         if use_user_strategy:
