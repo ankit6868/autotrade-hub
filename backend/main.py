@@ -2895,11 +2895,313 @@ def _cleanup_stale_test_trades(db):
         logging.getLogger("startup").warning("Stale trade cleanup failed: %s", e)
 
 
+_LORENTZIAN_LDC_CODE = '''
+from freqtrade.strategy import IStrategy
+import pandas as pd
+import numpy as np
+
+
+class LorentzianClassifier(IStrategy):
+    """
+    Lorentzian Distance Classifier (LDC) — faithful port of jdehorty's
+    "Machine Learning: Lorentzian Classification" for this engine.
+
+    A k-Nearest-Neighbors classifier over a 5-feature space {RSI, WT, CCI,
+    ADX} using LORENTZIAN distance (sum of ln(1+|a-b|)), gated by Volatility,
+    Regime (trend) and (optional) ADX filters plus a Nadaraya-Watson
+    rational-quadratic kernel trend filter.
+
+    Faithful to the original:
+      • Same 5 features + default params: RSI(14,1), WT(10,11), CCI(20,1),
+        ADX(20,2), RSI(9,1). Lorentzian distance. neighborsCount=8.
+      • jdehorty's training label = direction over the PAST 4 bars
+        (a 4-bar RISE -> short, a 4-bar FALL -> long).
+      • jdehorty's Approximate Nearest Neighbors: oldest->newest scan,
+        skip every 4th bar, admit only when distance >= last admitted, and
+        ratchet to the ~75th-percentile distance once the buffer exceeds k.
+      • Volatility / Regime (KLMF slope) / ADX filters + RQ kernel trend.
+      • Fixed 4-bar exit (max_hold_candles=4) + signal-flip (stop-and-reverse)
+        + optional dynamic kernel exit (USE_DYNAMIC_EXITS).
+
+    Engine adaptations (disclosed):
+      • Entries fill on the CLOSED bar (= jdehorty's "Use Worst Case
+        Estimate" mode; this engine never acts on a forming bar).
+      • A WIDE 3xATR / 6xATR structural SL/TP is attached as a catastrophe
+        safety net — the original has no price stop; the 4-bar exit and
+        signal flips remain the primary exits.
+
+    No look-ahead: every feature uses causal rolling/EWM math, normalization
+    uses EXPANDING (running) min/max, and labels are purely backward — so a
+    neighbour j < i is always already known from closed bars.
+    """
+
+    timeframe = "4h"
+    minimal_roi = {"0": 100}
+    stoploss = -0.99
+    can_short = True
+    process_only_new_candles = True
+    startup_candle_count = 300
+
+    # ── Engine opt-ins (read by this platform's futures engine + backtester) ─
+    max_bars_back    = 2000   # deep-history training window (paginated fetch)
+    max_hold_candles = 4      # jdehorty's fixed 4-bar exit
+    use_exit_signals = True   # honour exit_long/exit_short (dynamic kernel exit)
+
+    # ── ML / feature settings (jdehorty defaults) ───────────────────────────
+    NEIGHBORS_COUNT = 8
+    FEATURE_COUNT   = 5
+
+    # ── Filters ─────────────────────────────────────────────────────────────
+    USE_VOLATILITY_FILTER = True
+    USE_REGIME_FILTER     = True
+    USE_ADX_FILTER        = False
+    REGIME_THRESHOLD      = -0.1
+    ADX_THRESHOLD         = 20
+
+    # ── Kernel regression ───────────────────────────────────────────────────
+    USE_KERNEL_FILTER = True
+    KERNEL_LOOKBACK   = 8
+    KERNEL_REL_WEIGHT = 8.0
+    KERNEL_START_BAR  = 25
+    USE_DYNAMIC_EXITS = False
+
+    @staticmethod
+    def _ema(s, span):
+        return s.ewm(span=max(1, int(span)), adjust=False).mean()
+
+    @staticmethod
+    def _rescale01(s, old_min, old_max):
+        return (s - old_min) / max(1e-10, (old_max - old_min))
+
+    @staticmethod
+    def _normalize01(s):
+        cmin = s.cummin()
+        cmax = s.cummax()
+        return (s - cmin) / (cmax - cmin).replace(0, np.nan)
+
+    def _rsi(self, close, n):
+        d = close.diff()
+        g = d.clip(lower=0).ewm(alpha=1.0 / n, adjust=False).mean()
+        l = (-d.clip(upper=0)).ewm(alpha=1.0 / n, adjust=False).mean()
+        rs = g / l.replace(0, np.nan)
+        return (100 - 100 / (1 + rs)).fillna(50)
+
+    def _cci(self, close, high, low, n):
+        tp = (high + low + close) / 3.0
+        ma = tp.rolling(n).mean()
+        md = (tp - ma).abs().rolling(n).mean()
+        return (tp - ma) / (0.015 * md.replace(0, np.nan))
+
+    def _adx(self, high, low, close, n):
+        up = high.diff()
+        dn = -low.diff()
+        plus_dm  = np.where((up > dn) & (up > 0), up, 0.0)
+        minus_dm = np.where((dn > up) & (dn > 0), dn, 0.0)
+        prev = close.shift()
+        tr = pd.concat([(high - low).abs(), (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1.0 / n, adjust=False).mean().replace(0, np.nan)
+        plus_di  = 100 * pd.Series(plus_dm,  index=high.index).ewm(alpha=1.0 / n, adjust=False).mean() / atr
+        minus_di = 100 * pd.Series(minus_dm, index=high.index).ewm(alpha=1.0 / n, adjust=False).mean() / atr
+        dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0, np.nan)
+        return dx.ewm(alpha=1.0 / n, adjust=False).mean().fillna(0)
+
+    def _f_rsi(self, close, n1, n2):
+        return self._rescale01(self._ema(self._rsi(close, n1), n2), 0, 100)
+
+    def _f_wt(self, hlc3, n1, n2):
+        e1 = self._ema(hlc3, n1)
+        e2 = self._ema((hlc3 - e1).abs(), n1)
+        ci = (hlc3 - e1) / (0.015 * e2.replace(0, np.nan))
+        wt1 = self._ema(ci, n2)
+        wt2 = wt1.rolling(4).mean()
+        return self._normalize01(wt1 - wt2)
+
+    def _f_cci(self, close, high, low, n1, n2):
+        return self._normalize01(self._ema(self._cci(close, high, low, n1), n2))
+
+    def _f_adx(self, high, low, close, n1):
+        return self._rescale01(self._adx(high, low, close, n1), 0, 100).clip(0, 1)
+
+    def _kernel_rq(self, src, lookback, rel_weight, start_bar):
+        # Causal rational-quadratic weighted average (fixed-weight FIR).
+        L = int(start_bar) + 2
+        j = np.arange(L + 1)
+        w = (1.0 + (j ** 2) / (lookback ** 2 * 2.0 * rel_weight)) ** (-rel_weight)
+        x = src.to_numpy(dtype=float)
+        n = len(x)
+        out = np.full(n, np.nan)
+        for t in range(n):
+            m = min(t, L)
+            ww = w[:m + 1]
+            seg = x[t - m:t + 1][::-1]
+            out[t] = np.dot(seg, ww) / ww.sum()
+        return out
+
+    def _regime(self, df):
+        # jdehorty's regime filter: normalized slope decline of a KLMF.
+        src = (df["open"] + df["high"] + df["low"] + df["close"]).to_numpy() / 4.0
+        high = df["high"].to_numpy(); low = df["low"].to_numpy()
+        n = len(src)
+        value1 = np.zeros(n); value2 = np.zeros(n); klmf = np.zeros(n)
+        for t in range(1, n):
+            value1[t] = 0.2 * (src[t] - src[t - 1]) + 0.8 * value1[t - 1]
+            value2[t] = 0.1 * (high[t] - low[t]) + 0.8 * value2[t - 1]
+            omega = abs(value1[t] / value2[t]) if value2[t] != 0 else 0.0
+            alpha = (-omega ** 2 + np.sqrt(omega ** 4 + 16 * omega ** 2)) / 8.0 if omega > 0 else 0.0
+            klmf[t] = alpha * src[t] + (1 - alpha) * klmf[t - 1]
+        abs_slope = np.abs(np.diff(klmf, prepend=klmf[0]))
+        ema_slope = pd.Series(abs_slope).ewm(span=200, adjust=False).mean().to_numpy()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            nsd = np.where(ema_slope != 0, (abs_slope - ema_slope) / ema_slope, 0.0)
+        return nsd
+
+    def populate_indicators(self, df, metadata):
+        n = len(df)
+        if n < 60:
+            df["enter_long"] = 0; df["enter_short"] = 0
+            df["exit_long"] = 0; df["exit_short"] = 0
+            return df
+        close = df["close"]; high = df["high"]; low = df["low"]
+        hlc3 = (high + low + close) / 3.0
+
+        # ── Features (causal, normalized to ~[0,1]) ──
+        feats = [
+            self._f_rsi(close, 14, 1),
+            self._f_wt(hlc3, 10, 11),
+            self._f_cci(close, high, low, 20, 1),
+            self._f_adx(high, low, close, 20),
+            self._f_rsi(close, 9, 1),
+        ][:self.FEATURE_COUNT]
+        F = np.column_stack([f.to_numpy(dtype=float) for f in feats])
+        F = np.nan_to_num(F, nan=0.0)
+
+        # ── jdehorty training label: PAST 4-bar direction (rise->short,
+        #    fall->long). label[t] = sign(close[t-4] - close[t]). Backward =
+        #    causal for every neighbour j < i. ──
+        c = close.to_numpy(dtype=float)
+        labels = np.zeros(n)
+        labels[4:] = np.sign(c[:-4] - c[4:])
+
+        # ── Approximate Nearest Neighbors (jdehorty). Inner distance vector
+        #    is numpy-vectorized; the sequential admit/ratchet is cheap. ──
+        k = int(self.NEIGHBORS_COUNT)
+        mbb = int(self.max_bars_back)
+        pred = np.zeros(n)
+        warm = max(20, self.KERNEL_START_BAR + 5)
+        ratchet = (k * 3) // 4
+        for i in range(warm, n):
+            lo = max(0, i - mbb)
+            m = i - lo
+            if m < k:
+                continue
+            d_all = np.sum(np.log1p(np.abs(F[i] - F[lo:i])), axis=1)
+            lbl = labels[lo:i]
+            last_d = -1.0
+            dists = []
+            preds = []
+            for cnt in range(m):
+                if cnt % 4 == 0:        # skip every 4th (jdehorty's i%4)
+                    continue
+                d = d_all[cnt]
+                if d >= last_d:
+                    last_d = d
+                    dists.append(d)
+                    preds.append(lbl[cnt])
+                    if len(preds) > k:
+                        last_d = dists[ratchet]
+                        dists.pop(0)
+                        preds.pop(0)
+            pred[i] = sum(preds)
+
+        # ── Filters ──
+        prev = close.shift()
+        tr = pd.concat([(high - low).abs(), (high - prev).abs(), (low - prev).abs()], axis=1).max(axis=1)
+        recent_atr = tr.ewm(alpha=1.0, adjust=False).mean()
+        hist_atr   = tr.ewm(alpha=1.0 / 10, adjust=False).mean()
+        vol_ok = (recent_atr > hist_atr).to_numpy() if self.USE_VOLATILITY_FILTER else np.ones(n, bool)
+        nsd = self._regime(df)
+        regime_ok = (nsd >= self.REGIME_THRESHOLD) if self.USE_REGIME_FILTER else np.ones(n, bool)
+        adx_series = self._adx(high, low, close, 14).to_numpy()
+        adx_ok = (adx_series > self.ADX_THRESHOLD) if self.USE_ADX_FILTER else np.ones(n, bool)
+        filter_all = vol_ok & regime_ok & adx_ok
+
+        # ── Signal state (persists until a filtered flip) ──
+        signal = np.zeros(n); cur = 0
+        for i in range(n):
+            if pred[i] > 0 and filter_all[i]:
+                cur = 1
+            elif pred[i] < 0 and filter_all[i]:
+                cur = -1
+            signal[i] = cur
+
+        # ── Kernel trend filter ──
+        yhat = self._kernel_rq(close, self.KERNEL_LOOKBACK, self.KERNEL_REL_WEIGHT, self.KERNEL_START_BAR)
+        yprev = np.concatenate([[yhat[0]], yhat[:-1]])
+        bull_kernel = yhat > yprev
+        bear_kernel = yhat < yprev
+        if not self.USE_KERNEL_FILTER:
+            bull_kernel = np.ones(n, bool); bear_kernel = np.ones(n, bool)
+
+        long_ok  = (signal == 1) & bull_kernel & filter_all
+        short_ok = (signal == -1) & bear_kernel & filter_all
+
+        # ── Wide ATR structural SL/TP (catastrophe safety net; 4-bar
+        #    max-hold + signal flips are the primary exits) ──
+        atr14 = tr.ewm(alpha=1.0 / 14, adjust=False).mean().to_numpy()
+        sl = np.where(long_ok, c - 3.0 * atr14, np.where(short_ok, c + 3.0 * atr14, np.nan))
+        tp = np.where(long_ok, c + 6.0 * atr14, np.where(short_ok, c - 6.0 * atr14, np.nan))
+        df["sl_price"]  = sl
+        df["tp_price"]  = tp
+        df["tp2_price"] = np.nan
+
+        df["_long"]  = long_ok
+        df["_short"] = short_ok
+        df["_bull_kernel"] = bull_kernel
+        df["_bear_kernel"] = bear_kernel
+        df["_signal"] = signal
+        df["prediction"] = pred
+        return df
+
+    def populate_entry_trend(self, df, metadata):
+        df["enter_long"]  = df["_long"].astype(int)
+        df["enter_short"] = df["_short"].astype(int)
+        return df
+
+    def populate_exit_trend(self, df, metadata):
+        if self.USE_DYNAMIC_EXITS:
+            df["exit_long"]  = ((df["_signal"] == 1)  & df["_bear_kernel"]).astype(int)
+            df["exit_short"] = ((df["_signal"] == -1) & df["_bull_kernel"]).astype(int)
+        else:
+            df["exit_long"]  = 0
+            df["exit_short"] = 0
+        return df
+'''
+
+
 def _seed_builtin_strategies(db):
     """Ensure template strategies exist with correct trading configs."""
     from backend.models.strategy import Strategy
 
     templates = [
+        {
+            "name": "LorentzianClassifier",
+            "description": "Lorentzian Distance Classifier (LDC) — faithful port of "
+                           "jdehorty's ML Lorentzian Classification. k-NN (k=8) over a "
+                           "5-feature space {RSI(14), WT(10,11), CCI(20), ADX(20), RSI(9)} "
+                           "using Lorentzian distance, with his Approximate-Nearest-Neighbors "
+                           "selection (every-4th-bar skip + distance ratchet) and past-4-bar "
+                           "directional labels. Gated by Volatility + Regime (KLMF slope) "
+                           "filters and a Nadaraya-Watson rational-quadratic kernel trend "
+                           "filter. Exits: fixed 4-bar hold + signal-flip (stop-and-reverse) "
+                           "+ optional dynamic kernel exit. Fetches 2000 bars of deep history. "
+                           "Optimized for 4H-12H timeframes. Causal / no-repaint; a wide "
+                           "3xATR/6xATR stop is added as a safety net (the original has none).",
+            "code": _LORENTZIAN_LDC_CODE,
+            "stoploss": -0.08,
+            "take_profit": 0.12,
+            "leverage": 5,
+            "timeframe": "4h",
+        },
         {
             "name": "SMCStrategyTV",
             "description": "SMC v2 — TradingView Pine Script port (BOS + FVG mitigation). "
