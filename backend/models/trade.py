@@ -133,6 +133,13 @@ class StrategyInstance(Base):
     # a hedge bot in hedge mode after a backend restart. Default "single"
     # keeps every pre-existing bot's behaviour unchanged.
     position_mode      = Column(Text,    default="single")
+    # ── Per-bot strategy flag overrides (UI toggles, added 2026-06-13) ──
+    # JSON-encoded dict of boolean strategy options (e.g.
+    # {"use_exit_signals": true} for StrategyAsh's CHoCH exit, or the LDC's
+    # USE_DYNAMIC_EXITS / USE_ATR_STOPS). NULL = use the strategy's class
+    # defaults. Persisted so auto-resume restarts the bot with the same
+    # toggles the user picked. _lightweight_migrate auto-adds the column.
+    strategy_flags     = Column(Text,    nullable=True)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

@@ -838,6 +838,13 @@ class FuturesEngine(NativeTradingEngine):
         # "single" (default) = stop-and-reverse; "hedge" = allow a LONG and
         # a SHORT to coexist on the same pair. See __init__ for details.
         position_mode:       str   = "single",
+        # ── Per-bot strategy flag overrides ───────────────────────────
+        # UI on/off toggles for a strategy's boolean options (e.g.
+        # {'use_exit_signals': True} for StrategyAsh's CHoCH exit, or
+        # {'USE_DYNAMIC_EXITS': True} / {'USE_ATR_STOPS': True} for the LDC).
+        # Merged into _strategy_overrides['flags'] and applied onto the
+        # strategy instance every signal scan. None = strategy class defaults.
+        strategy_flags:      dict | None = None,
         **_kwargs,
     ) -> dict:
         # Always do a clean stop before (re)starting.
@@ -896,6 +903,10 @@ class FuturesEngine(NativeTradingEngine):
             "session_end_hr_utc":   max(0, min(23, int(session_end_hr_utc))),
             "equal_price_thresh":   max(0.0001, min(0.05, float(equal_price_thresh))),
         }
+        # UI flag toggles (CHoCH / LDC dynamic-exit / ATR-stops). evaluate_strategy
+        # reads overrides['flags'] and applies them onto the strategy instance.
+        if isinstance(strategy_flags, dict) and strategy_flags:
+            self._strategy_overrides["flags"] = dict(strategy_flags)
         # ── Optional per-strategy risk gates ─────────────────────────
         # max_hold_candles: force-close any position open longer than N
         # bars on the engine's execution TF. 0 = disabled. Useful for

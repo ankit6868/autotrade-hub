@@ -4,6 +4,7 @@ import React, { useEffect, useState, Suspense } from 'react';
 import { api } from '@/lib/api';
 import MetricCard from '@/components/ui/MetricCard';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
+import { STRATEGY_FLAGS, type StratFlag } from '@/lib/strategyFlags';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   BarChart, Bar, Cell,
@@ -48,23 +49,6 @@ function buildTimerange(days: number): string {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-
-// Per-strategy UI option toggles. Each flag maps to a boolean class attribute
-// the engine/backtester overrides on the strategy instance (via strategy_flags).
-// Only strategies listed here show toggles; everything else is unaffected.
-type StratFlag = { key: string; label: string; hint: string; default: boolean };
-const STRATEGY_FLAGS: Record<string, StratFlag[]> = {
-  StrategyAsh: [
-    { key: 'use_exit_signals', label: 'CHoCH early-exit', default: false,
-      hint: 'Close a trade early when an opposite Change-of-Character (bias flip) prints. OFF = let the trade run to its SL / TP / ARM targets (recommended). ON can whipsaw and preempt take-profits.' },
-  ],
-  LorentzianClassifier: [
-    { key: 'USE_DYNAMIC_EXITS', label: 'Dynamic kernel exit', default: false,
-      hint: 'Exit when the Nadaraya-Watson kernel flips against the position (jdehorty’s "Use Dynamic Exits"). OFF = exit on the 4-bar hold + signal flips.' },
-    { key: 'USE_ATR_STOPS', label: 'ATR structural stops', default: false,
-      hint: 'Use the strategy’s own wide 3xATR / 6xATR stop instead of your slider SL/TP. OFF = your configured SL/TP drives both backtest and live (recommended for parity).' },
-  ],
-};
 
 // Highest-profit timeframe in a sweep (skips errored rows). The UI marks it
 // with a ★ — but the goal is robustness, not picking the single top number.

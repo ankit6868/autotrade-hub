@@ -485,6 +485,25 @@ def _ensure_live_credentials(eng, user_id: str, db: Session) -> tuple[bool, str 
     return True, None
 
 
+def _decode_strategy_flags(raw):
+    """Decode a StrategyInstance.strategy_flags JSON column into a flat dict of
+    booleans (or None). Tolerates NULL / legacy / malformed values so an old
+    row can never crash auto-resume."""
+    if not raw:
+        return None
+    if isinstance(raw, dict):
+        d = raw
+    else:
+        try:
+            import json as _json
+            d = _json.loads(raw)
+        except Exception:
+            return None
+    if not isinstance(d, dict) or not d:
+        return None
+    return {str(k): bool(v) for k, v in d.items()}
+
+
 def _fetch_kucoin_live_position(eng, pair: str, direction: str | None = None) -> dict | None:
     """Fetch ONE open live position straight from KuCoin by (pair, direction).
 
@@ -6123,6 +6142,8 @@ def list_futures_bots(
                 # Phase 9 — restore hedge mode on resume (None/legacy rows
                 # normalise to "single" inside start_futures).
                 position_mode        = str(getattr(i, "position_mode", "single") or "single"),
+                # Restore the user's strategy flag toggles (CHoCH / LDC opts).
+                strategy_flags       = _decode_strategy_flags(getattr(i, "strategy_flags", None)),
             )
             log.info("Auto-resumed bot %s for user %s (ARM=%s)",
                      i.engine_key, user_id, getattr(i, "arm_enabled", False))
@@ -6251,6 +6272,7 @@ def list_futures_bots(
             "stoploss": i.stoploss,
             "takeprofit": i.takeprofit,
             "position_mode": getattr(i, "position_mode", "single") or "single",
+            "strategy_flags": _decode_strategy_flags(getattr(i, "strategy_flags", None)),
             "engine_key": i.engine_key,
             "created_at": str(i.created_at),
         })
@@ -6323,6 +6345,18 @@ def create_futures_bot(
     position_mode = str(req.get("position_mode", "single") or "single").strip().lower()
     if position_mode not in ("single", "hedge"):
         position_mode = "single"
+
+    # ── Per-bot strategy flag overrides (UI toggles) ──────────────────
+    # Sanitised to a flat dict of booleans so a bad payload can't inject
+    # arbitrary state. JSON-stored on the row; passed as a dict to the engine.
+    import json as _json_flags
+    _raw_sf = req.get("strategy_flags")
+    strategy_flags = None
+    if isinstance(_raw_sf, dict) and _raw_sf:
+        strategy_flags = {str(k): bool(v) for k, v in _raw_sf.items()
+                          if isinstance(v, (bool, int))}
+        strategy_flags = strategy_flags or None
+    strategy_flags_json = _json_flags.dumps(strategy_flags) if strategy_flags else None
 
     strat = None
     if strategy_id:
@@ -6507,6 +6541,8 @@ def create_futures_bot(
         # Phase 9 — persist position mode so auto-resume restarts hedge
         # bots in hedge mode (not the safe-default "single").
         position_mode        = position_mode,
+        # UI strategy flag toggles (JSON) — persisted for auto-resume.
+        strategy_flags       = strategy_flags_json,
     )
     db.add(instance)
     db.commit()
@@ -6551,12 +6587,14 @@ def create_futures_bot(
         max_hold_candles     = max_hold_candles,
         max_stops_per_day    = max_stops_per_day,
         position_mode        = position_mode,
+        strategy_flags       = strategy_flags,
     )
 
     log_event(db, user_id, "futures.create_bot", request, payload={
         "instance_id": instance.id, "strategy": strategy_name, "leverage": leverage,
         "mode": mode, "max_position_pct": max_position_pct,
         "position_mode": position_mode,
+        "strategy_flags": strategy_flags,
         "arm_enabled": arm_enabled,
         "arm_tp1_close_pct": arm_tp1_close_pct if arm_enabled else None,
         "arm_be_mode": arm_be_mode if arm_enabled else None,
@@ -6795,6 +6833,7 @@ def futures_bot_performance(
         "equal_price_thresh":   getattr(instance, "equal_price_thresh",   0.001),
         # Position mode (Phase 9 — hedge support)
         "position_mode":        getattr(instance, "position_mode", "single") or "single",
+        "strategy_flags":       _decode_strategy_flags(getattr(instance, "strategy_flags", None)),
         "signal_criteria": signal_criteria,
         "trades": [
             {

@@ -3564,6 +3564,18 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
                 creds_cache[i.user_id] = (kk, ks, kp)
             kk, ks, kp = creds_cache[i.user_id]
             pairs = [p.strip() for p in (i.pairs or "BTC/USDT").split(",")]
+            # Decode the persisted strategy flag toggles (JSON) so the bot
+            # resumes with the same options the user picked.
+            _sf_raw = getattr(i, "strategy_flags", None)
+            _sf = None
+            if _sf_raw:
+                try:
+                    import json as _json_sf
+                    _sf = _json_sf.loads(_sf_raw) if isinstance(_sf_raw, str) else (_sf_raw if isinstance(_sf_raw, dict) else None)
+                    if not isinstance(_sf, dict) or not _sf:
+                        _sf = None
+                except Exception:
+                    _sf = None
             try:
                 eng.start_futures(
                     strategy_name=i.strategy_name, pairs=pairs,
@@ -3587,6 +3599,7 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
                     # Phase 9 — restore hedge mode on resume (None/legacy
                     # rows normalise to "single" inside start_futures).
                     position_mode        = getattr(i, "position_mode", None),
+                    strategy_flags       = _sf,
                 )
                 resumed += 1
                 # Re-apply paused state if the bot was paused before the

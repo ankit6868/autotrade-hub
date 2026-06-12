@@ -2,6 +2,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
 import StrategyPreview from './StrategyPreview';
+import { STRATEGY_FLAGS, buildStrategyFlags } from '@/lib/strategyFlags';
 
 interface Props {
   pair: string;
@@ -747,6 +748,9 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   // signals open the OTHER side instead of closing. The live/paper engine
   // honours this via FuturesEngine._position_mode (gated stop-and-reverse).
   const [positionMode, setPositionMode] = useState<'single' | 'hedge'>('single');
+  // Per-strategy option toggles (CHoCH exit / LDC dynamic-exit / ATR-stops).
+  // Keyed by flag name; falls back to each flag's default when unset.
+  const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean>>({});
 
   // ── Phase 5e: Strategy preview state ─────────────────────────────────────
   // Tracked here so we can disable the Create button in LIVE mode when the
@@ -869,6 +873,11 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         // SHORT coexist). Backend persists it on the StrategyInstance and the
         // live/paper engine honours it (gated stop-and-reverse).
         position_mode: positionMode,
+        // Per-strategy option toggles (CHoCH / LDC dynamic-exit / ATR-stops).
+        // Persisted on the StrategyInstance and applied every signal scan, so
+        // the bot behaves the same as the backtest with these toggles.
+        ...(buildStrategyFlags(bot.name, strategyFlags)
+            ? { strategy_flags: buildStrategyFlags(bot.name, strategyFlags) } : {}),
         // Advanced Risk Management — backend stores AND enforces these in the
         // live/paper engine (TP1 partial-close + BE-trail). UI matches backtest.
         arm_enabled:        armEnabled,
@@ -1380,6 +1389,35 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                   : <>An opposite signal <b className="text-sky-300">flips</b> the position (closes the old, opens the new). One position per pair.</>}
               </p>
             </div>
+
+            {/* ── Strategy options (per-strategy flag toggles) ──────────────
+                Only shown for strategies that expose tunable flags (StrategyAsh
+                CHoCH exit; LDC dynamic-exit / ATR-stops). Flips a class attr on
+                the strategy via strategy_flags — applied live + persisted. */}
+            {(STRATEGY_FLAGS[bot.name] || []).length > 0 && (
+              <div className="rounded-lg border border-violet-500/30 bg-violet-500/[0.05] p-3">
+                <div className="flex items-center gap-2 mb-2 flex-wrap">
+                  <span className="text-xs font-bold text-violet-200">🎛 {bot.name} options</span>
+                  <span className="text-[9px] text-slate-500">applied live — keep these the same as your backtest</span>
+                </div>
+                <div className="flex flex-col gap-1.5">
+                  {(STRATEGY_FLAGS[bot.name] || []).map(f => (
+                    <label key={f.key} className="flex items-start gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={strategyFlags[f.key] ?? f.default}
+                        onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked }))}
+                        className="accent-violet-500 mt-0.5"
+                      />
+                      <span className="text-[11px] leading-snug">
+                        <span className="text-slate-200 font-medium">{f.label}</span>
+                        <span className="text-slate-500"> — {f.hint}</span>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Advanced Settings */}
             <div>
