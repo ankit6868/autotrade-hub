@@ -333,6 +333,11 @@ export const api = {
         requestLongRunning<any>('/api/futures/backtest/run', { method: 'POST', body: JSON.stringify(data) }),
       autoTune: (data: Record<string, unknown>) =>
         requestLongRunning<any>('/api/futures/backtest/auto-tune', { method: 'POST', body: JSON.stringify(data) }),
+      // Run the same strategy + settings across several timeframes and return
+      // a side-by-side comparison (exploration tool — pick a robust TF, don't
+      // cherry-pick the best number). Long-running: each TF is a full backtest.
+      timeframeSweep: (data: Record<string, unknown>) =>
+        requestLongRunning<any>('/api/futures/backtest/timeframe-sweep', { method: 'POST', body: JSON.stringify(data) }),
       history: (limit = 20) =>
         request<any>(`/api/futures/backtest/history?limit=${limit}`),
     },

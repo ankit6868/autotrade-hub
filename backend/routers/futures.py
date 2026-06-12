@@ -782,6 +782,153 @@ def select_desc_json(result: dict) -> str:
     })
 
 
+@router.post("/backtest/timeframe-sweep")
+def backtest_timeframe_sweep(
+    req: dict,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Run the SAME strategy + settings across several timeframes and return a
+    side-by-side comparison, so you can see which timeframe the strategy is
+    actually suited to.
+
+    EXPLORATION TOOL — NOT an optimizer. Do NOT just cherry-pick the single
+    most-profitable timeframe (that's curve-fitting and fails live). Look for
+    a timeframe that's CONSISTENTLY reasonable and re-test it on a DIFFERENT
+    period before trusting it. Each row is a full, independent backtest using
+    the exact same logic as /backtest/run; results are NOT persisted.
+    """
+    from backend.services.futures_backtester import run_futures_backtest as _run
+    from backend.models.strategy import Strategy
+    from sqlalchemy import or_
+
+    _VALID_TFS = ("1m", "5m", "15m", "30m", "1h", "4h")
+    timeframes = req.get("timeframes") or ["5m", "15m", "1h", "4h"]
+    # De-dup, keep valid only, cap at 6 so the sweep can't run forever.
+    seen: set = set()
+    tfs: list[str] = []
+    for tf in timeframes:
+        if tf in _VALID_TFS and tf not in seen:
+            seen.add(tf); tfs.append(tf)
+        if len(tfs) >= 6:
+            break
+    if not tfs:
+        return {"error": "no valid timeframes (allowed: 1m, 5m, 15m, 30m, 1h, 4h)"}
+
+    # ── Parse every backtest param exactly like /backtest/run, EXCEPT the
+    #    timeframe (which we vary). Shared so each row is apples-to-apples.
+    pairs            = req.get("pairs", ["BTC/USDT"])
+    timerange        = req.get("timerange", "20240101-20240401")
+    leverage         = min(LEAD_MAX_LEVERAGE, int(req.get("leverage", 10)))
+    starting_balance = float(req.get("starting_balance", 1000))
+    stoploss_pct     = float(req.get("stoploss_pct", 3.0))
+    take_profit_pct  = float(req.get("take_profit_pct", 1.5))
+    max_concurrent   = max(1, min(1000, int(req.get("max_concurrent_positions", 999))))
+    position_mode    = str(req.get("position_mode", "single")).lower()
+    if position_mode not in ("single", "hedge", "concurrent"):
+        position_mode = "single"
+    risk_pct         = max(1, min(50, float(req.get("risk_per_trade_pct", 5))))
+    risk_per_trade   = risk_pct / 100.0
+    force_slider     = bool(req.get("force_slider_sltp", False))
+    deduct_costs     = bool(req.get("deduct_real_costs", False))
+    arm_enabled      = bool(req.get("arm_enabled", False))
+    arm_tp1_close_pct = max(1.0, min(99.0, float(req.get("arm_tp1_close_pct", 50.0))))
+    arm_be_mode      = str(req.get("arm_be_mode", "leverage"))
+    if arm_be_mode not in ("leverage", "manual_pct", "entry"):
+        arm_be_mode = "leverage"
+    arm_be_buffer_pct = max(0.0, min(10.0, float(req.get("arm_be_buffer_pct", 1.0))))
+    arm_trail_to_tp1 = bool(req.get("arm_trail_to_tp1", True))
+    tick_precision   = bool(req.get("tick_precision", False))
+    vip_tier         = max(0, min(12, int(req.get("vip_tier", 0))))
+    maker_only_entry = bool(req.get("maker_only_entry", False))
+    use_risk_engine  = bool(req.get("use_risk_engine", False))
+
+    # Resolve the strategy code once (same for every timeframe).
+    strategy_id   = req.get("strategy_id")
+    strategy_name = req.get("strategy_name", "SimpleTargetStrategy")
+    generated_code: str | None = None
+    if strategy_id:
+        strategy = db.execute(
+            select(Strategy).where(
+                Strategy.id == strategy_id,
+                or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa
+            )
+        ).scalar_one_or_none()
+        if strategy:
+            strategy_name  = strategy.name
+            generated_code = strategy.generated_code
+
+    risk_overrides = None
+    if use_risk_engine:
+        try:
+            from backend.services.risk_engine import load_user_risk_overrides
+            risk_overrides = load_user_risk_overrides(user_id)
+        except Exception:
+            risk_overrides = None
+
+    sweep: list[dict] = []
+    for tf in tfs:
+        try:
+            r = _run(
+                strategy_name    = strategy_name,
+                pairs            = pairs,
+                timeframe        = tf,
+                timerange        = timerange,
+                leverage         = leverage,
+                starting_balance = starting_balance,
+                stoploss_pct     = stoploss_pct,
+                take_profit_pct  = take_profit_pct,
+                generated_code   = generated_code,
+                max_concurrent_positions = max_concurrent,
+                position_mode    = position_mode,
+                risk_per_trade   = risk_per_trade,
+                force_slider_sltp = force_slider,
+                deduct_real_costs = deduct_costs,
+                arm_enabled       = arm_enabled,
+                arm_tp1_close_pct = arm_tp1_close_pct,
+                arm_be_mode       = arm_be_mode,
+                arm_be_buffer_pct = arm_be_buffer_pct,
+                arm_trail_to_tp1  = arm_trail_to_tp1,
+                tick_precision    = tick_precision,
+                vip_tier          = vip_tier,
+                maker_only_entry  = maker_only_entry,
+                use_risk_engine   = use_risk_engine,
+                risk_overrides_for_run = risk_overrides,
+            )
+            if isinstance(r, dict) and "error" in r:
+                sweep.append({"timeframe": tf, "error": str(r["error"])[:200]})
+                continue
+            m = r.get("metrics", {})
+            sweep.append({
+                "timeframe":        tf,
+                "total_trades":     m.get("total_trades", 0),
+                "win_rate":         m.get("win_rate", 0.0),
+                "total_profit_pct": m.get("total_profit_pct", 0.0),
+                "total_profit_abs": m.get("total_profit_abs", 0.0),
+                "max_drawdown":     m.get("max_drawdown", 0.0),
+                "final_balance":    m.get("final_balance", starting_balance),
+                "winning_trades":   m.get("winning_trades", 0),
+                "losing_trades":    m.get("losing_trades", 0),
+                "long_trades":      m.get("long_trades", 0),
+                "short_trades":     m.get("short_trades", 0),
+            })
+        except Exception as exc:
+            sweep.append({"timeframe": tf, "error": str(exc)[:200]})
+
+    return {
+        "sweep":         sweep,
+        "strategy_name": strategy_name,
+        "pairs":         pairs,
+        "timerange":     timerange,
+        "leverage":      leverage,
+        # Surfaced to the UI so the user is reminded what this is (and isn't).
+        "note": ("Exploration tool — pick a timeframe that is CONSISTENTLY "
+                 "reasonable across periods, not the single highest number "
+                 "(that is overfitting). Always re-test your pick on a "
+                 "different period and paper-trade before going live."),
+    }
+
+
 @router.post("/backtest/auto-tune")
 def auto_tune_futures_backtest(
     req: dict,

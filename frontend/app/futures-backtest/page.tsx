@@ -49,6 +49,17 @@ function buildTimerange(days: number): string {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Highest-profit timeframe in a sweep (skips errored rows). The UI marks it
+// with a ★ — but the goal is robustness, not picking the single top number.
+function bestSweepTf(sweep: any[]): string | null {
+  let best: any = null;
+  for (const r of sweep || []) {
+    if (r.error) continue;
+    if (best === null || (r.total_profit_pct ?? -1e9) > (best.total_profit_pct ?? -1e9)) best = r;
+  }
+  return best ? best.timeframe : null;
+}
+
 function FuturesBacktestInner() {
   // ── Config ─────────────────────────────────────────────────────────────────
   const [strategies,      setStrategies]      = useState<any[]>([]);
@@ -114,6 +125,9 @@ function FuturesBacktestInner() {
   const [result,   setResult]   = useState<any>(null);
   const [tuning,   setTuning]   = useState(false);
   const [tuneResult, setTuneResult] = useState<any>(null);
+  // ── Timeframe comparison sweep (exploration tool) ──
+  const [sweeping,    setSweeping]    = useState(false);
+  const [sweepResult, setSweepResult] = useState<any>(null);
   const [history,  setHistory]  = useState<any[]>([]);
   const [error,    setError]    = useState('');
   // Trade-table view mode: 'compact' = our dense one-row-per-trade view
@@ -900,6 +914,46 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
       }
     } catch (e) { setError(friendlyError(e)); }
     setRunning(false);
+  }
+
+  // ── Timeframe comparison sweep ──
+  // Runs the SAME strategy + settings across several timeframes so you can see
+  // which TF the strategy is actually suited to. Exploration only — pick a
+  // robust TF, don't cherry-pick the single best number. Each TF is a full,
+  // independent backtest, so this takes longer than a single run.
+  async function runSweep() {
+    if (!strategyId) return;
+    setSweeping(true); setSweepResult(null); setError('');
+    const activeRange = selectedPreset === 'Custom' ? customRange : timerange;
+    try {
+      const data = await api.futures.backtest.timeframeSweep({
+        strategy_id:      strategyId,
+        pairs,
+        timeframes:       ['5m', '15m', '1h', '4h'],
+        timerange:        activeRange,
+        leverage,
+        starting_balance: startBalance,
+        stoploss_pct:     stoploss,
+        take_profit_pct:  takeProfit,
+        max_concurrent_positions: pyramiding,
+        position_mode:    positionMode,
+        risk_per_trade_pct: riskPerTrade,
+        force_slider_sltp: sltpMode === 'slider',
+        deduct_real_costs: deductCosts,
+        arm_enabled:        armEnabled,
+        arm_tp1_close_pct:  armTp1ClosePct,
+        arm_be_mode:        armBeMode,
+        arm_be_buffer_pct:  armBeBufferPct,
+        arm_trail_to_tp1:   armTrailToTp1,
+        tick_precision:     tickPrecision,
+        vip_tier:           vipTier,
+        maker_only_entry:   makerOnlyEntry,
+        use_risk_engine:    useRiskEngine,
+      });
+      if (data.error) setError(data.error);
+      else setSweepResult(data);
+    } catch (e) { setError(friendlyError(e)); }
+    setSweeping(false);
   }
 
   // Export the trade table as a CSV file. Columns are deliberately ordered
@@ -1835,10 +1889,16 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
               : `▶ Run ${selectedPreset} Futures Backtest`}
           </button>
           <button onClick={autoTune}
-            disabled={running || tuning || !strategyId || isHighFreqTooLong || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
+            disabled={running || tuning || sweeping || !strategyId || isHighFreqTooLong || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
             className="px-5 py-3 rounded-xl text-sm font-semibold border border-amber-500/40 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
             title="Run a small grid of SL/TP combos (20 backtests) and show which combination gives the best result. Takes 1–3 minutes (data is cached so all runs share one download).">
             {tuning ? '🔬 Auto-tuning (20 runs)…' : '🔬 Auto-tune SL/TP'}
+          </button>
+          <button onClick={runSweep}
+            disabled={running || tuning || sweeping || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
+            className="px-5 py-3 rounded-xl text-sm font-semibold border border-sky-500/40 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Run this strategy across 5m / 15m / 1h / 4h and compare — to see which timeframe it's suited to. Exploration only: pick a CONSISTENTLY good TF, don't cherry-pick the best number. Takes a few minutes (4 full backtests).">
+            {sweeping ? '⏱ Comparing 5m·15m·1h·4h…' : '⏱ Compare Timeframes'}
           </button>
         </div>
 
@@ -1859,6 +1919,74 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
           </div>
         )}
       </div>
+
+      {/* Timeframe comparison sweep */}
+      {sweeping && (
+        <div className="card p-6 mt-6 text-center text-sm text-slate-400">
+          ⏱ Running 4 backtests (5m · 15m · 1h · 4h)… this takes a few minutes (each timeframe is a full backtest).
+        </div>
+      )}
+      {sweepResult && !sweeping && (() => {
+        const rows: any[] = sweepResult.sweep || [];
+        const bestTf = bestSweepTf(rows);
+        return (
+          <div className="card p-6 mt-6">
+            <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+              <h3 className="text-base font-bold text-white">⏱ Timeframe Comparison — {sweepResult.strategy_name}</h3>
+              <span className="text-xs text-slate-500">{(sweepResult.pairs || []).join(', ')} · {sweepResult.timerange} · {sweepResult.leverage}x</span>
+            </div>
+            {sweepResult.note && (
+              <div className="mb-3 text-[11px] text-amber-300/90 bg-amber-500/[0.06] border border-amber-500/20 rounded-lg px-3 py-2">
+                ⚠ {sweepResult.note}
+              </div>
+            )}
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-left text-slate-400 border-b border-white/10">
+                    <th className="py-2 px-2">Timeframe</th>
+                    <th className="py-2 px-2 text-right">Trades</th>
+                    <th className="py-2 px-2 text-right">Win&nbsp;Rate</th>
+                    <th className="py-2 px-2 text-right">Profit&nbsp;%</th>
+                    <th className="py-2 px-2 text-right">Max&nbsp;DD</th>
+                    <th className="py-2 px-2 text-right">Final&nbsp;$</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row: any) => {
+                    if (row.error) return (
+                      <tr key={row.timeframe} className="border-b border-white/[0.04]">
+                        <td className="py-2 px-2 font-semibold text-slate-200">{row.timeframe}</td>
+                        <td className="py-2 px-2 text-right text-red-400" colSpan={5}>error: {row.error}</td>
+                      </tr>
+                    );
+                    const isBest = row.timeframe === bestTf;
+                    const pos = (row.total_profit_pct ?? 0) >= 0;
+                    return (
+                      <tr key={row.timeframe} className={`border-b border-white/[0.04] ${isBest ? 'bg-emerald-500/[0.06]' : ''}`}>
+                        <td className="py-2 px-2 font-semibold text-slate-200">
+                          {row.timeframe}{isBest && <span className="ml-1 text-emerald-400 text-[10px]">★ best</span>}
+                        </td>
+                        <td className="py-2 px-2 text-right text-slate-300">{row.total_trades}</td>
+                        <td className="py-2 px-2 text-right text-slate-300">{((row.win_rate ?? 0) * 100).toFixed(1)}%</td>
+                        <td className={`py-2 px-2 text-right font-semibold ${pos ? 'text-emerald-400' : 'text-red-400'}`}>
+                          {pos ? '+' : ''}{(row.total_profit_pct ?? 0).toFixed(2)}%
+                        </td>
+                        <td className="py-2 px-2 text-right text-amber-300">{(row.max_drawdown ?? 0).toFixed(2)}%</td>
+                        <td className="py-2 px-2 text-right text-slate-300">${(row.final_balance ?? 0).toFixed(0)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <p className="mt-3 text-[11px] text-slate-500">
+              ★ marks the highest profit — but the goal is <span className="text-slate-300">robustness</span>, not the top number.
+              Prefer a timeframe with a reasonable profit <em>and</em> a sane trade count <em>and</em> low drawdown, then re-test it on a different period before trusting it.
+            </p>
+          </div>
+        );
+      })()}
 
       {/* Loading */}
       {running && (
