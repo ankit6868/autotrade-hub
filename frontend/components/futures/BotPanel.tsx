@@ -1405,9 +1405,9 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                     <div key={f.key} className="flex items-start gap-2">
                       <input
                         type="number"
-                        min={f.min} max={f.max}
+                        min={f.min} max={f.max} step={f.step ?? 1}
                         value={Number(strategyFlags[f.key] ?? f.default)}
-                        onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? 0, Math.min(f.max ?? 9999, Number(e.target.value) || 0)) }))}
+                        onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? -9999, Math.min(f.max ?? 9999, Number(e.target.value) || 0)) }))}
                         className="w-14 px-2 py-1 rounded bg-[#0f1729] border border-violet-500/30 text-[11px] text-slate-100"
                       />
                       <span className="text-[11px] leading-snug">

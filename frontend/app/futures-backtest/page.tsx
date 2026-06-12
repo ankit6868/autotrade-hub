@@ -261,6 +261,11 @@ function FuturesBacktestInner() {
       setTimeframe('15m');
       setTfSrc('default');
     }
+    // Reset the strategy's option toggles/knobs back to their defaults — an
+    // empty state means every control falls back to its manifest default
+    // (= the strategy's own default), so "Apply strategy params" restores
+    // ALL of the strategy's settings, not just SL/TP/leverage/timeframe.
+    setStrategyFlags({});
     return true;
   }
 
@@ -1716,9 +1721,9 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
                 <div key={f.key} className="flex items-start gap-2">
                   <input
                     type="number"
-                    min={f.min} max={f.max}
+                    min={f.min} max={f.max} step={f.step ?? 1}
                     value={Number(flagVal(f))}
-                    onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? 0, Math.min(f.max ?? 9999, Number(e.target.value) || 0)) }))}
+                    onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? -9999, Math.min(f.max ?? 9999, Number(e.target.value) || 0)) }))}
                     className="w-16 px-2 py-1 rounded bg-[#0f1729] border border-violet-500/30 text-xs text-slate-100"
                   />
                   <span className="text-xs leading-snug">
