@@ -1404,15 +1404,16 @@ class StrategyAsh(IStrategy):
     timeframe         = "5m"
     bias_timeframes   = ["15m", "1h", "4h"]    # HTF / MTF context
     sub_timeframes    = ["1m", "3m"]           # LTF sub-bar sweep detection
-    max_hold_candles  = 60                     # 60 × 5m = 5h (BACKSTOP only)
-    # The strategy's PRIMARY early-exit is the opposite-CHoCH signal in
-    # populate_exit_trend (exit_long=choch_dn / exit_short=choch_up). Those
-    # columns were silently ignored until this opt-in — without it the only
-    # exits were SL/TP + the 5h max-hold, so on short timeframes every trade
-    # timed out via max_hold_expired. With exit signals on, the trade closes
-    # on a real bias flip and max_hold is just the safety net it was meant to
-    # be.
-    use_exit_signals  = True
+    max_hold_candles  = 60                     # 60 × 5m = 5h (backstop)
+    # Optional aggressive risk-management: close a trade early on an opposite
+    # CHoCH (bias flip). DEFAULT OFF so each trade runs to its SL / TP / ARM
+    # targets (TP1 partial + BE trail + TP2) instead of being cut short. When
+    # ON, CHoCH becomes the PRIMARY exit (the author's original intent) — but
+    # on choppy ranges it whipsaws and preempts the ARM take-profits (most
+    # trades exit as 'exit_signal' before TP1 is ever reached). Turn it on
+    # only if you specifically want structure-flip exits over ARM TPs.
+    USE_CHOCH_EXIT    = False
+    use_exit_signals  = USE_CHOCH_EXIT         # engine honours exit cols only when on
     max_stops_per_day = 3                      # halt after 3 stops today
     minimal_roi   = {"0": 100}                 # exits via engine SL/TP
     stoploss      = -0.99                      # disable Freqtrade global SL
@@ -1948,13 +1949,15 @@ class StrategyAsh(IStrategy):
         return df
 
     def populate_exit_trend(self, df, metadata):
-        # Engine handles SL / TP1 / TP2 / max_hold_candles automatically.
-        # Strategy emits an early-exit signal on OPPOSITE CHoCH (bias flip
-        # confirmation) so a fresh signal in the wrong direction force-
-        # closes an otherwise still-running trade. This is the "manage
-        # the open trade" rule from the spec.
-        df["exit_long"]  = df["choch_dn"].astype(int)
-        df["exit_short"] = df["choch_up"].astype(int)
+        # SL / TP1 / TP2 / max_hold are handled by the engine. The opposite-
+        # CHoCH early-exit is OPT-IN via USE_CHOCH_EXIT (off by default) so the
+        # ARM take-profits aren't preempted.
+        if self.USE_CHOCH_EXIT:
+            df["exit_long"]  = df["choch_dn"].astype(int)
+            df["exit_short"] = df["choch_up"].astype(int)
+        else:
+            df["exit_long"]  = 0
+            df["exit_short"] = 0
         return df
 '''
 
