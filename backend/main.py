@@ -2965,6 +2965,17 @@ class LorentzianClassifier(IStrategy):
     KERNEL_START_BAR  = 25
     USE_DYNAMIC_EXITS = False
 
+    # ── Exits / stops ───────────────────────────────────────────────────────
+    # jdehorty's LDC has NO price stop — exits are the 4-bar max-hold + signal
+    # flips (+ optional dynamic kernel exit). With USE_ATR_STOPS = False
+    # (default) the strategy attaches NO structural SL/TP, so the bot's
+    # CONFIGURED SL/TP (the sliders) apply IDENTICALLY in backtest and
+    # paper/live — no structural-vs-slider divergence, and matches jdehorty.
+    # Set True to instead use a wide 3xATR/6xATR catastrophe stop from the
+    # strategy (then run the backtest with SL/TP source = "strategy" to match
+    # what paper/live will do).
+    USE_ATR_STOPS = False
+
     @staticmethod
     def _ema(s, span):
         return s.ewm(span=max(1, int(span)), adjust=False).mean()
@@ -3145,13 +3156,18 @@ class LorentzianClassifier(IStrategy):
         long_ok  = (signal == 1) & bull_kernel & filter_all
         short_ok = (signal == -1) & bear_kernel & filter_all
 
-        # ── Wide ATR structural SL/TP (catastrophe safety net; 4-bar
-        #    max-hold + signal flips are the primary exits) ──
-        atr14 = tr.ewm(alpha=1.0 / 14, adjust=False).mean().to_numpy()
-        sl = np.where(long_ok, c - 3.0 * atr14, np.where(short_ok, c + 3.0 * atr14, np.nan))
-        tp = np.where(long_ok, c + 6.0 * atr14, np.where(short_ok, c - 6.0 * atr14, np.nan))
-        df["sl_price"]  = sl
-        df["tp_price"]  = tp
+        # ── SL/TP source ──
+        # Default: attach NONE, so the bot's configured SL/TP (sliders) drive
+        # both backtest AND paper/live identically (no divergence). The 4-bar
+        # max-hold + signal flips remain the primary exits. Opt in to a wide
+        # 3xATR/6xATR strategy stop via USE_ATR_STOPS.
+        if self.USE_ATR_STOPS:
+            atr14 = tr.ewm(alpha=1.0 / 14, adjust=False).mean().to_numpy()
+            df["sl_price"] = np.where(long_ok, c - 3.0 * atr14, np.where(short_ok, c + 3.0 * atr14, np.nan))
+            df["tp_price"] = np.where(long_ok, c + 6.0 * atr14, np.where(short_ok, c - 6.0 * atr14, np.nan))
+        else:
+            df["sl_price"] = np.nan
+            df["tp_price"] = np.nan
         df["tp2_price"] = np.nan
 
         df["_long"]  = long_ok
