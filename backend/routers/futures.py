@@ -688,6 +688,12 @@ def run_futures_backtest(
     # always since Phase 4). Default OFF so existing API callers / auto-tune
     # runs see no change unless they explicitly enable it.
     use_risk_engine  = bool(req.get("use_risk_engine", False))
+    # UI flag overrides for the strategy (e.g. {"use_exit_signals": true} to
+    # turn StrategyAsh's CHoCH exit on, or {"USE_ATR_STOPS": true} /
+    # {"USE_DYNAMIC_EXITS": true} for the LDC). Only booleans/numbers; applied
+    # onto the strategy instance in evaluate_strategy.
+    _raw_flags       = req.get("strategy_flags")
+    strategy_flags   = _raw_flags if isinstance(_raw_flags, dict) and _raw_flags else None
 
     # Resolve strategy — pull generated_code so the backtester can actually
     # run the user's authored logic instead of pattern-matching the name to
@@ -730,6 +736,7 @@ def run_futures_backtest(
         vip_tier          = vip_tier,
         maker_only_entry  = maker_only_entry,
         use_risk_engine   = use_risk_engine,
+        strategy_flags    = strategy_flags,
         risk_overrides_for_run = (
             (lambda: __import__('backend.services.risk_engine', fromlist=['load_user_risk_overrides']).load_user_risk_overrides(user_id))()
             if use_risk_engine else None
@@ -842,6 +849,8 @@ def backtest_timeframe_sweep(
     vip_tier         = max(0, min(12, int(req.get("vip_tier", 0))))
     maker_only_entry = bool(req.get("maker_only_entry", False))
     use_risk_engine  = bool(req.get("use_risk_engine", False))
+    _raw_flags       = req.get("strategy_flags")
+    strategy_flags   = _raw_flags if isinstance(_raw_flags, dict) and _raw_flags else None
 
     # Resolve the strategy code once (same for every timeframe).
     strategy_id   = req.get("strategy_id")
@@ -893,6 +902,7 @@ def backtest_timeframe_sweep(
                 vip_tier          = vip_tier,
                 maker_only_entry  = maker_only_entry,
                 use_risk_engine   = use_risk_engine,
+                strategy_flags    = strategy_flags,
                 risk_overrides_for_run = risk_overrides,
             )
             if isinstance(r, dict) and "error" in r:

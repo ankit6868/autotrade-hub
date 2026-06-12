@@ -49,6 +49,23 @@ function buildTimerange(days: number): string {
 
 // ─────────────────────────────────────────────────────────────────────────────
 
+// Per-strategy UI option toggles. Each flag maps to a boolean class attribute
+// the engine/backtester overrides on the strategy instance (via strategy_flags).
+// Only strategies listed here show toggles; everything else is unaffected.
+type StratFlag = { key: string; label: string; hint: string; default: boolean };
+const STRATEGY_FLAGS: Record<string, StratFlag[]> = {
+  StrategyAsh: [
+    { key: 'use_exit_signals', label: 'CHoCH early-exit', default: false,
+      hint: 'Close a trade early when an opposite Change-of-Character (bias flip) prints. OFF = let the trade run to its SL / TP / ARM targets (recommended). ON can whipsaw and preempt take-profits.' },
+  ],
+  LorentzianClassifier: [
+    { key: 'USE_DYNAMIC_EXITS', label: 'Dynamic kernel exit', default: false,
+      hint: 'Exit when the Nadaraya-Watson kernel flips against the position (jdehorty’s "Use Dynamic Exits"). OFF = exit on the 4-bar hold + signal flips.' },
+    { key: 'USE_ATR_STOPS', label: 'ATR structural stops', default: false,
+      hint: 'Use the strategy’s own wide 3xATR / 6xATR stop instead of your slider SL/TP. OFF = your configured SL/TP drives both backtest and live (recommended for parity).' },
+  ],
+};
+
 // Highest-profit timeframe in a sweep (skips errored rows). The UI marks it
 // with a ★ — but the goal is robustness, not picking the single top number.
 function bestSweepTf(sweep: any[]): string | null {
@@ -128,6 +145,9 @@ function FuturesBacktestInner() {
   // ── Timeframe comparison sweep (exploration tool) ──
   const [sweeping,    setSweeping]    = useState(false);
   const [sweepResult, setSweepResult] = useState<any>(null);
+  // Per-strategy option toggles (CHoCH exit, LDC dynamic-exit / ATR-stops…).
+  // Keyed by flag name; falls back to each flag's default when unset.
+  const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean>>({});
   const [history,  setHistory]  = useState<any[]>([]);
   const [error,    setError]    = useState('');
   // Trade-table view mode: 'compact' = our dense one-row-per-trade view
@@ -287,6 +307,17 @@ function FuturesBacktestInner() {
   // Used to disable the "Apply strategy params" button so the user can
   // see at a glance whether reverting would actually change anything.
   const selectedStrategy = strategies.find((x: any) => x.id === strategyId);
+  // Option toggles available for the selected strategy (empty for most).
+  const activeFlags: StratFlag[] = (selectedStrategy && STRATEGY_FLAGS[selectedStrategy.name]) || [];
+  const flagVal = (f: StratFlag): boolean => strategyFlags[f.key] ?? f.default;
+  // Build the strategy_flags payload for the selected strategy only (so we
+  // never send LDC flags to StrategyAsh, etc.). undefined when none apply.
+  function buildStrategyFlags(): Record<string, boolean> | undefined {
+    if (!activeFlags.length) return undefined;
+    const out: Record<string, boolean> = {};
+    for (const f of activeFlags) out[f.key] = flagVal(f);
+    return out;
+  }
   const alreadyMatchesStrategy = selectedStrategy
     && slSrc !== 'manual'
     && tpSrc !== 'manual'
@@ -906,6 +937,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         vip_tier:           vipTier,
         maker_only_entry:   makerOnlyEntry,
         use_risk_engine:    useRiskEngine,
+        ...(buildStrategyFlags() ? { strategy_flags: buildStrategyFlags() } : {}),
       });
       if (data.error) setError(data.error);
       else {
@@ -949,6 +981,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         vip_tier:           vipTier,
         maker_only_entry:   makerOnlyEntry,
         use_risk_engine:    useRiskEngine,
+        ...(buildStrategyFlags() ? { strategy_flags: buildStrategyFlags() } : {}),
       });
       if (data.error) setError(data.error);
       else setSweepResult(data);
@@ -1683,6 +1716,35 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
               : <>Same-bar SL+TP picked by <b className="text-slate-300">"closer to open"</b> heuristic — fast but imprecise on 1m.</>}
           </span>
         </div>
+
+        {/* ── Strategy options (per-strategy flag toggles) ──────────────
+            Shown only for strategies that expose tunable flags (StrategyAsh's
+            CHoCH exit; the LDC's dynamic-exit / ATR-stops). These flip a
+            class attribute on the strategy via strategy_flags — no code edit.*/}
+        {activeFlags.length > 0 && (
+          <div className="mb-5 rounded-xl border border-violet-500/30 bg-violet-500/[0.05] p-4">
+            <div className="flex items-center gap-2 mb-2 flex-wrap">
+              <span className="text-sm font-semibold text-violet-200">🎛 {selectedStrategy?.name} options</span>
+              <span className="text-[10px] text-slate-500">flip a strategy setting without editing code — applies to Run + Compare Timeframes</span>
+            </div>
+            <div className="flex flex-col gap-2">
+              {activeFlags.map(f => (
+                <label key={f.key} className="flex items-start gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={flagVal(f)}
+                    onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked }))}
+                    className="accent-violet-500 mt-0.5"
+                  />
+                  <span className="text-xs leading-snug">
+                    <span className="text-slate-200 font-medium">{f.label}</span>
+                    <span className="text-slate-500"> — {f.hint}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* ── KuCoin VIP fee tier + maker-only entry mode ────────────────
             Only shown when "Include real trading costs" is ON — these

@@ -425,6 +425,24 @@ def evaluate_strategy(
     except Exception as e:
         raise RuntimeError(f"Strategy class could not be instantiated: {e}")
 
+    # ── UI flag overrides ──────────────────────────────────────────────
+    # The UI can flip a strategy's boolean/scalar options (e.g. StrategyAsh's
+    # `use_exit_signals` CHoCH exit, or the LDC's `USE_DYNAMIC_EXITS` /
+    # `USE_ATR_STOPS`) without editing code, by passing
+    # overrides={'flags': {<ATTR_NAME>: <value>, ...}}. We apply them onto the
+    # INSTANCE right after construction, so both populate_* (which read self.X)
+    # and the class-attr surfacing below reflect the toggle. Only attributes
+    # the strategy already defines are set, so a stray key can't inject state.
+    if isinstance(overrides, dict):
+        _flags = overrides.get("flags")
+        if isinstance(_flags, dict):
+            for _fk, _fv in _flags.items():
+                if hasattr(instance, _fk):
+                    try:
+                        setattr(instance, _fk, _fv)
+                    except Exception:
+                        pass
+
     work = df.copy()
     # Freqtrade convention uses `volume`; our KuCoin loader uses `vol`.
     # Alias before the user's code runs, otherwise any reference to
@@ -650,7 +668,9 @@ def evaluate_strategy(
     # get their exit columns honoured by the engine + backtester (close-to-
     # flat without a reverse). Absent/False = legacy behaviour (exits only via
     # SL/TP, max-hold, stop-and-reverse), so existing strategies are unchanged.
-    cls_use_exits = getattr(strategy_cls, "use_exit_signals", None)
+    # Read from the INSTANCE (not the class) so a UI flag override of
+    # use_exit_signals is reflected in what the engine/backtester honours.
+    cls_use_exits = getattr(instance, "use_exit_signals", None)
     if cls_use_exits is True:
         work.attrs["class_use_exit_signals"] = True
     # Sub-bar timeframes for lower-TF analysis (e.g. liquidity sweep on

@@ -434,6 +434,11 @@ def run_futures_backtest(
                                         # Default OFF for backward compatibility with previous
                                         # tuning runs — turn ON for production parity with
                                         # the live bot engine (which uses risk_engine always).
+    strategy_flags: dict | None = None,  # UI flag overrides applied onto the strategy
+                                        # instance (e.g. {'use_exit_signals': True} for
+                                        # StrategyAsh's CHoCH exit, or {'USE_ATR_STOPS': True}
+                                        # / {'USE_DYNAMIC_EXITS': True} for the LDC). None =
+                                        # use the strategy's own class defaults.
 ) -> dict:
     """
     Run a leveraged futures backtest matching TradingView's methodology:
@@ -626,6 +631,7 @@ def run_futures_backtest(
                     generated_code, df,
                     pair=pair, execution_tf=timeframe,
                     historical_anchor_ts=fetch_end_ts,
+                    overrides=({"flags": strategy_flags} if strategy_flags else None),
                 )
                 # If the user's strategy class declares its OWN stoploss /
                 # minimal_roi, prefer those over slider values BY DEFAULT —

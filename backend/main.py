@@ -1950,9 +1950,11 @@ class StrategyAsh(IStrategy):
 
     def populate_exit_trend(self, df, metadata):
         # SL / TP1 / TP2 / max_hold are handled by the engine. The opposite-
-        # CHoCH early-exit is OPT-IN via USE_CHOCH_EXIT (off by default) so the
-        # ARM take-profits aren't preempted.
-        if self.USE_CHOCH_EXIT:
+        # CHoCH early-exit is OPT-IN via `use_exit_signals` (off by default) so
+        # the ARM take-profits aren't preempted. The UI toggle flips
+        # use_exit_signals, so reading it here keeps the on-chart exits and the
+        # engine's exit-honouring in sync.
+        if self.use_exit_signals:
             df["exit_long"]  = df["choch_dn"].astype(int)
             df["exit_short"] = df["choch_up"].astype(int)
         else:
