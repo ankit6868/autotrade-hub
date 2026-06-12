@@ -501,7 +501,13 @@ def _decode_strategy_flags(raw):
             return None
     if not isinstance(d, dict) or not d:
         return None
-    return {str(k): bool(v) for k, v in d.items()}
+    out = {}
+    for k, v in d.items():
+        if isinstance(v, bool):
+            out[str(k)] = v
+        elif isinstance(v, (int, float)):
+            out[str(k)] = v
+    return out or None
 
 
 def _fetch_kucoin_live_position(eng, pair: str, direction: str | None = None) -> dict | None:
@@ -6353,8 +6359,14 @@ def create_futures_bot(
     _raw_sf = req.get("strategy_flags")
     strategy_flags = None
     if isinstance(_raw_sf, dict) and _raw_sf:
-        strategy_flags = {str(k): bool(v) for k, v in _raw_sf.items()
-                          if isinstance(v, (bool, int))}
+        strategy_flags = {}
+        for _k, _v in _raw_sf.items():
+            # Preserve booleans AND numbers (e.g. max_hold_candles). bool is a
+            # subclass of int, so check it first to avoid coercing True -> 1.
+            if isinstance(_v, bool):
+                strategy_flags[str(_k)] = _v
+            elif isinstance(_v, (int, float)):
+                strategy_flags[str(_k)] = _v
         strategy_flags = strategy_flags or None
     strategy_flags_json = _json_flags.dumps(strategy_flags) if strategy_flags else None
 

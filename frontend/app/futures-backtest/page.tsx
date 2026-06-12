@@ -129,9 +129,9 @@ function FuturesBacktestInner() {
   // ── Timeframe comparison sweep (exploration tool) ──
   const [sweeping,    setSweeping]    = useState(false);
   const [sweepResult, setSweepResult] = useState<any>(null);
-  // Per-strategy option toggles (CHoCH exit, LDC dynamic-exit / ATR-stops…).
-  // Keyed by flag name; falls back to each flag's default when unset.
-  const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean>>({});
+  // Per-strategy option controls (CHoCH exit, LDC dynamic-exit / ATR-stops,
+  // bar-hold…). Keyed by flag name; falls back to each flag's default.
+  const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean | number>>({});
   const [history,  setHistory]  = useState<any[]>([]);
   const [error,    setError]    = useState('');
   // Trade-table view mode: 'compact' = our dense one-row-per-trade view
@@ -291,14 +291,14 @@ function FuturesBacktestInner() {
   // Used to disable the "Apply strategy params" button so the user can
   // see at a glance whether reverting would actually change anything.
   const selectedStrategy = strategies.find((x: any) => x.id === strategyId);
-  // Option toggles available for the selected strategy (empty for most).
+  // Option controls available for the selected strategy (empty for most).
   const activeFlags: StratFlag[] = (selectedStrategy && STRATEGY_FLAGS[selectedStrategy.name]) || [];
-  const flagVal = (f: StratFlag): boolean => strategyFlags[f.key] ?? f.default;
+  const flagVal = (f: StratFlag): boolean | number => strategyFlags[f.key] ?? f.default;
   // Build the strategy_flags payload for the selected strategy only (so we
   // never send LDC flags to StrategyAsh, etc.). undefined when none apply.
-  function buildStrategyFlags(): Record<string, boolean> | undefined {
+  function buildStrategyFlags(): Record<string, boolean | number> | undefined {
     if (!activeFlags.length) return undefined;
-    const out: Record<string, boolean> = {};
+    const out: Record<string, boolean | number> = {};
     for (const f of activeFlags) out[f.key] = flagVal(f);
     return out;
   }
@@ -1712,11 +1712,25 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
               <span className="text-[10px] text-slate-500">flip a strategy setting without editing code — applies to Run + Compare Timeframes</span>
             </div>
             <div className="flex flex-col gap-2">
-              {activeFlags.map(f => (
+              {activeFlags.map(f => f.type === 'number' ? (
+                <div key={f.key} className="flex items-start gap-2">
+                  <input
+                    type="number"
+                    min={f.min} max={f.max}
+                    value={Number(flagVal(f))}
+                    onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? 0, Math.min(f.max ?? 9999, Number(e.target.value) || 0)) }))}
+                    className="w-16 px-2 py-1 rounded bg-[#0f1729] border border-violet-500/30 text-xs text-slate-100"
+                  />
+                  <span className="text-xs leading-snug">
+                    <span className="text-slate-200 font-medium">{f.label}</span>
+                    <span className="text-slate-500"> — {f.hint}</span>
+                  </span>
+                </div>
+              ) : (
                 <label key={f.key} className="flex items-start gap-2 cursor-pointer">
                   <input
                     type="checkbox"
-                    checked={flagVal(f)}
+                    checked={Boolean(flagVal(f))}
                     onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked }))}
                     className="accent-violet-500 mt-0.5"
                   />

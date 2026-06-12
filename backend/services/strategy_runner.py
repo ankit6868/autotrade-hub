@@ -647,7 +647,10 @@ def evaluate_strategy(
     # max_stops_per_day: halt new entries after N stops today.
     # Both default to 0 (disabled) in the engine when not set, so
     # strategies that don't declare these get unchanged behaviour.
-    cls_max_hold = getattr(strategy_cls, "max_hold_candles", None)
+    # Read from the INSTANCE so a UI flag override of max_hold_candles takes
+    # effect (e.g. the LDC's "Bar hold" control: 0 = disable the fixed exit
+    # and let trades run on signal flips / kernel / SL-TP).
+    cls_max_hold = getattr(instance, "max_hold_candles", None)
     if isinstance(cls_max_hold, int) and 1 <= cls_max_hold <= 5000:
         work.attrs["class_max_hold_candles"] = cls_max_hold
     cls_max_stops = getattr(strategy_cls, "max_stops_per_day", None)

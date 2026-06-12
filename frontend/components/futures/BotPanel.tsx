@@ -748,9 +748,9 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   // signals open the OTHER side instead of closing. The live/paper engine
   // honours this via FuturesEngine._position_mode (gated stop-and-reverse).
   const [positionMode, setPositionMode] = useState<'single' | 'hedge'>('single');
-  // Per-strategy option toggles (CHoCH exit / LDC dynamic-exit / ATR-stops).
-  // Keyed by flag name; falls back to each flag's default when unset.
-  const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean>>({});
+  // Per-strategy option controls (CHoCH exit / LDC dynamic-exit / ATR-stops /
+  // bar-hold). Keyed by flag name; falls back to each flag's default when unset.
+  const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean | number>>({});
 
   // ── Phase 5e: Strategy preview state ─────────────────────────────────────
   // Tracked here so we can disable the Create button in LIVE mode when the
@@ -1401,11 +1401,25 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                   <span className="text-[9px] text-slate-500">applied live — keep these the same as your backtest</span>
                 </div>
                 <div className="flex flex-col gap-1.5">
-                  {(STRATEGY_FLAGS[bot.name] || []).map(f => (
+                  {(STRATEGY_FLAGS[bot.name] || []).map(f => f.type === 'number' ? (
+                    <div key={f.key} className="flex items-start gap-2">
+                      <input
+                        type="number"
+                        min={f.min} max={f.max}
+                        value={Number(strategyFlags[f.key] ?? f.default)}
+                        onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? 0, Math.min(f.max ?? 9999, Number(e.target.value) || 0)) }))}
+                        className="w-14 px-2 py-1 rounded bg-[#0f1729] border border-violet-500/30 text-[11px] text-slate-100"
+                      />
+                      <span className="text-[11px] leading-snug">
+                        <span className="text-slate-200 font-medium">{f.label}</span>
+                        <span className="text-slate-500"> — {f.hint}</span>
+                      </span>
+                    </div>
+                  ) : (
                     <label key={f.key} className="flex items-start gap-2 cursor-pointer">
                       <input
                         type="checkbox"
-                        checked={strategyFlags[f.key] ?? f.default}
+                        checked={Boolean(strategyFlags[f.key] ?? f.default)}
                         onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked }))}
                         className="accent-violet-500 mt-0.5"
                       />

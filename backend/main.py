@@ -2989,6 +2989,15 @@ class LorentzianClassifier(IStrategy):
     # what paper/live will do).
     USE_ATR_STOPS = False
 
+    # ── Optional EMA / SMA trend filters (jdehorty Feb-6 update, default OFF) ─
+    # When on, an entry is only allowed in the direction of price vs the
+    # EMA/SMA (long needs close > MA; short needs close < MA). Reduces trades
+    # and counter-trend entries.
+    USE_EMA_FILTER = False
+    EMA_PERIOD     = 200
+    USE_SMA_FILTER = False
+    SMA_PERIOD     = 200
+
     @staticmethod
     def _ema(s, span):
         return s.ewm(span=max(1, int(span)), adjust=False).mean()
@@ -3166,8 +3175,22 @@ class LorentzianClassifier(IStrategy):
         if not self.USE_KERNEL_FILTER:
             bull_kernel = np.ones(n, bool); bear_kernel = np.ones(n, bool)
 
-        long_ok  = (signal == 1) & bull_kernel & filter_all
-        short_ok = (signal == -1) & bear_kernel & filter_all
+        # ── Optional EMA / SMA trend filters (jdehorty Feb-6) ──
+        cc = close.to_numpy(dtype=float)
+        if self.USE_EMA_FILTER:
+            ema_f = close.ewm(span=max(1, int(self.EMA_PERIOD)), adjust=False).mean().to_numpy()
+            ema_up, ema_dn = cc > ema_f, cc < ema_f
+        else:
+            ema_up = ema_dn = np.ones(n, bool)
+        if self.USE_SMA_FILTER:
+            sma_f = close.rolling(max(1, int(self.SMA_PERIOD))).mean().to_numpy()
+            sma_up = np.where(np.isnan(sma_f), True, cc > sma_f)
+            sma_dn = np.where(np.isnan(sma_f), True, cc < sma_f)
+        else:
+            sma_up = sma_dn = np.ones(n, bool)
+
+        long_ok  = (signal == 1) & bull_kernel & filter_all & ema_up & sma_up
+        short_ok = (signal == -1) & bear_kernel & filter_all & ema_dn & sma_dn
 
         # ── SL/TP source ──
         # Default: attach NONE, so the bot's configured SL/TP (sliders) drive
