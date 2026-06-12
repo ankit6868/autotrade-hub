@@ -186,9 +186,32 @@ def _build_talib_stub() -> types.ModuleType:
         slowd = slowk.rolling(slowd_period).mean()
         return slowk, slowd
 
+    def CCI(high, low=None, close=None, timeperiod: int = 20):
+        """Commodity Channel Index — same convention as TA-Lib's CCI.
+        Added for the Lorentzian Distance Classifier feature set (RSI/WT/
+        CCI/ADX). Accepts a single df arg OR separate h/l/c arrays."""
+        h, l, c = _hlc(high, low, close)
+        tp = (h + l + c) / 3.0
+        sma_tp = tp.rolling(timeperiod).mean()
+        # Mean absolute deviation of typical price over the window.
+        mad = (tp - sma_tp).abs().rolling(timeperiod).mean()
+        return (tp - sma_tp) / (0.015 * mad.replace(0, 1e-9))
+
+    def WT(high, low=None, close=None, channel_len: int = 10, average_len: int = 11):
+        """WaveTrend oscillator (LazyBear). NOT a native TA-Lib function, but
+        commonly used as a feature in the Lorentzian Distance Classifier.
+        Returns wt1 (the smoothed tci line). `high` may be a df (hlc3 is
+        derived) or the explicit high with low/close supplied."""
+        h, l, c = _hlc(high, low, close)
+        ap = (h + l + c) / 3.0
+        esa = ap.ewm(span=channel_len, adjust=False).mean()
+        d = (ap - esa).abs().ewm(span=channel_len, adjust=False).mean()
+        ci = (ap - esa) / (0.015 * d.replace(0, 1e-9))
+        return ci.ewm(span=average_len, adjust=False).mean()   # wt1 (tci)
+
     for name, fn in dict(
         SMA=SMA, EMA=EMA, RSI=RSI, MACD=MACD, BBANDS=BBANDS,
-        ATR=ATR, ADX=ADX, STOCH=STOCH,
+        ATR=ATR, ADX=ADX, STOCH=STOCH, CCI=CCI, WT=WT,
     ).items():
         setattr(mod, name, fn)
     return mod
@@ -612,6 +635,24 @@ def evaluate_strategy(
     cls_max_stops = getattr(strategy_cls, "max_stops_per_day", None)
     if isinstance(cls_max_stops, int) and 1 <= cls_max_stops <= 100:
         work.attrs["class_max_stops_per_day"] = cls_max_stops
+    # Deep-history strategies (e.g. the Lorentzian Distance Classifier, which
+    # wants Max Bars Back = 2000 for its nearest-neighbour training set) can
+    # declare:    max_bars_back = 2000   # in the class body
+    # The live/paper engine reads this once at start and paginates KuCoin's
+    # 200-cap kline endpoint to fetch that many candles. Default-absent =
+    # engine keeps its lightweight 200-bar fetch, so existing strategies are
+    # completely unchanged.
+    cls_max_bars = getattr(strategy_cls, "max_bars_back", None)
+    if isinstance(cls_max_bars, int) and 200 < cls_max_bars <= 5000:
+        work.attrs["class_max_bars_back"] = cls_max_bars
+    # Opt-in explicit exit signals (exit_long / exit_short). Strategies that
+    # declare:    use_exit_signals = True
+    # get their exit columns honoured by the engine + backtester (close-to-
+    # flat without a reverse). Absent/False = legacy behaviour (exits only via
+    # SL/TP, max-hold, stop-and-reverse), so existing strategies are unchanged.
+    cls_use_exits = getattr(strategy_cls, "use_exit_signals", None)
+    if cls_use_exits is True:
+        work.attrs["class_use_exit_signals"] = True
     # Sub-bar timeframes for lower-TF analysis (e.g. liquidity sweep on
     # 1m when execution_tf=5m). Symmetric to bias_timeframes but for
     # the downward direction. Only fetched when declared.
@@ -643,6 +684,11 @@ def make_signal_fn_from_df(df: pd.DataFrame, leverage: int,
     """
     enter_long = df["enter_long"].astype(int).values if "enter_long" in df.columns else None
     enter_short = df["enter_short"].astype(int).values if "enter_short" in df.columns else None
+    # Optional explicit EXIT columns. Attached to the returned signal_fn so
+    # an opt-in engine/backtester can close-to-flat when they fire. Strategies
+    # that don't populate them leave these None → no exit-signal behaviour.
+    exit_long  = df["exit_long"].astype(int).values  if "exit_long"  in df.columns else None
+    exit_short = df["exit_short"].astype(int).values if "exit_short" in df.columns else None
 
     # Pull strategy-populated structural SL/TP columns into numpy arrays
     # once, so the bar-by-bar signal_fn doesn't pay dict-lookup cost on
@@ -714,4 +760,9 @@ def make_signal_fn_from_df(df: pd.DataFrame, leverage: int,
                 return entry, sl, tp1, "short"
         return None
 
+    # Expose the raw exit arrays so an opt-in engine/backtester can close a
+    # held position the moment its exit column fires (close-to-flat, no
+    # reverse). Strategies without exit columns leave these None.
+    signal_fn.exit_long  = exit_long    # type: ignore[attr-defined]
+    signal_fn.exit_short = exit_short   # type: ignore[attr-defined]
     return signal_fn

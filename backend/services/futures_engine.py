@@ -101,6 +101,100 @@ def _fetch_futures_candles(pair: str, tf: str, limit: int = 200) -> list[dict]:
     return rows[-limit:]
 
 
+# ── Deep candle history (ML strategies that need > 200 bars) ────────────
+#
+# KuCoin's futures kline endpoint returns at most ~200 candles per request,
+# so a strategy like the Lorentzian Distance Classifier (Max Bars Back =
+# 2000) needs the response stitched from several paginated windows. To keep
+# the per-scan cost to ONE request in steady state, we cache the stitched
+# history per (pair, tf): each scan only refreshes the recent 200-bar window
+# and merges it; the expensive back-pagination happens once on first use.
+#
+# This path is ONLY taken when a strategy declares max_bars_back > 200. Every
+# existing bot keeps calling _fetch_futures_candles(limit=200) unchanged.
+import threading as _threading_deep
+_FUTURES_DEEP_CACHE: dict[tuple[str, str], list[dict]] = {}
+_FUTURES_DEEP_LOCK = _threading_deep.Lock()
+
+
+def _fetch_futures_kline_window(pair: str, tf: str, to_sec: int,
+                                count: int = 200) -> list[dict]:
+    """Fetch up to `count` candles ENDING at `to_sec` (epoch seconds). Used to
+    paginate older history. Returns the same dict shape as
+    _fetch_futures_candles (NOT forming-bar filtered — historical windows
+    have no forming bar)."""
+    from ._kucoin_proxy import urlopen as _proxy_urlopen
+    import urllib.request as _ureq
+    from .kucoin_futures_client import normalize_futures_symbol
+    sym = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+    gran = _FUTURES_TF_MIN.get(tf, 15)
+    to_ms = int(to_sec) * 1000
+    from_ms = to_ms - (count + 1) * gran * 60_000
+    url = (f"{KUCOIN_FUTURES_BASE}/api/v1/kline/query"
+           f"?symbol={sym}&granularity={gran}&from={from_ms}&to={to_ms}")
+    try:
+        req = _ureq.Request(url, headers={"User-Agent": "AutoTradeHub/2.0"})
+        with _proxy_urlopen(req, timeout=8) as resp:
+            payload = json.loads(resp.read().decode())
+    except Exception as e:
+        log.warning("_fetch_futures_kline_window %s/%s failed: %s", sym, tf, e)
+        return []
+    if str(payload.get("code")) != "200000":
+        return []
+    rows: list[dict] = []
+    for r in payload.get("data") or []:
+        if len(r) < 6:
+            continue
+        rows.append({
+            "ts":    int(r[0]) // 1000,
+            "open":  float(r[1]), "high": float(r[2]), "low": float(r[3]),
+            "close": float(r[4]), "vol":  float(r[5]),
+        })
+    rows.sort(key=lambda r: r["ts"])
+    return rows
+
+
+def _fetch_futures_candles_deep(pair: str, tf: str, limit: int) -> list[dict]:
+    """Fetch up to `limit` CLOSED candles, paginating KuCoin's ~200-per-request
+    kline cap and caching per (pair, tf). Steady-state cost: one request per
+    scan (the recent window); the expensive back-pagination runs once."""
+    key = (pair, tf)
+    with _FUTURES_DEEP_LOCK:
+        merged = list(_FUTURES_DEEP_CACHE.get(key, []))
+
+    # 1. Refresh the recent window (this call drops the forming bar correctly).
+    recent = _fetch_futures_candles(pair, tf, limit=200)
+    if recent:
+        by_ts = {r["ts"]: r for r in merged}
+        for r in recent:
+            by_ts[r["ts"]] = r          # newest data wins
+        merged = sorted(by_ts.values(), key=lambda r: r["ts"])
+
+    # 2. Back-paginate older windows until we have `limit` bars (bounded so a
+    #    thin/new market can't loop forever).
+    gran = _FUTURES_TF_MIN.get(tf, 15)
+    tf_secs = gran * 60
+    pages = 0
+    while merged and len(merged) < limit and pages < 15:
+        oldest = merged[0]["ts"]
+        older = _fetch_futures_kline_window(pair, tf, to_sec=oldest - tf_secs, count=200)
+        pages += 1
+        if not older:
+            break
+        before = len(merged)
+        by_ts = {r["ts"]: r for r in merged}
+        for r in older:
+            by_ts.setdefault(r["ts"], r)   # don't overwrite fresher recent bars
+        merged = sorted(by_ts.values(), key=lambda r: r["ts"])
+        if len(merged) == before:
+            break                          # exchange has no older history
+
+    merged = merged[-limit:]
+    with _FUTURES_DEEP_LOCK:
+        _FUTURES_DEEP_CACHE[key] = merged
+    return merged
+
+
 # ── Contract multiplier cache (per-symbol lot size lookup) ──────────────
 #
 # Bug-fix: the legacy live order placement used `contracts = stake × leverage
@@ -497,6 +591,19 @@ class FuturesEngine(NativeTradingEngine):
         self._day_max_dd_pct:    float = 25.0          # 25% daily DD trips bot
         self._day_dd_tripped:    bool  = False
 
+        # ── Deep-history fetch (ML strategies) ───────────────────────────
+        # Number of CLOSED candles to feed the strategy each scan. Default
+        # 200 = the lightweight single-request fetch every existing bot uses.
+        # A strategy can declare `max_bars_back = 2000` (e.g. the Lorentzian
+        # Distance Classifier) → start_futures bumps this and the tick uses
+        # the paginated, cached deep fetch instead. Existing bots keep 200.
+        self._max_bars_back:     int   = 200
+        # Opt-in explicit exit signals. When the strategy declares
+        # `use_exit_signals = True`, the signal scan closes an open position
+        # the moment its exit_long / exit_short column fires (close-to-flat,
+        # no reverse). Default False = exits only via SL/TP/max-hold/reverse.
+        self._use_exit_signals:  bool  = False
+
         # ── MUST-2: Compile-failure circuit breaker ──────────────────────
         # If the strategy_runner raises N consecutive times during the
         # signal-scan loop (rare — usually a NaN crash on bad candle data
@@ -850,6 +957,19 @@ class FuturesEngine(NativeTradingEngine):
                         _result.attrs.get("strategy_class"),
                         _result.attrs.get("signal_columns", []),
                     )
+                    # Deep-history strategies (e.g. Lorentzian Classifier)
+                    # declare max_bars_back; bump the per-scan candle depth so
+                    # the ML model gets its full training window. Clamped so a
+                    # bad value can't blow up fetch latency/memory.
+                    _mbb = _result.attrs.get("class_max_bars_back")
+                    if isinstance(_mbb, int) and _mbb > 200:
+                        self._max_bars_back = min(5000, _mbb)
+                        log.info("[%s] strategy requests max_bars_back=%s (deep fetch on)",
+                                 self.user_id, self._max_bars_back)
+                    # Opt-in explicit exit signals (close-to-flat on exit_*).
+                    if _result.attrs.get("class_use_exit_signals") is True:
+                        self._use_exit_signals = True
+                        log.info("[%s] strategy opts into explicit exit signals", self.user_id)
             except Exception as _compile_exc:
                 self._log_action(
                     "strategy_compile_failed",
@@ -1266,7 +1386,14 @@ class FuturesEngine(NativeTradingEngine):
                 # imported from native_trading_engine. Strategies on the
                 # futures engine must trade off futures perp data; spot/perp
                 # basis can shift signal timing by several %.
-                candles = _fetch_futures_candles(pair, self._timeframe, limit=200)
+                # Deep-history ML strategies (max_bars_back > 200) use the
+                # paginated, cached fetch; every other bot keeps the unchanged
+                # single-request 200-bar fetch.
+                if self._max_bars_back > 200:
+                    candles = _fetch_futures_candles_deep(
+                        pair, self._timeframe, limit=self._max_bars_back)
+                else:
+                    candles = _fetch_futures_candles(pair, self._timeframe, limit=200)
             except Exception as e:
                 log.warning("[%s] candle fetch %s: %s", self.user_id, pair, e)
                 continue
@@ -1346,6 +1473,58 @@ class FuturesEngine(NativeTradingEngine):
             # we get TradingView-parity "fire on the bar where the
             # condition transitions from False → True" behaviour.
             last_idx = len(df) - 1
+
+            # ── Opt-in: explicit exit signals (close-to-flat, no reverse) ──
+            # When the strategy declares `use_exit_signals = True` and its
+            # exit_long / exit_short column fires on the last CLOSED bar, close
+            # the matching open position now — mirroring the management loop's
+            # close (final-leg P&L, persist, live reduce-only exit, per-side
+            # cooldown). This is how the LDC's "Use Dynamic Exits" / "Early
+            # Signal Flip" map onto the engine without forcing a reverse.
+            # Strategies that don't opt in skip this entirely.
+            if self._use_exit_signals:
+                _ex_long  = getattr(user_signal_fn, "exit_long", None)
+                _ex_short = getattr(user_signal_fn, "exit_short", None)
+                if _ex_long is not None or _ex_short is not None:
+                    _ex_now = datetime.now(timezone.utc)
+                    _ex_price = self._get_live_price(pair) or float(df.iloc[last_idx]["close"])
+                    with self._lock:
+                        for _ex_tk in [k for k, p in self.positions.items() if p.pair == pair]:
+                            _ex_pos = self.positions.get(_ex_tk)
+                            if _ex_pos is None:
+                                continue
+                            _fire = (
+                                (_ex_pos.direction == "long"  and _ex_long  is not None
+                                 and last_idx < len(_ex_long)  and _ex_long[last_idx]) or
+                                (_ex_pos.direction == "short" and _ex_short is not None
+                                 and last_idx < len(_ex_short) and _ex_short[last_idx])
+                            )
+                            if not _fire:
+                                continue
+                            _ex_pos.close(_ex_price, "exit_signal", _ex_now)
+                            self.balance += _ex_pos.pnl_abs - getattr(_ex_pos, "partial_pnl_abs", 0.0)
+                            self.closed_trades.append(_ex_pos)
+                            del self.positions[_ex_tk]
+                            seen_signal[pair] = None
+                            self._cooldown_until[(pair, _ex_pos.direction)] = time.time() + self._cooldown_seconds
+                            self.last_action = (
+                                f"EXIT SIGNAL {pair} {_ex_pos.direction} @ "
+                                f"{_ex_price:.4f} P&L={_ex_pos.pnl_abs:+.2f}"
+                            )
+                            self._log_action("exit_signal", self.last_action,
+                                pair=pair, price=_ex_price, pnl=_ex_pos.pnl_abs,
+                                direction=_ex_pos.direction)
+                            log.info("[%s] %s", self.user_id, self.last_action)
+                            _persist_closed_trade(self.user_id, _ex_pos, self._mode,
+                                                  self._strategy_id, _ex_pos.db_id)
+                            if self._mode == "live":
+                                self._place_live_exit(pair, _ex_pos, _ex_price)
+                            _notifier.notify_position_closed(
+                                self.user_id, pair=pair, direction=_ex_pos.direction,
+                                entry=_ex_pos.entry, exit_p=_ex_price, pnl=_ex_pos.pnl_abs,
+                                reason="exit_signal", leverage=self._leverage, mode=self._mode,
+                            )
+
             try:
                 sig = user_signal_fn(df, last_idx)
             except TypeError:

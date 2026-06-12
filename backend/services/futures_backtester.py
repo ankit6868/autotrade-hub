@@ -661,6 +661,13 @@ def run_futures_backtest(
                 signal_fn = make_signal_fn_from_df(
                     df, leverage, stoploss_pct, take_profit_pct,
                 )
+                # Opt-in explicit exit signals (close-to-flat) — parity with
+                # the live/paper engine's _use_exit_signals path. Off unless
+                # the strategy declares `use_exit_signals = True`, so existing
+                # strategies are unaffected.
+                use_exit_signals = bool(df.attrs.get("class_use_exit_signals"))
+                exit_long_arr  = getattr(signal_fn, "exit_long", None)
+                exit_short_arr = getattr(signal_fn, "exit_short", None)
                 # Surface the count of fired signals in diagnostics so the
                 # user can tell at a glance whether their strategy actually
                 # produces entries on this data.
@@ -1187,6 +1194,21 @@ def run_futures_backtest(
                 tp2 = pos.get("tp2")
                 has_tp2 = tp2 is not None and not pos["tp1_hit"]
 
+                # ── Explicit exit signal (opt-in, close-to-flat) ─────────
+                # When the strategy declares use_exit_signals=True and its
+                # exit_long/exit_short column fires on THIS bar, close the
+                # position at the bar CLOSE — symmetric with entries (which
+                # fill at the signal bar's close) so there's no look-ahead,
+                # and matching the live engine's _use_exit_signals close.
+                # Highest precedence: an explicit exit is the strategy's
+                # direct instruction.
+                exit_signal_fire = use_exit_signals and (
+                    (direction == "long"  and exit_long_arr  is not None
+                     and i < len(exit_long_arr)  and exit_long_arr[i]) or
+                    (direction == "short" and exit_short_arr is not None
+                     and i < len(exit_short_arr) and exit_short_arr[i])
+                )
+
                 # ── max_hold force-exit (strategy-declared) ──────────────
                 # When a strategy declares class_max_hold_candles, any
                 # position open longer than that gets closed at THIS bar's
@@ -1195,7 +1217,11 @@ def run_futures_backtest(
                 # live mode. Checked BEFORE liq/SL/TP so a max-hold exit
                 # takes precedence on an ambiguous bar (the institutional
                 # thesis has expired regardless of where price ends up).
-                if (pair_max_hold_candles > 0
+                if exit_signal_fire:
+                    raw_exit_p = row["close"]
+                    exit_rsn = "exit_signal"
+                    exit_slippage_bps = SLIPPAGE_BPS_STOP
+                elif (pair_max_hold_candles > 0
                         and pos["candles_held"] >= pair_max_hold_candles):
                     raw_exit_p = bar_o
                     exit_rsn = "max_hold_expired"
