@@ -434,6 +434,7 @@ export const api = {
       mode: 'paper' | 'live';
       close_pct: number;
       position_id?: string;
+      direction?: 'long' | 'short';
     }) =>
       request<any>('/api/futures/position/partial-close', { method: 'POST', body: JSON.stringify(data) }),
     // Add margin to an open position (paper + live). Paper deducts from

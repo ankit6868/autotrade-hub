@@ -152,7 +152,7 @@ export default function PositionsPanel({
 
   // Phase 6 — book a configurable percentage of the position at market.
   // Used by the per-row dropdown (25/50/75%) on the Positions tab.
-  async function partialClose(pair: string, pct: number, positionId?: string) {
+  async function partialClose(pair: string, pct: number, positionId?: string, direction?: 'long' | 'short') {
     setClosingPair(pair);
     // Optimistic shrink: reduce the row's amount in-place so the user
     // sees instant feedback. The backend /open now correctly reports
@@ -173,6 +173,9 @@ export default function PositionsPanel({
       const res = await api.futures.partialClose({
         pair, mode, close_pct: pct,
         ...(positionId ? { position_id: positionId } : {}),
+        // direction lets the backend target the right hedge leg AND act on
+        // a KuCoin-only live position (no engine/DB row) via its fallback.
+        ...(direction ? { direction } : {}),
       });
       if (res?.error) {
         setPositions(prevPositions);
@@ -412,7 +415,7 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
   onCloseAll: () => void;
   // Phase 6: optional partial-close callback. When provided, the
   // "Close" button gains a dropdown for 25/50/75% partial close.
-  onPartialClose?: (pair: string, pct: number, positionId?: string) => void;
+  onPartialClose?: (pair: string, pct: number, positionId?: string, direction?: 'long' | 'short') => void;
   onRefresh?: () => void;
   // For the Add/Reduce Margin modal — needs the mode + wallet available
   mode: 'paper' | 'live';
@@ -504,7 +507,7 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                         className="text-[10px] text-slate-500 mt-0.5 flex items-center gap-1"
                         title="Leverage is locked while a position is open. Close the position to change it."
                       >
-                        <span>{p.mode === 'isolated' ? 'Isolated' : 'Cross'} {lev}x</span>
+                        <span>{p.margin_mode === 'isolated' ? 'Isolated' : 'Cross'} {lev}x</span>
                         <svg
                           className="w-2.5 h-2.5 text-slate-500"
                           viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -612,7 +615,7 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                     {onPartialClose && (
                       <>
                         <button
-                          onClick={() => onPartialClose(p.pair, 25, p.position_id)}
+                          onClick={() => onPartialClose(p.pair, 25, p.position_id, (p.side || p.direction) as 'long' | 'short')}
                           disabled={closingPair === p.pair}
                           className="px-1.5 py-1 rounded bg-emerald-500/10 text-emerald-400 text-[10px] hover:bg-emerald-500/20 disabled:opacity-50"
                           title="Book 25% of THIS position at market — keeps 75% of this row open"
@@ -620,7 +623,7 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                           25%
                         </button>
                         <button
-                          onClick={() => onPartialClose(p.pair, 50, p.position_id)}
+                          onClick={() => onPartialClose(p.pair, 50, p.position_id, (p.side || p.direction) as 'long' | 'short')}
                           disabled={closingPair === p.pair}
                           className="px-1.5 py-1 rounded bg-emerald-500/15 text-emerald-400 text-[10px] hover:bg-emerald-500/25 disabled:opacity-50"
                           title="Book 50% of THIS position at market — keeps 50% of this row open"
@@ -628,7 +631,7 @@ function PositionsTab({ positions, closingPair, onClose, onCloseAll, onPartialCl
                           50%
                         </button>
                         <button
-                          onClick={() => onPartialClose(p.pair, 75, p.position_id)}
+                          onClick={() => onPartialClose(p.pair, 75, p.position_id, (p.side || p.direction) as 'long' | 'short')}
                           disabled={closingPair === p.pair}
                           className="px-1.5 py-1 rounded bg-emerald-500/20 text-emerald-400 text-[10px] hover:bg-emerald-500/30 disabled:opacity-50"
                           title="Book 75% of THIS position at market — keeps 25% of this row open"

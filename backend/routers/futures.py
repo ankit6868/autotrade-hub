@@ -485,6 +485,116 @@ def _ensure_live_credentials(eng, user_id: str, db: Session) -> tuple[bool, str 
     return True, None
 
 
+def _fetch_kucoin_live_position(eng, pair: str, direction: str | None = None) -> dict | None:
+    """Fetch ONE open live position straight from KuCoin by (pair, direction).
+
+    The futures terminal surfaces real-money positions directly from
+    KuCoin's /positions in /open (rows tagged 'kucoin-…') even when no
+    engine or Trade row tracks them — engine state lost on a Railway
+    restart, a position opened in KuCoin's own UI, or a filled limit order.
+    Add-margin and partial-close MUST be able to act on those positions too,
+    otherwise the user can see the position but every action errors
+    'No open position'.
+
+    `eng` must already have live credentials loaded (call
+    _ensure_live_credentials first). Returns a normalised dict
+    (kc_symbol, direction, entry, margin, leverage, liq, contracts,
+    margin_mode) or None when KuCoin has no matching OPEN position.
+    """
+    try:
+        from backend.services.native_trading_engine import _kucoin_get_signed
+        from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+        resp = _kucoin_get_signed(
+            "/api/v1/positions",
+            eng._api_key, eng._api_sec, eng._api_pass,
+            base_url=KUCOIN_FUTURES_BASE,
+        )
+    except Exception as e:
+        log.warning("KuCoin /positions fetch failed for %s: %s", pair, e)
+        return None
+    if str((resp or {}).get("code")) != "200000":
+        return None
+
+    def _dir(kp: dict) -> str | None:
+        q = float(kp.get("currentQty", 0) or 0)
+        if q == 0:
+            return None
+        s = str(kp.get("positionSide", "") or "").upper()
+        if s == "LONG":
+            return "long"
+        if s == "SHORT":
+            return "short"
+        return "long" if q > 0 else "short"
+
+    want = pair.upper()
+    for kp in (resp.get("data") or []):
+        d = _dir(kp)
+        if d is None:
+            continue
+        ksym = kp.get("symbol", "")
+        kbase = ksym.replace("USDTM", "").replace("XBT", "BTC")
+        if f"{kbase}/USDT".upper() != want:
+            continue
+        if direction is not None and d != direction:
+            continue
+        # Margin mode: newer API returns marginMode "ISOLATED"/"CROSS";
+        # older returns a crossMode boolean. Handle both.
+        mm = str(kp.get("marginMode", "") or "").upper()
+        if mm not in ("ISOLATED", "CROSS"):
+            cross = kp.get("crossMode")
+            mm = "CROSS" if cross is True else "ISOLATED" if cross is False else ""
+        return {
+            "kc_symbol":   ksym,
+            "direction":   d,
+            "entry":       float(kp.get("avgEntryPrice", 0) or 0),
+            "margin":      float(kp.get("posMargin", 0) or kp.get("maintMargin", 0) or 0),
+            "leverage":    float(kp.get("realLeverage", 0) or kp.get("leverage", 1) or 1),
+            "liq":         (float(kp.get("liquidationPrice", 0) or 0) or None),
+            "contracts":   abs(float(kp.get("currentQty", 0) or 0)),
+            "margin_mode": (mm.lower() if mm else None),
+        }
+    return None
+
+
+def _kucoin_deposit_margin(user_id: str, db: Session, pair: str,
+                           amount: float) -> tuple[bool, object]:
+    """POST KuCoin Futures deposit-margin for `amount` USDT on `pair`.
+
+    Single source of truth for the deposit-margin REST call, shared by the
+    engine/DB-orphan add-margin path and the KuCoin-only fallback. Returns
+    (True, kucoin_data_dict) on success or (False, error_message) on any
+    failure (missing creds, non-200000 business code, transport error)."""
+    try:
+        from backend.services.native_trading_engine import _kucoin_post_signed
+        from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+        from backend.services.kucoin_futures_client import normalize_futures_symbol
+        from backend.utils.encryption import decrypt
+        cfg = db.execute(
+            select(Config).where(Config.user_id == user_id).limit(1)
+        ).scalar_one_or_none()
+        if not cfg:
+            return False, "No KuCoin credentials configured"
+        kk = decrypt(cfg.kucoin_key_enc or "", user_id)
+        ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
+        kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+        if not (kk and ks and kp):
+            return False, "KuCoin credentials missing"
+        # `pair` is "BASE/USDT" — full futures-symbol transform (XBT remap).
+        sym = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+        biz_no = f"add-margin-{user_id[-8:]}-{int(_time.time() * 1000)}"
+        result = _kucoin_post_signed(
+            "/api/v1/position/margin/deposit-margin",
+            {"symbol": sym, "margin": amount, "bizNo": biz_no},
+            kk, ks, kp,
+            base_url=KUCOIN_FUTURES_BASE,
+        )
+        if str(result.get("code")) != "200000":
+            return False, f"KuCoin rejected: {result.get('msg', 'unknown')}"
+        return True, result.get("data")
+    except Exception as exc:
+        return False, f"KuCoin margin deposit failed: {exc}"
+
+
 # ── Futures Backtest ─────────────────────────────────────────────────────────
 
 @router.post("/backtest/run")
@@ -1142,6 +1252,11 @@ def futures_open_positions(
                 "opened_at":         str(p.opened_at),
                 "leverage":          lev,
                 "liquidation_price": round(liq, 6) if liq else None,
+                # Margin mode for the row badge. Per-symbol setting on the
+                # owning engine (falls back to the engine's global default);
+                # matches what _place_live_entry sends to KuCoin for live.
+                "margin_mode":       eng.get_symbol_margin(
+                                         p.pair.replace("/", "").replace("USDT", "USDTM")),
                 "_pos_mode":         pos_mode,
                 "_source":           _src,
                 "bot_key":           _bot_key,
@@ -1212,6 +1327,7 @@ def futures_open_positions(
             # manual entry placed while the engine is in default-paper still
             # reports mode="live" to the UI.
             "mode":              p.get("_pos_mode") or (eng._mode or "paper"),
+            "margin_mode":       p.get("margin_mode"),
             "exchange_order_id": p.get("exchange_order_id"),
             "market_type":       "futures",
             "unrealized_pnl":    round(lev_pnl, 4),
@@ -1274,6 +1390,11 @@ def futures_open_positions(
             "stoploss_price":    t.stoploss_price,
             "entry_time":        str(t.entry_time),
             "mode":              t.mode,
+            # Trade rows don't persist margin mode; surface the user engine's
+            # per-symbol setting (falls back to its global default) so the
+            # row badge isn't blank / wrongly "Cross".
+            "margin_mode":       user_eng.get_symbol_margin(
+                                     t.pair.replace("/", "").replace("USDT", "USDTM")),
             "market_type":       "futures",
             "unrealized_pnl":    unreal,
             # DB-fallback trades have no engine-side bot tag,
@@ -1370,6 +1491,14 @@ def futures_open_positions(
                     lev       = float(kp.get("realLeverage", 0)) or float(kp.get("leverage", 1)) or 1
                     liq       = float(kp.get("liquidationPrice", 0)) or None
                     unreal    = float(kp.get("unrealisedPnl", 0))
+                    # Real margin mode from KuCoin (authoritative). Newer API
+                    # returns marginMode "ISOLATED"/"CROSS"; older returns a
+                    # crossMode boolean. Surfaced so the Positions panel shows
+                    # the TRUE mode instead of always "Cross".
+                    _kmm = str(kp.get("marginMode", "") or "").upper()
+                    if _kmm not in ("ISOLATED", "CROSS"):
+                        _kcross = kp.get("crossMode")
+                        _kmm = "CROSS" if _kcross is True else "ISOLATED" if _kcross is False else ""
                     merged.append({
                         "id":                f"kucoin-{kc_sym}",
                         "pair":              pair,
@@ -1386,6 +1515,7 @@ def futures_open_positions(
                         "exchange_order_id": None,
                         "market_type":       "futures",
                         "unrealized_pnl":    round(unreal, 4),
+                        "margin_mode":       (_kmm.lower() or None),
                         "_source":           "kucoin",
                         # KuCoin-only positions (placed outside the app
                         # or filled limit orders) — surface them as
@@ -3352,6 +3482,11 @@ def partial_close_futures_position(
     pair      = req.get("pair")
     mode      = req.get("mode", "paper")
     close_pct = float(req.get("close_pct", 50))
+    # Optional direction so hedge-mode (long + short on the same pair) and
+    # the KuCoin-only fallback below act on the correct leg.
+    direction_req = req.get("direction")
+    if direction_req not in ("long", "short"):
+        direction_req = None
     # Optional unique row id so 25/50/75% targets the specific position
     # the user clicked instead of "first match on this pair".
     req_position_id = req.get("position_id")
@@ -3404,6 +3539,10 @@ def partial_close_futures_position(
             pos_mode = getattr(p, "_mode", getattr(_eng, "_mode", "paper"))
             if pos_mode != mode:
                 continue
+            # Hedge-mode: when a direction is supplied, only match that leg
+            # (no-op when direction wasn't sent, preserving legacy behaviour).
+            if direction_req is not None and p.direction != direction_req:
+                continue
             # When the caller targets a specific engine row, accept only
             # that exact trade_key. When they target a DB row (or no
             # specific id was passed), behave as before.
@@ -3437,12 +3576,56 @@ def partial_close_futures_position(
             Trade.mode       == mode,
             Trade.status     == "open",
         )
+        if direction_req:
+            orphan_q = orphan_q.where(Trade.side == direction_req)
         if target_db_id is not None:
             orphan_q = orphan_q.where(Trade.id == target_db_id)
         else:
             orphan_q = orphan_q.order_by(desc(Trade.entry_time)).limit(1)
         orphan = db.execute(orphan_q).scalar_one_or_none()
         if orphan is None:
+            # ── KuCoin-direct fallback (LIVE only) ──────────────────────
+            # Same rationale as add-margin: a live position can exist ONLY on
+            # KuCoin (engine state lost on a restart, opened in KuCoin's own
+            # UI, or a filled limit order). /open shows it as a 'kucoin-…'
+            # row with no engine or DB binding, so the 25/50/75% buttons
+            # errored 'No open position'. Send a reduce-only market order to
+            # KuCoin for close_pct of the live position's contracts.
+            if mode == "live":
+                kc_eng = futures_engine_registry.for_user(user_id)
+                ok_creds, _cerr = _ensure_live_credentials(kc_eng, user_id, db)
+                if ok_creds:
+                    kc_pos = _fetch_kucoin_live_position(kc_eng, pair, direction_req)
+                    if kc_pos is not None:
+                        exit_p = _futures_ticker_price(pair) or kc_pos["entry"]
+                        class _KcPos:
+                            pass
+                        _kp = _KcPos()
+                        _kp.pair          = pair
+                        _kp.direction     = kc_pos["direction"]
+                        _kp.entry         = kc_pos["entry"]
+                        _kp.size          = kc_pos["margin"]
+                        _kp.leverage      = int(kc_pos["leverage"]) or 1
+                        _kp.tp2_price     = None
+                        _kp.sl            = 0
+                        _kp.remaining_pct = 1.0
+                        # CRITICAL: tag _mode='live' so _live_order_allowed
+                        # permits the order on the paper-default main engine
+                        # (otherwise _place_live_partial_close silently no-ops).
+                        _kp._mode         = "live"
+                        ok_live, err_live = kc_eng._place_live_partial_close(
+                            pair, _kp, close_pct / 100.0, exit_p,
+                        )
+                        if not ok_live:
+                            return {"error": f"KuCoin rejected partial close: {err_live}"}
+                        return {
+                            "ok": True, "pair": pair, "mode": "live",
+                            "fill_price": exit_p, "close_pct": close_pct,
+                            "leg_pnl": 0.0,
+                            "remaining_pct": round((1.0 - close_pct / 100.0) * 100.0, 2),
+                            "fully_closed": close_pct >= 99.0,
+                            "source": "kucoin_live",
+                        }
             return {"error": f"No open position for {pair} in {mode} mode"}
 
         # ── Actually do a PARTIAL close on the DB row ─────────────────
@@ -3497,6 +3680,12 @@ def partial_close_futures_position(
                 _op.tp2_price = None
                 _op.sl        = orphan.stoploss_price or 0
                 _op.remaining_pct = 1.0            # full of CURRENT for the helper's clamp
+                # CRITICAL: tag _mode='live' so _live_order_allowed permits the
+                # order on the paper-default main engine — without it
+                # _place_live_partial_close returns (True, "") WITHOUT hitting
+                # KuCoin, silently shrinking the DB row while the real position
+                # keeps its full size on the exchange.
+                _op._mode     = "live"
                 ok_live, err_live = main_eng._place_live_partial_close(
                     pair, _op, close_fraction, exit_p,
                 )
@@ -4648,6 +4837,38 @@ def position_add_margin(
             orphan_q = orphan_q.order_by(desc(Trade.entry_time)).limit(1)
         orphan = db.execute(orphan_q).scalar_one_or_none()
         if orphan is None:
+            # ── KuCoin-direct fallback (LIVE only) ──────────────────────
+            # The position can live ONLY on KuCoin — /open surfaces it as a
+            # 'kucoin-…' row (engine state lost on a restart, opened in
+            # KuCoin's own UI, or a filled limit order) with no engine or
+            # Trade-row binding, so neither the engine search nor the orphan
+            # query above finds it. Without this the user SEES the position
+            # but add-margin always errors 'No open position'. Hit KuCoin's
+            # deposit-margin endpoint directly using the live position.
+            if mode == "live":
+                kc_eng = futures_engine_registry.for_user(user_id)
+                ok_creds, _cerr = _ensure_live_credentials(kc_eng, user_id, db)
+                if ok_creds:
+                    kc_pos = _fetch_kucoin_live_position(kc_eng, pair, direction_req)
+                    if kc_pos is not None:
+                        ok_dep, dep = _kucoin_deposit_margin(user_id, db, pair, amount)
+                        if not ok_dep:
+                            return {"error": dep}
+                        prev_margin = float(kc_pos.get("margin") or 0)
+                        new_eff_lev = (
+                            (prev_margin * float(kc_pos.get("leverage") or 1))
+                            / max(prev_margin + amount, 0.01)
+                        )
+                        return {
+                            "ok": True, "mode": "live", "pair": pair,
+                            "amount_added": amount,
+                            "prev_margin": round(prev_margin, 4),
+                            "new_margin": round(prev_margin + amount, 4),
+                            "prev_leverage": round(float(kc_pos.get("leverage") or 0), 2),
+                            "new_effective_leverage": round(new_eff_lev, 2),
+                            "kucoin_response": dep,
+                            "source": "kucoin_live",
+                        }
             suffix = f" ({direction_req.upper()})" if direction_req else ""
             return {"error": f"No open position for {pair}{suffix} in {mode} mode"}
 
@@ -4750,71 +4971,45 @@ def position_add_margin(
                 "new_liquidation_price": round(pos.liquidation_price or 0, 4),
                 "remaining_balance": round(eng.balance, 4)}
 
-    # LIVE: call KuCoin Futures /api/v1/position/margin/deposit-margin
-    # (the current canonical path — the old /api/v1/position/margin-deposit
-    # is deprecated. kucoin_futures_client.py:286 already uses the new path,
-    # this brings the router in line.)
+    # LIVE: deposit margin on KuCoin via the shared helper (canonical
+    # /api/v1/position/margin/deposit-margin path).
+    ok_dep, dep = _kucoin_deposit_margin(user_id, db, pair, amount)
+    if not ok_dep:
+        return {"error": dep}
+    result_data = dep
+    # Mirror locally so engine PNL math stays correct
     try:
-        from backend.services.native_trading_engine import _kucoin_post_signed
-        from backend.services.futures_engine import KUCOIN_FUTURES_BASE
-        from backend.services.kucoin_futures_client import normalize_futures_symbol
-        from backend.utils.encryption import decrypt
-        cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
-        if not cfg:
-            return {"error": "No KuCoin credentials configured"}
-        kk = decrypt(cfg.kucoin_key_enc or "", user_id)
-        ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
-        kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
-        if not (kk and ks and kp):
-            return {"error": "KuCoin credentials missing"}
-        # `pair` is "BASE/USDT" — apply the full futures-symbol transform
-        # (normalize_futures_symbol alone only maps BTCUSDTM→XBTUSDTM and
-        # would pass "ETH/USDT" through unchanged → KuCoin rejects it).
-        sym = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
-        biz_no = f"add-margin-{user_id[-8:]}-{int(_time.time() * 1000)}"
-        result = _kucoin_post_signed(
-            "/api/v1/position/margin/deposit-margin",
-            {"symbol": sym, "margin": amount, "bizNo": biz_no},
-            kk, ks, kp,
-            base_url=KUCOIN_FUTURES_BASE,
-        )
-        if str(result.get("code")) != "200000":
-            return {"error": f"KuCoin rejected: {result.get('msg', 'unknown')}"}
-        # Mirror locally so engine PNL math stays correct
+        with eng._lock:
+            prev_margin = float(getattr(pos, "size", 0) or 0)
+            pos.size = prev_margin + amount
+    except Exception:
+        pass
+    # If this was a DB-orphan stub (engine got reset, position lives
+    # only in the Trade row), also persist to the DB so /open
+    # reflects the new margin instead of the old.
+    orphan_trade = getattr(pos, "_orphan_trade", None)
+    if orphan_trade is not None:
         try:
-            with eng._lock:
-                prev_margin = float(getattr(pos, "size", 0) or 0)
-                pos.size = prev_margin + amount
-        except Exception:
-            pass
-        # If this was a DB-orphan stub (engine got reset, position lives
-        # only in the Trade row), also persist to the DB so /open
-        # reflects the new margin instead of the old.
-        orphan_trade = getattr(pos, "_orphan_trade", None)
-        if orphan_trade is not None:
-            try:
-                orphan_trade.amount = round(float(orphan_trade.amount or 0) + amount, 8)
-                # Recompute liq price from the new effective leverage.
-                lev_old = float(orphan_trade.leverage or 1)
-                new_eff_lev = ((float(orphan_trade.amount or 0) - amount) * lev_old) / max(float(orphan_trade.amount or 0), 0.01)
-                if (orphan_trade.side or "long") == "long":
-                    orphan_trade.liquidation_price = round(
-                        orphan_trade.entry_price * (1.0 - 1.0 / max(new_eff_lev, 1.0)), 8
-                    )
-                else:
-                    orphan_trade.liquidation_price = round(
-                        orphan_trade.entry_price * (1.0 + 1.0 / max(new_eff_lev, 1.0)), 8
-                    )
-                db.commit()
-            except Exception as orphan_db_exc:
-                log.warning("[%s] Failed to persist live orphan add-margin: %s",
-                            user_id, orphan_db_exc)
-        return {"ok": True, "mode": "live", "pair": pair,
-                "amount_added": amount,
-                "kucoin_response": result.get("data"),
-                "source": "db_orphan_live" if orphan_trade else "engine"}
-    except Exception as exc:
-        return {"error": f"KuCoin margin deposit failed: {exc}"}
+            orphan_trade.amount = round(float(orphan_trade.amount or 0) + amount, 8)
+            # Recompute liq price from the new effective leverage.
+            lev_old = float(orphan_trade.leverage or 1)
+            new_eff_lev = ((float(orphan_trade.amount or 0) - amount) * lev_old) / max(float(orphan_trade.amount or 0), 0.01)
+            if (orphan_trade.side or "long") == "long":
+                orphan_trade.liquidation_price = round(
+                    orphan_trade.entry_price * (1.0 - 1.0 / max(new_eff_lev, 1.0)), 8
+                )
+            else:
+                orphan_trade.liquidation_price = round(
+                    orphan_trade.entry_price * (1.0 + 1.0 / max(new_eff_lev, 1.0)), 8
+                )
+            db.commit()
+        except Exception as orphan_db_exc:
+            log.warning("[%s] Failed to persist live orphan add-margin: %s",
+                        user_id, orphan_db_exc)
+    return {"ok": True, "mode": "live", "pair": pair,
+            "amount_added": amount,
+            "kucoin_response": result_data,
+            "source": "db_orphan_live" if orphan_trade else "engine"}
 
 
 @router.post("/position/reduce-margin")
