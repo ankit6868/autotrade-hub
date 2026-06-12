@@ -1404,7 +1404,15 @@ class StrategyAsh(IStrategy):
     timeframe         = "5m"
     bias_timeframes   = ["15m", "1h", "4h"]    # HTF / MTF context
     sub_timeframes    = ["1m", "3m"]           # LTF sub-bar sweep detection
-    max_hold_candles  = 60                     # 60 × 5m = 5h
+    max_hold_candles  = 60                     # 60 × 5m = 5h (BACKSTOP only)
+    # The strategy's PRIMARY early-exit is the opposite-CHoCH signal in
+    # populate_exit_trend (exit_long=choch_dn / exit_short=choch_up). Those
+    # columns were silently ignored until this opt-in — without it the only
+    # exits were SL/TP + the 5h max-hold, so on short timeframes every trade
+    # timed out via max_hold_expired. With exit signals on, the trade closes
+    # on a real bias flip and max_hold is just the safety net it was meant to
+    # be.
+    use_exit_signals  = True
     max_stops_per_day = 3                      # halt after 3 stops today
     minimal_roi   = {"0": 100}                 # exits via engine SL/TP
     stoploss      = -0.99                      # disable Freqtrade global SL
