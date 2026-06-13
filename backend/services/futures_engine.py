@@ -607,6 +607,13 @@ class FuturesEngine(NativeTradingEngine):
         # the moment its exit_long / exit_short column fires (close-to-flat,
         # no reverse). Default False = exits only via SL/TP/max-hold/reverse.
         self._use_exit_signals:  bool  = False
+        # Per-strategy risk gates — start_futures resolves the real values
+        # (max_hold_candles from class attr / strategy_flags). Defaulted here
+        # so a manual (for_user) engine that never calls start_futures can't
+        # raise AttributeError or compare None > 0 in any shared code path.
+        self._max_hold_candles:  int   = 0
+        self._max_stops_per_day: int   = 0
+        self._tf_seconds:        int   = 900   # set per-bot in start_futures
 
         # ── MUST-2: Compile-failure circuit breaker ──────────────────────
         # If the strategy_runner raises N consecutive times during the
@@ -898,6 +905,12 @@ class FuturesEngine(NativeTradingEngine):
         # Convert cooldown_candles into seconds using the engine TF.
         tf_seconds = {"1m":60, "5m":300, "15m":900, "30m":1800,
                       "1h":3600, "4h":14400, "1d":86400}.get(timeframe, 900)
+        # Persist on self so _tick_continuous can convert elapsed wall-time into
+        # bar counts (used by the max-hold force-close). Previously tf_seconds
+        # was a start_futures local and the max-hold path referenced an
+        # undefined name — latent because max_hold was never set; now that the
+        # engine adopts a strategy's class_max_hold_candles, the path is live.
+        self._tf_seconds         = tf_seconds
         self._cooldown_seconds   = max(0, int(cooldown_candles)) * tf_seconds
         self._max_trades_per_day = max(1, int(max_trades_per_day))
         self._day_max_dd_pct     = max(1.0, float(max_daily_dd_pct))
@@ -1332,7 +1345,7 @@ class FuturesEngine(NativeTradingEngine):
                     # shouldn't sit in a setup forever — bias staleness
                     # eventually invalidates the trade thesis.
                     if exit_info is None and self._max_hold_candles > 0:
-                        bars_held = int((now - pos.opened_at).total_seconds() // tf_seconds)
+                        bars_held = int((now - pos.opened_at).total_seconds() // self._tf_seconds)
                         if bars_held >= self._max_hold_candles:
                             exit_info = (live_price, "max_hold_expired")
                     if exit_info:
@@ -1820,6 +1833,12 @@ class FuturesEngine(NativeTradingEngine):
             # ATR×per-TF-multiplier defaults (with per-user overrides), and
             # (c) enforces a min-RR gate per the spec.
             user_risk_overrides = risk_engine.load_user_risk_overrides(self.user_id)
+            # Force-slider: the user explicitly chose their slider SL/TP, so
+            # honour it exactly (like the backtest's "From sliders") by relaxing
+            # the min-RR gate — otherwise a sub-2R slider setup would be taken
+            # in the backtest but rejected live, breaking parity. Direction and
+            # positivity are still validated inside compute_tp_sl.
+            _min_rr_ovr = 0.01 if self._force_slider_sltp else None
             plan = risk_engine.compute_tp_sl(
                 entry          = entry,
                 direction      = direction,
@@ -1828,6 +1847,7 @@ class FuturesEngine(NativeTradingEngine):
                 strategy_sl    = sl_s,
                 strategy_tp    = tp_s,
                 strategy_tp2   = tp2_s,
+                min_rr_override = _min_rr_ovr,
                 user_overrides = user_risk_overrides,
             )
 

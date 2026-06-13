@@ -947,7 +947,12 @@ def run_futures_backtest(
 
             new_pending: list[tuple] = []
             for pe in pending_entries:
-                (sig_dir, _, sig_sl, sig_tp, _, sig_margin, use_signal_sltp,
+                # NOTE: position 1 is sig_entry (the signal-bar price) — it MUST
+                # be unpacked, not discarded: the maker-only entry path below
+                # references sig_entry to decide whether the limit filled. It
+                # was previously `_`, so enabling maker-only entry crashed with
+                # NameError. Position 4 (sig_liq) is unused here → kept as `_`.
+                (sig_dir, sig_entry, sig_sl, sig_tp, _, sig_margin, use_signal_sltp,
                  signal_bar_idx, signal_bar_ts, sig_tp2) = pe
 
                 # Free-margin check: don't open if we can't afford the margin.
