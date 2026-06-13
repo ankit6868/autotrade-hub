@@ -446,12 +446,18 @@ class SMCProV3(IStrategy):
         df["prev_low_20"]  = df["low"].rolling(20).min().shift(1)
         df["prev_high_20"] = df["high"].rolling(20).max().shift(1)
 
-        # FVG: bull = high[i-2] < low[i]; bear = low[i-2] > high[i].
-        # Flag bars where the FVG zone CONTAINS the current close.
-        bull_zone_lo = df["high"].shift(2)
-        bull_zone_hi = df["low"]
-        bear_zone_lo = df["high"]
-        bear_zone_hi = df["low"].shift(2)
+        # FVG: a 3-candle imbalance. Bull FVG completed on the PRIOR bar
+        # (gap between high[i-3] and low[i-1]); we then flag the CURRENT
+        # bar as "in the FVG" when its close retraced back INTO that gap.
+        # NOTE: the original compared the close to the *current* bar's own
+        # low/high (close <= low[i]) — impossible, since close is always
+        # within [low, high], so it was an exact-equality test that never
+        # fired (SMCProV3 produced 0 trades, ever). The shift makes the gap
+        # causal (uses only past bars) and lets the current close retrace in.
+        bull_zone_lo = df["high"].shift(3)
+        bull_zone_hi = df["low"].shift(1)
+        bear_zone_lo = df["high"].shift(1)
+        bear_zone_hi = df["low"].shift(3)
         df["in_bull_fvg"] = (bull_zone_lo < bull_zone_hi) & \
                             (df["close"] >= bull_zone_lo) & \
                             (df["close"] <= bull_zone_hi)
