@@ -6153,6 +6153,8 @@ def list_futures_bots(
                 # Restore SL/TP source so a "force slider" bot doesn't silently
                 # revert to structural levels after a backend restart.
                 force_slider_sltp    = bool(getattr(i, "force_slider_sltp", False)),
+                # Restore paper-mode cost simulation across restarts.
+                paper_sim_costs      = bool(getattr(i, "paper_sim_costs", False)),
             )
             log.info("Auto-resumed bot %s for user %s (ARM=%s)",
                      i.engine_key, user_id, getattr(i, "arm_enabled", False))
@@ -6283,6 +6285,7 @@ def list_futures_bots(
             "position_mode": getattr(i, "position_mode", "single") or "single",
             "strategy_flags": _decode_strategy_flags(getattr(i, "strategy_flags", None)),
             "force_slider_sltp": bool(getattr(i, "force_slider_sltp", False)),
+            "paper_sim_costs": bool(getattr(i, "paper_sim_costs", False)),
             "engine_key": i.engine_key,
             "created_at": str(i.created_at),
         })
@@ -6366,6 +6369,12 @@ def create_futures_bot(
     # False (default) = structural-or-slider; True = force the slider %s for
     # every trade (live/paper equivalent of the backtest "From sliders below").
     force_slider_sltp = bool(req.get("force_slider_sltp", False))
+
+    # ── Paper-mode cost simulation (added 2026-06-13) ─────────────────
+    # Paper-only realism toggle. When True, the engine deducts simulated
+    # KuCoin fees + slippage from paper P&L so paper tracks live. Ignored in
+    # live mode (the exchange charges real fees there).
+    paper_sim_costs = bool(req.get("paper_sim_costs", False))
 
     # ── Per-bot strategy flag overrides (UI toggles) ──────────────────
     # Sanitised to a flat dict of booleans so a bad payload can't inject
@@ -6572,6 +6581,8 @@ def create_futures_bot(
         strategy_flags       = strategy_flags_json,
         # SL/TP source — persist so auto-resume keeps "force slider" on.
         force_slider_sltp    = force_slider_sltp,
+        # Paper-mode cost realism — persist so auto-resume keeps it on.
+        paper_sim_costs      = paper_sim_costs,
     )
     db.add(instance)
     db.commit()
@@ -6617,6 +6628,7 @@ def create_futures_bot(
         max_stops_per_day    = max_stops_per_day,
         position_mode        = position_mode,
         force_slider_sltp    = force_slider_sltp,
+        paper_sim_costs      = paper_sim_costs,
         strategy_flags       = strategy_flags,
     )
 
@@ -6865,6 +6877,7 @@ def futures_bot_performance(
         "position_mode":        getattr(instance, "position_mode", "single") or "single",
         "strategy_flags":       _decode_strategy_flags(getattr(instance, "strategy_flags", None)),
         "force_slider_sltp":    bool(getattr(instance, "force_slider_sltp", False)),
+        "paper_sim_costs":      bool(getattr(instance, "paper_sim_costs", False)),
         "signal_criteria": signal_criteria,
         "trades": [
             {

@@ -754,6 +754,10 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   // for EVERY trade, ignoring structural levels — the live/paper equivalent of
   // the backtest's "From sliders below". Persisted + enforced by the engine.
   const [forceSlider, setForceSlider] = useState(false);
+  // ── Paper-mode cost realism (paper only) ───────────────────────────────────
+  // false (default) = frictionless paper fills. true = deduct simulated KuCoin
+  // fees + slippage from paper P&L so paper tracks live. Ignored in live mode.
+  const [paperSimCosts, setPaperSimCosts] = useState(false);
   // Per-strategy option controls (CHoCH exit / LDC dynamic-exit / ATR-stops /
   // bar-hold). Keyed by flag name; falls back to each flag's default when unset.
   const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean | number>>({});
@@ -899,6 +903,9 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         // SL/TP source — true forces the slider %s for every trade (ignores
         // the strategy's structural levels). Backend persists + enforces it.
         force_slider_sltp: forceSlider,
+        // Paper-mode realism — true deducts simulated KuCoin fees + slippage
+        // from paper P&L (paper only; ignored in live). Off by default.
+        paper_sim_costs: mode === 'paper' ? paperSimCosts : false,
         // Per-strategy option toggles (CHoCH / LDC dynamic-exit / ATR-stops).
         // Persisted on the StrategyInstance and applied every signal scan, so
         // the bot behaves the same as the backtest with these toggles.
@@ -1459,6 +1466,29 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                   : <>Uses the strategy's <b className="text-emerald-300">structural</b> SL/TP when available, else your slider %s. Non-structural strategies (Bollinger, SimpleTarget) always use the sliders.</>}
               </p>
             </div>
+
+            {/* ── Paper-mode realism: simulate fees + slippage (paper only) ──
+                Paper normally fills frictionlessly (like the backtest's pure
+                mode), so its P&L is slightly optimistic vs live. Turn this ON
+                to deduct simulated KuCoin VIP0 fees (~0.06% taker / 0.02%
+                maker) + a small slippage from paper P&L, so paper ≈ live.
+                Optional, OFF by default — never forced. Hidden in live mode
+                (the exchange charges real fees there). */}
+            {mode === 'paper' && (
+              <label className="flex items-start gap-2 cursor-pointer rounded-lg border border-[#2a3a52] p-2.5">
+                <input
+                  type="checkbox"
+                  checked={paperSimCosts}
+                  onChange={e => setPaperSimCosts(e.target.checked)}
+                  className="accent-indigo-500 mt-0.5"
+                />
+                <span className="text-[11px] leading-snug">
+                  <span className="text-slate-200 font-medium">Simulate fees &amp; slippage</span>
+                  <span className="ml-1 text-[8px] font-medium px-1.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300">paper realism</span>
+                  <span className="text-slate-500"> — deduct simulated KuCoin fees (~0.06% taker / 0.02% maker) + slippage from paper P&amp;L so it tracks live. OFF = frictionless paper (matches a pure backtest). Doesn't affect live bots.</span>
+                </span>
+              </label>
+            )}
 
             {/* ── Strategy options (per-strategy flag toggles) ──────────────
                 Shown for EVERY strategy: a universal Bar-hold timer plus any

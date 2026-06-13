@@ -147,6 +147,11 @@ class StrategyInstance(Base):
     # — the live/paper equivalent of the backtest's "From sliders below"
     # toggle. Persisted so auto-resume keeps the chosen source after a restart.
     force_slider_sltp  = Column(Boolean, default=False)
+    # ── Paper-mode cost simulation (added 2026-06-13) ─────────────────
+    # False (default) = frictionless paper fills (unchanged). True = deduct
+    # simulated KuCoin fees + slippage from paper P&L so paper ≈ live. Paper-
+    # only; ignored in live (real fees). Persisted so auto-resume keeps it.
+    paper_sim_costs    = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

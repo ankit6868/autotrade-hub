@@ -302,6 +302,17 @@ class FuturesPosition(Position):
         # based on `size`). 0 until the engine/router computes it at entry.
         self.contracts          = 0
 
+        # ── Paper-mode cost simulation (opt-in) ─────────────────────────
+        # When stamped True by the engine (paper mode + the user's "simulate
+        # fees & slippage" toggle), close() nets KuCoin fees + slippage out of
+        # pnl_abs so paper P&L tracks live. Off by default → frictionless paper
+        # (unchanged) and a no-op for live (real fees charged by the exchange).
+        self._sim_costs:        bool  = False
+        self._taker_fee:        float = 0.0006   # KuCoin VIP0 taker
+        self._maker_fee:        float = 0.0002   # KuCoin VIP0 maker
+        self._slip_bps:         float = 2.0      # ~2 bps adverse slip per fill
+        self.fees_paid:         float = 0.0      # populated by close() when simulated
+
         # ── Advanced Risk Management state ──────────────────────────────
         # Defaults are the "ARM-disabled" identity: a single-TP position
         # that closes 100% on tp hit. configure_arm() flips these to enable
@@ -482,6 +493,22 @@ class FuturesPosition(Position):
         if reason == "liquidated":
             final_leg_pnl = max(final_leg_pnl, -remaining_margin)
         self.pnl_abs = final_leg_pnl + self.partial_pnl_abs
+        # ── Paper-mode cost simulation (opt-in) ─────────────────────────
+        # Net round-trip KuCoin fees + slippage out of pnl_abs so paper P&L
+        # tracks live. Conservative VIP0 model: entry = taker (market), exit =
+        # maker on a TP fill else taker; slippage ~slip_bps per fill. Uses the
+        # FULL notional (entry + all exit legs ≈ 2× notional of fees) — an
+        # approximation that's pessimistic-to-fair, never optimistic.
+        if self._sim_costs and self.size > 0:
+            notional = self.size * self.leverage
+            exit_is_tp = reason in (
+                "take_profit", "take_profit_1", "take_profit_2", "tp1", "tp2",
+            )
+            entry_fee = notional * self._taker_fee
+            exit_fee  = notional * (self._maker_fee if exit_is_tp else self._taker_fee)
+            slippage  = notional * (self._slip_bps / 10000.0) * 2.0   # entry + exit
+            self.fees_paid = entry_fee + exit_fee + slippage
+            self.pnl_abs -= self.fees_paid
         # pnl_pct reflects ROI on the FULL initial margin so the UI shows
         # a sensible number even after a partial booking.
         self.pnl_pct = (self.pnl_abs / self.size * 100.0) if self.size > 0 else 0.0
@@ -562,6 +589,10 @@ class FuturesEngine(NativeTradingEngine):
         # levels when present, else slider %s). True = force slider %s for
         # every trade (live/paper equivalent of the backtest "From sliders").
         self._force_slider_sltp: bool = False
+        # Paper-mode cost simulation (opt-in). When True AND mode=="paper",
+        # positions are stamped so close() deducts fees + slippage, making
+        # paper P&L track live. No effect on live (real fees) or when off.
+        self._paper_sim_costs: bool = False
         # ── Advanced Risk Management config (Phase 3) ───────────────────
         # Set by start_futures from the bot create payload. When ARM is
         # off, these are ignored and positions use single-TP behaviour.
@@ -855,6 +886,8 @@ class FuturesEngine(NativeTradingEngine):
         position_mode:       str   = "single",
         force_slider_sltp:   bool  = False,  # True = ignore structural SL/TP,
                                              # use the slider %s for every trade
+        paper_sim_costs:     bool  = False,  # paper only: deduct simulated
+                                             # KuCoin fees + slippage from P&L
         # ── Per-bot strategy flag overrides ───────────────────────────
         # UI on/off toggles for a strategy's boolean options (e.g.
         # {'use_exit_signals': True} for StrategyAsh's CHoCH exit, or
@@ -890,6 +923,7 @@ class FuturesEngine(NativeTradingEngine):
         _pm = str(position_mode or "single").strip().lower()
         self._position_mode = _pm if _pm in ("single", "hedge", "concurrent") else "single"
         self._force_slider_sltp = bool(force_slider_sltp)
+        self._paper_sim_costs   = bool(paper_sim_costs)
         self._risk_pct     = max_position_pct / 100.0
         self._api_key      = kucoin_key
         self._api_sec      = kucoin_secret
@@ -1902,6 +1936,11 @@ class FuturesEngine(NativeTradingEngine):
                         arm_be_buffer_pct = self._arm_be_buffer_pct,
                         arm_trail_to_tp1  = self._arm_trail_to_tp1,
                     )
+                # Paper-mode cost realism (opt-in): stamp the cost config so
+                # close() nets KuCoin fees + slippage out of pnl_abs. Paper
+                # only — live charges real fees; off → frictionless (unchanged).
+                if self._paper_sim_costs and self._mode == "paper":
+                    pos._sim_costs = True
                 # Paper sizing-parity: stamp the SAME KuCoin contract count
                 # the live path would send (per-symbol multiplier), so a paper
                 # bot is a true dry-run of live sizing for every coin. The live
