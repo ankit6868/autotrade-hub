@@ -17,10 +17,19 @@ export type StratFlag = {
 export const STRATEGY_FLAGS: Record<string, StratFlag[]> = {
   StrategyAsh: [
     {
+      key: 'max_hold_candles',
+      type: 'number',
+      label: 'Bar hold',
+      default: 60,
+      min: 0,
+      max: 500,
+      hint: 'Force-close after this many bars (StrategyAsh’s 5h backstop = 60 on 5m). If "max_hold_expired" is dominating your exits, set 0 to DISABLE it so trades exit on SL / TP / CHoCH / signal flips instead. Tip: also switch SL/TP source to "From strategy (structural)" so the strategy’s tighter SMC stops drive exits.',
+    },
+    {
       key: 'use_exit_signals',
       label: 'CHoCH early-exit',
       default: false,
-      hint: 'Close a trade early when an opposite Change-of-Character (bias flip) prints. OFF = let the trade run to its SL / TP / ARM targets (recommended). ON can whipsaw and preempt take-profits.',
+      hint: 'Close a trade early when an opposite Change-of-Character (bias flip) prints. OFF = let the trade run to its SL / TP / ARM targets. ON exits on structure flips (your CHoCH-ON run shows this working).',
     },
   ],
   LorentzianClassifier: [
