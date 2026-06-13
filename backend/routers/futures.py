@@ -6331,7 +6331,13 @@ def create_futures_bot(
     # Optional per-strategy risk gates (added 2026-05-24). Defaults to 0
     # = disabled, matching the engine's "no enforcement" stance. When the
     # user / strategy declares > 0, the engine adds the circuit breaker.
-    max_hold_candles   = max(0, min(5000, int(req.get("max_hold_candles", 0))))
+    # None (not in payload) → engine derives it from the strategy's
+    # class_max_hold_candles (LDC=4 / Ash=60) for backtest parity. An explicit
+    # int (incl. 0 = disable) overrides. The bot UI sends the Bar-hold value
+    # inside strategy_flags (so it persists + auto-resumes), so this top-level
+    # field is normally absent — keep it for API clients.
+    _mh_raw            = req.get("max_hold_candles", None)
+    max_hold_candles   = (max(0, min(5000, int(_mh_raw))) if _mh_raw is not None else None)
     max_stops_per_day  = max(0, min(100,  int(req.get("max_stops_per_day", 0))))
 
     # ── Session window + equal-price threshold (PDF §3, §6) ─────────

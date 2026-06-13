@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
 import StrategyPreview from './StrategyPreview';
-import { STRATEGY_FLAGS, buildStrategyFlags } from '@/lib/strategyFlags';
+import { STRATEGY_FLAGS, type StratFlag } from '@/lib/strategyFlags';
 
 interface Props {
   pair: string;
@@ -752,6 +752,31 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   // bar-hold). Keyed by flag name; falls back to each flag's default when unset.
   const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean | number>>({});
 
+  // ── Universal Bar-hold timer (parity with the Futures Backtest) ─────────
+  // Shown for EVERY strategy. Default comes from the strategy's own manifest
+  // entry when it declares one (StrategyAsh = 60, LDC = 4); otherwise 0 = OFF.
+  // Sent inside strategy_flags so it persists on the StrategyInstance and the
+  // engine enforces it for any strategy (FuturesEngine._max_hold_candles).
+  const _botManifest: StratFlag[] = STRATEGY_FLAGS[bot.name] || [];
+  const _botHoldManifest = _botManifest.find(f => f.key === 'max_hold_candles');
+  const botBarHoldFlag: StratFlag = {
+    key: 'max_hold_candles', type: 'number', label: 'Bar-hold timer',
+    default: (_botHoldManifest?.default as number) ?? 0,
+    min: 1, max: 500, disableValue: 0, onValue: 20,
+    hint: _botHoldManifest?.hint
+      || 'Force-close a trade after this many bars, regardless of SL / TP / signal. OFF by default for this strategy. Turn ON to cap how long a trade can stay open. Keep this the SAME as your backtest so the bot behaves identically.',
+  };
+  // Bar-hold first (universal), then the strategy's other flags minus its own
+  // max_hold (the universal control owns it — avoids a duplicate row).
+  const botFlags: StratFlag[] = [botBarHoldFlag, ..._botManifest.filter(f => f.key !== 'max_hold_candles')];
+  // Build the strategy_flags payload from botFlags (so the universal bar-hold
+  // is always included), falling back to each flag's default when unset.
+  const buildBotFlags = (): Record<string, boolean | number> | undefined => {
+    const out: Record<string, boolean | number> = {};
+    for (const f of botFlags) out[f.key] = strategyFlags[f.key] ?? f.default;
+    return Object.keys(out).length ? out : undefined;
+  };
+
   // ── Phase 5e: Strategy preview state ─────────────────────────────────────
   // Tracked here so we can disable the Create button in LIVE mode when the
   // strategy isn't live_eligible (matches the backend's hard guardrail in
@@ -876,8 +901,8 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         // Per-strategy option toggles (CHoCH / LDC dynamic-exit / ATR-stops).
         // Persisted on the StrategyInstance and applied every signal scan, so
         // the bot behaves the same as the backtest with these toggles.
-        ...(buildStrategyFlags(bot.name, strategyFlags)
-            ? { strategy_flags: buildStrategyFlags(bot.name, strategyFlags) } : {}),
+        ...(buildBotFlags()
+            ? { strategy_flags: buildBotFlags() } : {}),
         // Advanced Risk Management — backend stores AND enforces these in the
         // live/paper engine (TP1 partial-close + BE-trail). UI matches backtest.
         arm_enabled:        armEnabled,
@@ -1391,17 +1416,18 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
             </div>
 
             {/* ── Strategy options (per-strategy flag toggles) ──────────────
-                Only shown for strategies that expose tunable flags (StrategyAsh
-                CHoCH exit; LDC dynamic-exit / ATR-stops). Flips a class attr on
-                the strategy via strategy_flags — applied live + persisted. */}
-            {(STRATEGY_FLAGS[bot.name] || []).length > 0 && (
+                Shown for EVERY strategy: a universal Bar-hold timer plus any
+                per-strategy flags (StrategyAsh CHoCH exit; LDC dynamic-exit /
+                ATR-stops / kernel). Sent via strategy_flags — applied live +
+                persisted + enforced by the engine, identical to the backtest. */}
+            {botFlags.length > 0 && (
               <div className="rounded-lg border border-violet-500/30 bg-violet-500/[0.05] p-3">
                 <div className="flex items-center gap-2 mb-2 flex-wrap">
                   <span className="text-xs font-bold text-violet-200">🎛 {bot.name} options</span>
                   <span className="text-[9px] text-slate-500">applied live — keep these the same as your backtest</span>
                 </div>
                 <div className="flex flex-col gap-1.5">
-                  {(STRATEGY_FLAGS[bot.name] || []).map(f => {
+                  {botFlags.map(f => {
                     // number flag with a "disable" value → On/Off switch + stepper
                     if (f.type === 'number' && f.disableValue !== undefined) {
                       const cur = Number(strategyFlags[f.key] ?? f.default);

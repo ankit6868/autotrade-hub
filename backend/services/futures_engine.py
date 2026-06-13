@@ -832,7 +832,11 @@ class FuturesEngine(NativeTradingEngine):
         # 0 = disabled (don't enforce). When > 0, the engine adds the
         # corresponding circuit breaker. Strategies that don't set
         # these (most don't) get the legacy unbounded behaviour.
-        max_hold_candles:    int   = 0,    # close trade after N bars open
+        max_hold_candles:    int | None = None,  # close trade after N bars open.
+                                           # None = derive from the strategy's
+                                           # class_max_hold_candles (parity with
+                                           # the backtester); an int (incl. 0 =
+                                           # disable) is an explicit override.
         max_stops_per_day:   int   = 0,    # halt new entries after N stops today
         # ── Phase 9 — position mode (hedge support) ───────────────────
         # "single" (default) = stop-and-reverse; "hedge" = allow a LONG and
@@ -914,7 +918,14 @@ class FuturesEngine(NativeTradingEngine):
         # candles = 5h on 5m). Strategy can declare via class attribute
         # `max_hold_candles = 60`; engine reads it through compiled_df
         # attrs (same mechanism as max_trades_per_day).
-        self._max_hold_candles  = max(0, int(max_hold_candles))
+        # None = "not explicitly set" → the compile block below fills it from
+        # the strategy's class_max_hold_candles (so LDC=4 / Ash=60 are enforced
+        # on the bot exactly like the backtest). An int (incl. 0) is explicit.
+        self._max_hold_candles = (
+            max(0, int(max_hold_candles))
+            if isinstance(max_hold_candles, int) and not isinstance(max_hold_candles, bool)
+            else None
+        )
         # max_stops_per_day: halt new entries after this many stop-loss
         # exits today. 0 = disabled. Stricter than max_trades_per_day
         # because it specifically counts STOPS (signals of strategy
@@ -981,6 +992,15 @@ class FuturesEngine(NativeTradingEngine):
                     if _result.attrs.get("class_use_exit_signals") is True:
                         self._use_exit_signals = True
                         log.info("[%s] strategy opts into explicit exit signals", self.user_id)
+                    # Bar-hold: when not explicitly overridden, adopt the
+                    # strategy's declared max_hold_candles (LDC=4 / Ash=60)
+                    # so the bot's fixed-hold exit matches the backtester.
+                    if self._max_hold_candles is None:
+                        _cmh = _result.attrs.get("class_max_hold_candles")
+                        if isinstance(_cmh, int) and _cmh > 0:
+                            self._max_hold_candles = _cmh
+                            log.info("[%s] strategy declares max_hold_candles=%s (bot will enforce it)",
+                                     self.user_id, self._max_hold_candles)
             except Exception as _compile_exc:
                 self._log_action(
                     "strategy_compile_failed",
@@ -991,6 +1011,23 @@ class FuturesEngine(NativeTradingEngine):
                     "[%s] strategy %s failed to compile on start: %s — will fall back at signal time",
                     self.user_id, strategy_name, _compile_exc,
                 )
+
+        # ── Bar-hold: universal strategy_flags override ──────────────────
+        # The UI Bar-hold toggle is sent as strategy_flags["max_hold_candles"]
+        # so it persists on the StrategyInstance and survives auto-resume. It
+        # takes precedence over both the explicit param and the class attr
+        # (incl. 0 = disable), matching the backtester's override semantics —
+        # and works for ANY strategy, even ones that never declared a hold.
+        _ovr_flags = self._strategy_overrides.get("flags") or {}
+        if isinstance(_ovr_flags, dict) and "max_hold_candles" in _ovr_flags:
+            try:
+                self._max_hold_candles = max(0, int(_ovr_flags["max_hold_candles"]))
+            except (TypeError, ValueError):
+                pass
+        # Anything still unset (no strategy_id / compile failed / no declaration)
+        # means "no fixed-hold exit".
+        if self._max_hold_candles is None:
+            self._max_hold_candles = 0
 
         # ── MUST-3: MTF cache warm-up ───────────────────────────────────
         # The Timeframe Adapter wants HTF candles (e.g. 1h + 4h when
