@@ -296,8 +296,27 @@ function FuturesBacktestInner() {
   // Used to disable the "Apply strategy params" button so the user can
   // see at a glance whether reverting would actually change anything.
   const selectedStrategy = strategies.find((x: any) => x.id === strategyId);
-  // Option controls available for the selected strategy (empty for most).
-  const activeFlags: StratFlag[] = (selectedStrategy && STRATEGY_FLAGS[selectedStrategy.name]) || [];
+  // Per-strategy manifest flags (CHoCH for Ash; ML/filter/kernel for LDC; etc.)
+  const manifestFlags: StratFlag[] = (selectedStrategy && STRATEGY_FLAGS[selectedStrategy.name]) || [];
+  // ── Universal Bar-hold timer ───────────────────────────────────────────
+  // Shown for EVERY strategy in the backtest options. Its default comes from
+  // the strategy's own manifest entry when it declares one (StrategyAsh = 60,
+  // LDC = 4); otherwise 0 = OFF (the strategy exits purely on SL/TP/signal —
+  // unchanged behaviour). disableValue:0 renders the On/Off switch + stepper.
+  const _manifestHold = manifestFlags.find(f => f.key === 'max_hold_candles');
+  const barHoldFlag: StratFlag = {
+    key: 'max_hold_candles', type: 'number', label: 'Bar-hold timer',
+    default: (_manifestHold?.default as number) ?? 0,
+    min: 1, max: 500, disableValue: 0,
+    hint: _manifestHold?.hint
+      || 'Force-close a trade after this many bars, regardless of SL / TP / signal. OFF by default for this strategy (it already exits on SL / TP / signal). Turn ON to cap how long a trade can stay open — it cuts trades that drift sideways, but it also closes winners early, so backtest BOTH ways before trusting it. Not a guaranteed profit boost.',
+  };
+  // Bar-hold first (universal), then the strategy's other flags minus its own
+  // max_hold (the universal control now owns it — avoids a duplicate row).
+  // Empty when no strategy is selected so the options panel stays hidden.
+  const activeFlags: StratFlag[] = selectedStrategy
+    ? [barHoldFlag, ...manifestFlags.filter(f => f.key !== 'max_hold_candles')]
+    : [];
   const flagVal = (f: StratFlag): boolean | number => strategyFlags[f.key] ?? f.default;
   // Build the strategy_flags payload for the selected strategy only (so we
   // never send LDC flags to StrategyAsh, etc.). undefined when none apply.

@@ -675,6 +675,23 @@ def run_futures_backtest(
                 pair_max_hold_candles = int(class_max_hold) if class_max_hold else 0
                 if pair_max_hold_candles > 0:
                     data_diagnostics[pair]["max_hold_candles"] = pair_max_hold_candles
+                # ── Universal Bar-hold override (UI flag) ────────────────
+                # The backtest UI exposes a Bar-hold timer for EVERY strategy
+                # (off by default for those that don't declare one). When the
+                # user sets max_hold_candles via strategy_flags it takes
+                # precedence over the class-declared value — INCLUDING 0, which
+                # DISABLES the timer (e.g. turning off StrategyAsh's 60-bar
+                # backstop, or the LDC's 4-bar hold). Works for any strategy,
+                # even ones that never declared class_max_hold_candles (the
+                # instance setattr override is a no-op for those since the
+                # attribute doesn't exist — this direct path is authoritative).
+                if strategy_flags and "max_hold_candles" in strategy_flags:
+                    try:
+                        pair_max_hold_candles = max(0, int(strategy_flags["max_hold_candles"]))
+                        data_diagnostics[pair]["max_hold_candles"] = pair_max_hold_candles
+                        data_diagnostics[pair]["max_hold_source"] = "ui_override"
+                    except (TypeError, ValueError):
+                        pass
                 signal_fn = make_signal_fn_from_df(
                     df, leverage, stoploss_pct, take_profit_pct,
                 )
