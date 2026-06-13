@@ -1862,17 +1862,21 @@ class FuturesEngine(NativeTradingEngine):
             entry = live_price
 
             # ── Phase 4 + NICE-4: timeframe-aware risk plan w/ overrides ─
-            # Pass the strategy's structural SL/TP through risk_engine,
-            # which (a) honours them if they validate, (b) falls back to
-            # ATR×per-TF-multiplier defaults (with per-user overrides), and
-            # (c) enforces a min-RR gate per the spec.
+            # Pass the signal's SL/TP (already structural-or-slider from
+            # make_signal_fn_from_df) through risk_engine, which honours them
+            # when direction-valid and otherwise falls back to ATR defaults.
             user_risk_overrides = risk_engine.load_user_risk_overrides(self.user_id)
-            # Force-slider: the user explicitly chose their slider SL/TP, so
-            # honour it exactly (like the backtest's "From sliders") by relaxing
-            # the min-RR gate — otherwise a sub-2R slider setup would be taken
-            # in the backtest but rejected live, breaking parity. Direction and
-            # positivity are still validated inside compute_tp_sl.
-            _min_rr_ovr = 0.01 if self._force_slider_sltp else None
+            # ── BACKTEST PARITY: relax the min-RR gate ───────────────────
+            # The backtester honours the strategy's / user's chosen SL/TP with
+            # NO min-RR rejection. The engine's default min-RR (2.0) silently
+            # rejected every signal of a perfectly profitable mean-reversion
+            # strategy (e.g. Bollinger Bands: small TP / wider SL → RR ~0.3),
+            # so a strategy that backtests at 209 trades / +9% would take ZERO
+            # trades live — a silent, dangerous divergence. The signal always
+            # carries an explicit SL/TP (structural or slider) that the user
+            # validated in the backtest, so we honour it here too. Direction +
+            # positivity are still checked inside compute_tp_sl; the spread
+            # check below still guards live fills.
             plan = risk_engine.compute_tp_sl(
                 entry          = entry,
                 direction      = direction,
@@ -1881,7 +1885,7 @@ class FuturesEngine(NativeTradingEngine):
                 strategy_sl    = sl_s,
                 strategy_tp    = tp_s,
                 strategy_tp2   = tp2_s,
-                min_rr_override = _min_rr_ovr,
+                min_rr_override = 0.01,   # honour signal SL/TP (parity w/ backtest)
                 user_overrides = user_risk_overrides,
             )
 
