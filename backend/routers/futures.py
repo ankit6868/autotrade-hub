@@ -649,7 +649,12 @@ def run_futures_backtest(
     # garbage; anything in between is rare since the UI now offers only
     # the two extremes, but we still accept arbitrary integers for
     # power-users hitting the API directly.
-    max_concurrent   = max(1, min(1000, int(req.get("max_concurrent_positions", 999))))
+    # Default 1 (TV single position). Was 999, which silently turned the
+    # default "single" mode into pyramiding for any API caller that omitted
+    # this field — a strategy backtests very differently with 999 stacked
+    # positions vs 1 (e.g. Bollinger: 484 trades / -8% vs 209 / +9%). The UI
+    # always sends 1; this just makes the API safe-by-default and consistent.
+    max_concurrent   = max(1, min(1000, int(req.get("max_concurrent_positions", 1))))
     # Position mode: "single" (TV-default stop-and-reverse) | "hedge"
     # (LONG + SHORT can coexist on same pair, no stop-and-reverse) |
     # "concurrent" (legacy pyramiding stack same-direction). Hedge mode
@@ -658,6 +663,12 @@ def run_futures_backtest(
     position_mode    = str(req.get("position_mode", "single")).lower()
     if position_mode not in ("single", "hedge", "concurrent"):
         position_mode = "single"
+    # "single" means exactly ONE position per pair (stop-and-reverse on the
+    # opposite signal). The backtester only does stop-and-reverse when the
+    # concurrent cap is 1, so force it — otherwise a stray max_concurrent
+    # would silently degrade single mode into pyramiding.
+    if position_mode == "single":
+        max_concurrent = 1
     # Margin (risk) per trade as fraction of current balance. Default 5%
     # = $50 margin on $1000 balance. Clamped 1..50% (above 50% is
     # essentially "all-in" and would liquidate the account on the first
