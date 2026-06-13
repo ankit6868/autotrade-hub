@@ -752,25 +752,17 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   // bar-hold). Keyed by flag name; falls back to each flag's default when unset.
   const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean | number>>({});
 
-  // ── Universal Bar-hold timer (parity with the Futures Backtest) ─────────
-  // Shown for EVERY strategy. Default comes from the strategy's own manifest
-  // entry when it declares one (StrategyAsh = 60, LDC = 4); otherwise 0 = OFF.
-  // Sent inside strategy_flags so it persists on the StrategyInstance and the
-  // engine enforces it for any strategy (FuturesEngine._max_hold_candles).
-  const _botManifest: StratFlag[] = STRATEGY_FLAGS[bot.name] || [];
-  const _botHoldManifest = _botManifest.find(f => f.key === 'max_hold_candles');
-  const botBarHoldFlag: StratFlag = {
-    key: 'max_hold_candles', type: 'number', label: 'Bar-hold timer',
-    default: (_botHoldManifest?.default as number) ?? 0,
-    min: 1, max: 500, disableValue: 0, onValue: 20,
-    hint: _botHoldManifest?.hint
-      || 'Force-close a trade after this many bars, regardless of SL / TP / signal. OFF by default for this strategy. Turn ON to cap how long a trade can stay open. Keep this the SAME as your backtest so the bot behaves identically.',
-  };
-  // Bar-hold first (universal), then the strategy's other flags minus its own
-  // max_hold (the universal control owns it — avoids a duplicate row).
-  const botFlags: StratFlag[] = [botBarHoldFlag, ..._botManifest.filter(f => f.key !== 'max_hold_candles')];
-  // Build the strategy_flags payload from botFlags (so the universal bar-hold
-  // is always included), falling back to each flag's default when unset.
+  // ── Strategy option toggles (manifest-driven) ──────────────────────────
+  // The bot runs each strategy AS DESIGNED, so it shows ONLY the flags the
+  // strategy actually declares. The Bar-hold timer therefore appears only for
+  // strategies that define one (StrategyAsh = 60, LDC = 4) — it is NOT imposed
+  // on strategies without a hold (Bollinger, SimpleTarget, …). The engine
+  // already enforces a strategy's declared hold by default (start_futures
+  // reads class_max_hold_candles); these toggles let you raise/disable it.
+  // (Experimenting with a hold on any strategy stays a Futures-Backtest-only
+  //  sandbox feature.)
+  const botFlags: StratFlag[] = STRATEGY_FLAGS[bot.name] || [];
+  // Build the strategy_flags payload from the strategy's own declared flags.
   const buildBotFlags = (): Record<string, boolean | number> | undefined => {
     const out: Record<string, boolean | number> = {};
     for (const f of botFlags) out[f.key] = strategyFlags[f.key] ?? f.default;
