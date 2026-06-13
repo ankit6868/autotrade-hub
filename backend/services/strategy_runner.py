@@ -686,7 +686,8 @@ def evaluate_strategy(
 
 
 def make_signal_fn_from_df(df: pd.DataFrame, leverage: int,
-                           stoploss_pct: float, take_profit_pct: float):
+                           stoploss_pct: float, take_profit_pct: float,
+                           force_slider: bool = False):
     """Adapter: given a dataframe that already has enter_long/enter_short
     columns populated, return a signal_fn(df, i) → (entry_px, sl, tp, dir)
     matching the existing engine's expected shape.
@@ -726,6 +727,13 @@ def make_signal_fn_from_df(df: pd.DataFrame, leverage: int,
         strategy populated valid (non-NaN, positive) values; otherwise
         slider-based. tp2 is only populated when the strategy returned a
         valid second target and direction validates."""
+        # Force-slider: ignore structural columns and use the slider %s for
+        # EVERY trade (live/paper equivalent of the backtest's "From sliders
+        # below"). No TP2 — ARM derives TP1/TP2 from this single TP downstream.
+        if force_slider:
+            if direction == "long":
+                return entry * (1 - stoploss_pct / 100), entry * (1 + take_profit_pct / 100), None
+            return entry * (1 + stoploss_pct / 100), entry * (1 - take_profit_pct / 100), None
         # Try strategy-populated columns first.
         if sl_col is not None and tp_col is not None and i < len(sl_col):
             sl_v = sl_col[i]

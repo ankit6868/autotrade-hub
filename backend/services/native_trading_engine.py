@@ -379,6 +379,7 @@ def build_strategy_signal_fn(
     pair:          str = "BTC/USDT",   # MTF analyzer: which pair to fetch HTF data for
     execution_tf:  str = "15m",        # MTF analyzer: engine TF (drops bias TFs <= this)
     overrides:     dict | None = None, # Per-bot strategy overrides (session/threshold/...)
+    force_slider:  bool = False,       # True = ignore structural SL/TP, use slider %s
 ):
     """Compile the user's strategy code into a per-bar signal_fn(df, i).
 
@@ -446,6 +447,7 @@ def build_strategy_signal_fn(
 
     sig_fn = make_signal_fn_from_df(
         df_with_signals, leverage, stoploss_pct, take_profit_pct,
+        force_slider=force_slider,
     )
     sig_fn.diagnostics = {  # type: ignore[attr-defined]
         "path":           "strategy_runner",

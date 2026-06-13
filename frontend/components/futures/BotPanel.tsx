@@ -748,6 +748,12 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   // signals open the OTHER side instead of closing. The live/paper engine
   // honours this via FuturesEngine._position_mode (gated stop-and-reverse).
   const [positionMode, setPositionMode] = useState<'single' | 'hedge'>('single');
+  // ── SL/TP source ─────────────────────────────────────────────────────────
+  // false = use the strategy's structural SL/TP when it provides them, else
+  // the slider %s (default). true = force the slider Stop-Loss/Take-Profit %s
+  // for EVERY trade, ignoring structural levels — the live/paper equivalent of
+  // the backtest's "From sliders below". Persisted + enforced by the engine.
+  const [forceSlider, setForceSlider] = useState(false);
   // Per-strategy option controls (CHoCH exit / LDC dynamic-exit / ATR-stops /
   // bar-hold). Keyed by flag name; falls back to each flag's default when unset.
   const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean | number>>({});
@@ -890,6 +896,9 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         // SHORT coexist). Backend persists it on the StrategyInstance and the
         // live/paper engine honours it (gated stop-and-reverse).
         position_mode: positionMode,
+        // SL/TP source — true forces the slider %s for every trade (ignores
+        // the strategy's structural levels). Backend persists + enforces it.
+        force_slider_sltp: forceSlider,
         // Per-strategy option toggles (CHoCH / LDC dynamic-exit / ATR-stops).
         // Persisted on the StrategyInstance and applied every signal scan, so
         // the bot behaves the same as the backtest with these toggles.
@@ -1404,6 +1413,50 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                 {positionMode === 'hedge'
                   ? <>Opposite signals open a <b className="text-purple-300">new</b> position — the existing side is never force-closed. Max 1 long + 1 short per pair.</>
                   : <>An opposite signal <b className="text-sky-300">flips</b> the position (closes the old, opens the new). One position per pair.</>}
+              </p>
+            </div>
+
+            {/* ── SL/TP source: From strategy | From sliders ─────────────────
+                Matches the Futures Backtest "SL/TP source" toggle so the bot
+                uses the same stops you tested. "From strategy" = use the
+                strategy's structural SL/TP when it has them (SMC pivots, LDC
+                ATR), else the slider %s. "From sliders" = force the slider
+                Stop-Loss/Take-Profit %s for every trade. Sent as
+                force_slider_sltp; the engine persists + enforces it. */}
+            <div className="rounded-lg border border-[#2a3a52] p-2.5">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-xs font-bold text-white">SL / TP source</span>
+                <span className={`text-[8px] font-medium px-1.5 py-0.5 rounded-full ${
+                  forceSlider ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'}`}>
+                  {forceSlider ? 'slider %' : 'strategy / slider'}
+                </span>
+              </div>
+              <div className="inline-flex rounded-md border border-[#2a3a52] overflow-hidden text-[11px] font-medium w-full">
+                <button
+                  type="button"
+                  onClick={() => setForceSlider(false)}
+                  className={`flex-1 px-2 py-1.5 ${!forceSlider
+                    ? 'bg-emerald-500/20 text-emerald-300'
+                    : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                  title="Use the strategy's own structural SL/TP when it provides them (SMC pivots, LDC ATR stops); fall back to your slider %s otherwise. Recommended for structural strategies."
+                >
+                  From strategy
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setForceSlider(true)}
+                  className={`flex-1 px-2 py-1.5 border-l border-[#2a3a52] ${forceSlider
+                    ? 'bg-amber-500/20 text-amber-300'
+                    : 'bg-transparent text-slate-400 hover:bg-[#2a3a52]/40'}`}
+                  title="Force your slider Stop-Loss/Take-Profit %s for EVERY trade, ignoring the strategy's structural levels. Matches the backtest's 'From sliders below'."
+                >
+                  From sliders
+                </button>
+              </div>
+              <p className="text-[10px] text-slate-500 mt-2 leading-snug">
+                {forceSlider
+                  ? <>Every trade uses your <b className="text-amber-300">slider SL/TP</b> ({stoploss || '3'}% / {takeprofit || '1.5'}%). The strategy's structural levels are ignored — keep this the SAME as your backtest.</>
+                  : <>Uses the strategy's <b className="text-emerald-300">structural</b> SL/TP when available, else your slider %s. Non-structural strategies (Bollinger, SimpleTarget) always use the sliders.</>}
               </p>
             </div>
 

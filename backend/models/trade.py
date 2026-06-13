@@ -140,6 +140,13 @@ class StrategyInstance(Base):
     # defaults. Persisted so auto-resume restarts the bot with the same
     # toggles the user picked. _lightweight_migrate auto-adds the column.
     strategy_flags     = Column(Text,    nullable=True)
+    # ── SL/TP source (added 2026-06-13) ───────────────────────────────
+    # False (default) = use the strategy's structural SL/TP when it provides
+    # them, else the slider %s (current behaviour, unchanged). True = force the
+    # slider stoploss/takeprofit %s for EVERY trade, ignoring structural levels
+    # — the live/paper equivalent of the backtest's "From sliders below"
+    # toggle. Persisted so auto-resume keeps the chosen source after a restart.
+    force_slider_sltp  = Column(Boolean, default=False)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

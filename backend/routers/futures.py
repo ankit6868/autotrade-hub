@@ -6150,6 +6150,9 @@ def list_futures_bots(
                 position_mode        = str(getattr(i, "position_mode", "single") or "single"),
                 # Restore the user's strategy flag toggles (CHoCH / LDC opts).
                 strategy_flags       = _decode_strategy_flags(getattr(i, "strategy_flags", None)),
+                # Restore SL/TP source so a "force slider" bot doesn't silently
+                # revert to structural levels after a backend restart.
+                force_slider_sltp    = bool(getattr(i, "force_slider_sltp", False)),
             )
             log.info("Auto-resumed bot %s for user %s (ARM=%s)",
                      i.engine_key, user_id, getattr(i, "arm_enabled", False))
@@ -6279,6 +6282,7 @@ def list_futures_bots(
             "takeprofit": i.takeprofit,
             "position_mode": getattr(i, "position_mode", "single") or "single",
             "strategy_flags": _decode_strategy_flags(getattr(i, "strategy_flags", None)),
+            "force_slider_sltp": bool(getattr(i, "force_slider_sltp", False)),
             "engine_key": i.engine_key,
             "created_at": str(i.created_at),
         })
@@ -6357,6 +6361,11 @@ def create_futures_bot(
     position_mode = str(req.get("position_mode", "single") or "single").strip().lower()
     if position_mode not in ("single", "hedge"):
         position_mode = "single"
+
+    # ── SL/TP source (added 2026-06-13) ───────────────────────────────
+    # False (default) = structural-or-slider; True = force the slider %s for
+    # every trade (live/paper equivalent of the backtest "From sliders below").
+    force_slider_sltp = bool(req.get("force_slider_sltp", False))
 
     # ── Per-bot strategy flag overrides (UI toggles) ──────────────────
     # Sanitised to a flat dict of booleans so a bad payload can't inject
@@ -6561,6 +6570,8 @@ def create_futures_bot(
         position_mode        = position_mode,
         # UI strategy flag toggles (JSON) — persisted for auto-resume.
         strategy_flags       = strategy_flags_json,
+        # SL/TP source — persist so auto-resume keeps "force slider" on.
+        force_slider_sltp    = force_slider_sltp,
     )
     db.add(instance)
     db.commit()
@@ -6605,6 +6616,7 @@ def create_futures_bot(
         max_hold_candles     = max_hold_candles,
         max_stops_per_day    = max_stops_per_day,
         position_mode        = position_mode,
+        force_slider_sltp    = force_slider_sltp,
         strategy_flags       = strategy_flags,
     )
 
@@ -6852,6 +6864,7 @@ def futures_bot_performance(
         # Position mode (Phase 9 — hedge support)
         "position_mode":        getattr(instance, "position_mode", "single") or "single",
         "strategy_flags":       _decode_strategy_flags(getattr(instance, "strategy_flags", None)),
+        "force_slider_sltp":    bool(getattr(instance, "force_slider_sltp", False)),
         "signal_criteria": signal_criteria,
         "trades": [
             {

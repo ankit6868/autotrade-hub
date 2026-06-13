@@ -558,6 +558,10 @@ class FuturesEngine(NativeTradingEngine):
         # Only the "hedge" branch changes engine behaviour; every other
         # value (including "concurrent") keeps the single-mode path.
         self._position_mode: str = "single"
+        # SL/TP source: False = structural-or-slider (strategy's structural
+        # levels when present, else slider %s). True = force slider %s for
+        # every trade (live/paper equivalent of the backtest "From sliders").
+        self._force_slider_sltp: bool = False
         # ── Advanced Risk Management config (Phase 3) ───────────────────
         # Set by start_futures from the bot create payload. When ARM is
         # off, these are ignored and positions use single-TP behaviour.
@@ -842,6 +846,8 @@ class FuturesEngine(NativeTradingEngine):
         # "single" (default) = stop-and-reverse; "hedge" = allow a LONG and
         # a SHORT to coexist on the same pair. See __init__ for details.
         position_mode:       str   = "single",
+        force_slider_sltp:   bool  = False,  # True = ignore structural SL/TP,
+                                             # use the slider %s for every trade
         # ── Per-bot strategy flag overrides ───────────────────────────
         # UI on/off toggles for a strategy's boolean options (e.g.
         # {'use_exit_signals': True} for StrategyAsh's CHoCH exit, or
@@ -876,6 +882,7 @@ class FuturesEngine(NativeTradingEngine):
         # payload can never silently change risk behaviour.
         _pm = str(position_mode or "single").strip().lower()
         self._position_mode = _pm if _pm in ("single", "hedge", "concurrent") else "single"
+        self._force_slider_sltp = bool(force_slider_sltp)
         self._risk_pct     = max_position_pct / 100.0
         self._api_key      = kucoin_key
         self._api_sec      = kucoin_secret
@@ -1474,6 +1481,7 @@ class FuturesEngine(NativeTradingEngine):
                     pair            = pair,            # MTF analyzer
                     execution_tf    = self._timeframe, # MTF analyzer
                     overrides       = self._strategy_overrides,
+                    force_slider    = self._force_slider_sltp,
                 )
                 # Successful compile — reset the breaker counter so transient
                 # blips don't accumulate forever.
