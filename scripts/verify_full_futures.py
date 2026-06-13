@@ -186,6 +186,55 @@ lp_long  = _calc_liquidation_price(100.0, "long", 10)
 lp_short = _calc_liquidation_price(100.0, "short", 10)
 check("liq long below entry", lp_long < 100.0)
 check("liq short above entry", lp_short > 100.0)
+check("higher leverage -> closer liq", _calc_liquidation_price(100, "long", 20)
+      > _calc_liquidation_price(100, "long", 5))
+
+# ─────────────────────────────────────────────────────────────────────────
+# C) MANUAL + LIVE-ORDER GATING + SIZING + APP BOOT
+#    (manual paper/live core, live-order routing, contract sizing, all routes)
+# ─────────────────────────────────────────────────────────────────────────
+print("=" * 78)
+print("C) MANUAL / LIVE GATING / SIZING / APP BOOT")
+print("=" * 78)
+from backend.services.futures_engine import _stake_to_contracts, futures_engine_registry
+
+# app boots & every router registers (catches broken imports/routes)
+import backend.main as _M
+_routes = [r for r in _M.app.routes if hasattr(r, "path")]
+_fut = [r for r in _routes if "/futures" in getattr(r, "path", "")]
+check(f"app boots with {len(_fut)} futures routes", len(_fut) >= 30)
+
+# contract sizing is a positive integer for BTC + non-BTC coins
+for sym, px in [("XBTUSDTM", 60000), ("ETHUSDTM", 3000), ("SOLUSDTM", 150), ("DOGEUSDTM", 0.15)]:
+    c = _stake_to_contracts(100.0, 10, px, sym)
+    check(f"sizing {sym} -> {c} contracts (int >=1)", isinstance(c, int) and c >= 1)
+check("sizing zero-entry guard -> 1", _stake_to_contracts(100, 10, 0, "XBTUSDTM") == 1)
+
+# manual paper lifecycle on the shared for_user engine
+_eng = futures_engine_registry.for_user("verify-full-futures-user")
+_eng.balance = 1000.0
+_mp = FuturesPosition(pair=PAIR, direction="long", entry=60000.0, sl=0, tp=0,
+                      size=50.0, opened_at=now, trade_id="k", leverage=10)
+_eng.positions["k"] = _mp
+_mp.close(61200.0, "manual_close", now)              # +2% px x10 = +20% on 50 = +10
+_eng.balance += _mp.pnl_abs - getattr(_mp, "partial_pnl_abs", 0.0)
+del _eng.positions["k"]
+check("manual paper close pnl +10", approx(_mp.pnl_abs, 10.0))
+check("manual paper balance credited to 1010", approx(_eng.balance, 1010.0))
+
+# _live_order_allowed: only routes real orders when creds + (live engine OR
+# a live-tagged position). This is what makes manual-live TP/SL/close hit
+# KuCoin even on the paper-default main engine.
+_g = futures_engine_registry.for_user("verify-gating-user")
+_g._api_key = ""
+check("gating: no api_key -> blocked", _g._live_order_allowed(_mp) is False)
+_g._api_key = "k"; _g._mode = "paper"
+class _LivePos:  _mode = "live"
+class _PaperPos: _mode = "paper"
+check("gating: paper engine + live pos -> allowed", _g._live_order_allowed(_LivePos()) is True)
+check("gating: paper engine + paper pos -> blocked", _g._live_order_allowed(_PaperPos()) is False)
+_g._mode = "live"
+check("gating: live engine -> allowed", _g._live_order_allowed(None) is True)
 
 print("=" * 78)
 if fails:
