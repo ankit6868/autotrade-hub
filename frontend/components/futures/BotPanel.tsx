@@ -1401,34 +1401,72 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                   <span className="text-[9px] text-slate-500">applied live — keep these the same as your backtest</span>
                 </div>
                 <div className="flex flex-col gap-1.5">
-                  {(STRATEGY_FLAGS[bot.name] || []).map(f => f.type === 'number' ? (
-                    <div key={f.key} className="flex items-start gap-2">
-                      <input
-                        type="number"
-                        min={f.min} max={f.max} step={f.step ?? 1}
-                        value={Number(strategyFlags[f.key] ?? f.default)}
-                        onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? -9999, Math.min(f.max ?? 9999, Number(e.target.value) || 0)) }))}
-                        className="w-14 px-2 py-1 rounded bg-[#0f1729] border border-violet-500/30 text-[11px] text-slate-100"
-                      />
-                      <span className="text-[11px] leading-snug">
-                        <span className="text-slate-200 font-medium">{f.label}</span>
-                        <span className="text-slate-500"> — {f.hint}</span>
-                      </span>
-                    </div>
-                  ) : (
-                    <label key={f.key} className="flex items-start gap-2 cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={Boolean(strategyFlags[f.key] ?? f.default)}
-                        onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked }))}
-                        className="accent-violet-500 mt-0.5"
-                      />
-                      <span className="text-[11px] leading-snug">
-                        <span className="text-slate-200 font-medium">{f.label}</span>
-                        <span className="text-slate-500"> — {f.hint}</span>
-                      </span>
-                    </label>
-                  ))}
+                  {(STRATEGY_FLAGS[bot.name] || []).map(f => {
+                    // number flag with a "disable" value → On/Off switch + stepper
+                    if (f.type === 'number' && f.disableValue !== undefined) {
+                      const cur = Number(strategyFlags[f.key] ?? f.default);
+                      const off = cur === f.disableValue;
+                      return (
+                        <div key={f.key} className="flex items-start gap-2">
+                          <label className="flex items-center gap-1 cursor-pointer mt-0.5 shrink-0">
+                            <input
+                              type="checkbox"
+                              checked={!off}
+                              onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked ? Number(f.default) : (f.disableValue as number) }))}
+                              className="accent-violet-500"
+                            />
+                            <span className={`text-[10px] font-bold w-6 ${off ? 'text-amber-300' : 'text-emerald-300'}`}>{off ? 'OFF' : 'ON'}</span>
+                          </label>
+                          <input
+                            type="number"
+                            min={f.min} max={f.max} step={f.step ?? 1}
+                            value={off ? Number(f.default) : cur}
+                            disabled={off}
+                            onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? 1, Math.min(f.max ?? 9999, Number(e.target.value) || (f.min ?? 1))) }))}
+                            className={`w-14 px-2 py-1 rounded bg-[#0f1729] border border-violet-500/30 text-[11px] text-slate-100 ${off ? 'opacity-40' : ''}`}
+                          />
+                          <span className="text-[11px] leading-snug">
+                            <span className="text-slate-200 font-medium">{f.label}</span>
+                            {off && <span className="ml-1 text-[10px] text-amber-300">disabled</span>}
+                            <span className="text-slate-500"> — {f.hint}</span>
+                          </span>
+                        </div>
+                      );
+                    }
+                    // plain number stepper
+                    if (f.type === 'number') {
+                      return (
+                        <div key={f.key} className="flex items-start gap-2">
+                          <input
+                            type="number"
+                            min={f.min} max={f.max} step={f.step ?? 1}
+                            value={Number(strategyFlags[f.key] ?? f.default)}
+                            onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? -9999, Math.min(f.max ?? 9999, Number(e.target.value) || 0)) }))}
+                            className="w-14 px-2 py-1 rounded bg-[#0f1729] border border-violet-500/30 text-[11px] text-slate-100"
+                          />
+                          <span className="text-[11px] leading-snug">
+                            <span className="text-slate-200 font-medium">{f.label}</span>
+                            <span className="text-slate-500"> — {f.hint}</span>
+                          </span>
+                        </div>
+                      );
+                    }
+                    // boolean checkbox
+                    return (
+                      <label key={f.key} className="flex items-start gap-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(strategyFlags[f.key] ?? f.default)}
+                          onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked }))}
+                          className="accent-violet-500 mt-0.5"
+                        />
+                        <span className="text-[11px] leading-snug">
+                          <span className="text-slate-200 font-medium">{f.label}</span>
+                          <span className="text-slate-500"> — {f.hint}</span>
+                        </span>
+                      </label>
+                    );
+                  })}
                 </div>
               </div>
             )}

@@ -12,6 +12,11 @@ export type StratFlag = {
   min?: number;                    // number type only
   max?: number;
   step?: number;                   // number type only (default 1)
+  // number type only: when set, the control renders as an On/Off switch + a
+  // stepper. Toggling Off sends this value (typically 0 = "disabled"); toggling
+  // On restores the stepper value (default). Lets the user RAISE or DISABLE a
+  // bar-hold timer with one click instead of remembering "0 means off".
+  disableValue?: number;
 };
 
 export const STRATEGY_FLAGS: Record<string, StratFlag[]> = {
@@ -19,11 +24,12 @@ export const STRATEGY_FLAGS: Record<string, StratFlag[]> = {
     {
       key: 'max_hold_candles',
       type: 'number',
-      label: 'Bar hold',
+      label: 'Bar-hold timer',
       default: 60,
-      min: 0,
+      min: 1,
       max: 500,
-      hint: 'Force-close after this many bars (StrategyAsh’s 5h backstop = 60 on 5m). If "max_hold_expired" is dominating your exits, set 0 to DISABLE it so trades exit on SL / TP / CHoCH / signal flips instead. Tip: also switch SL/TP source to "From strategy (structural)" so the strategy’s tighter SMC stops drive exits.',
+      disableValue: 0,
+      hint: 'Force-close after this many bars (StrategyAsh’s 5h backstop = 60 on 5m). If "max_hold_expired" is dominating your exits, switch this OFF so trades exit only on SL / TP / CHoCH / signal flips. Tip: also switch SL/TP source to "From strategy (structural)" so the strategy’s tighter SMC stops drive exits.',
     },
     {
       key: 'use_exit_signals',
@@ -35,8 +41,8 @@ export const STRATEGY_FLAGS: Record<string, StratFlag[]> = {
   LorentzianClassifier: [
     // ── Exits ──
     {
-      key: 'max_hold_candles', type: 'number', label: 'Bar hold', default: 4, min: 0, max: 50,
-      hint: 'Exit after this many bars — jdehorty’s default is 4 (the LDC is a fixed-hold strategy, hence "max_hold_expired"). Set 0 to DISABLE the fixed exit and let trades run on signal flips / kernel / your SL-TP instead.',
+      key: 'max_hold_candles', type: 'number', label: 'Bar-hold timer', default: 4, min: 1, max: 50, disableValue: 0,
+      hint: 'Exit after this many bars — jdehorty’s default is 4 (the LDC is a fixed-hold strategy, hence "max_hold_expired"). Switch OFF to disable the fixed exit and let trades run on signal flips / kernel / your SL-TP instead.',
     },
     {
       key: 'USE_DYNAMIC_EXITS', label: 'Dynamic kernel exit', default: false,
