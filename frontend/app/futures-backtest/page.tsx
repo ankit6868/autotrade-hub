@@ -2467,6 +2467,38 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
             </div>
           )}
 
+          {/* Max-hold dominance diagnostic — explains why TP/SL "aren't
+              hitting": the bar-count exit fires before price travels far
+              enough to reach the SL/TP on this timeframe. */}
+          {trades.length >= 5 && (() => {
+            const mh = trades.filter((t: any) => t.exit_reason === 'max_hold_expired').length;
+            const pct = mh / trades.length;
+            if (pct < 0.6) return null;
+            return (
+              <div className="card mb-4 border-amber-500/40 bg-amber-500/5">
+                <div className="flex items-start gap-3">
+                  <span className="text-2xl">⏳</span>
+                  <div>
+                    <div className="text-sm font-semibold text-amber-300">
+                      {Math.round(pct * 100)}% of trades exited on the bar-hold timer (max_hold_expired), not SL/TP
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-1 leading-snug">
+                      Price rarely travels far enough to reach your SL/TP within the strategy&apos;s max-hold
+                      window on this timeframe, so the bar-count exit fires first. This is expected — not a bug.
+                      To make SL / TP / signal exits drive instead:
+                      <ul className="list-disc ml-4 mt-1 space-y-0.5">
+                        <li>Use <b>tighter SL/TP</b> sized to what price actually moves in the hold window (e.g. ~1% / 2% on 5m, not 3% / 6%).</li>
+                        <li>Switch <b>SL/TP source → &quot;From strategy (structural)&quot;</b> so the strategy&apos;s own (tighter) levels drive exits.</li>
+                        <li>In the strategy options above, set <b>Bar hold = 0</b> to disable the timer (trades run to SL/TP/signal), or raise it so SL/TP have time to hit.</li>
+                        <li>Try a <b>higher timeframe</b> (use Compare Timeframes) where a multi-% move is normal within the hold.</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Cost-drag insight — only shown when realistic costs are
               enabled. In pure-strategy mode this card would be misleading
               because no fees/funding were deducted, so there's nothing
