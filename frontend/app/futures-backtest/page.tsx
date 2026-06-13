@@ -1743,13 +1743,21 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
                 if (f.type === 'number' && f.disableValue !== undefined) {
                   const cur = Number(flagVal(f));
                   const off = cur === f.disableValue;
+                  // Value to apply when toggled ON. For OFF-by-default flags
+                  // (default === disableValue, e.g. SimpleTarget's bar-hold)
+                  // we can't use the default — it IS the off value — so fall
+                  // back to onValue (or 20). For ON-by-default flags (Ash 60,
+                  // LDC 4) the default is the right on-value.
+                  const onVal = Number(f.default) !== f.disableValue
+                    ? Number(f.default)
+                    : (f.onValue ?? Math.max(f.min ?? 1, 20));
                   return (
                     <div key={f.key} className="flex items-start gap-2">
                       <label className="flex items-center gap-1.5 cursor-pointer mt-0.5 shrink-0">
                         <input
                           type="checkbox"
                           checked={!off}
-                          onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked ? Number(f.default) : (f.disableValue as number) }))}
+                          onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked ? onVal : (f.disableValue as number) }))}
                           className="accent-violet-500"
                         />
                         <span className={`text-[11px] font-bold w-7 ${off ? 'text-amber-300' : 'text-emerald-300'}`}>{off ? 'OFF' : 'ON'}</span>
@@ -1757,7 +1765,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
                       <input
                         type="number"
                         min={f.min} max={f.max} step={f.step ?? 1}
-                        value={off ? Number(f.default) : cur}
+                        value={off ? onVal : cur}
                         disabled={off}
                         onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? 1, Math.min(f.max ?? 9999, Number(e.target.value) || (f.min ?? 1))) }))}
                         className={`w-16 px-2 py-1 rounded bg-[#0f1729] border border-violet-500/30 text-xs text-slate-100 ${off ? 'opacity-40' : ''}`}

@@ -1406,13 +1406,16 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                     if (f.type === 'number' && f.disableValue !== undefined) {
                       const cur = Number(strategyFlags[f.key] ?? f.default);
                       const off = cur === f.disableValue;
+                      const onVal = Number(f.default) !== f.disableValue
+                        ? Number(f.default)
+                        : (f.onValue ?? Math.max(f.min ?? 1, 20));
                       return (
                         <div key={f.key} className="flex items-start gap-2">
                           <label className="flex items-center gap-1 cursor-pointer mt-0.5 shrink-0">
                             <input
                               type="checkbox"
                               checked={!off}
-                              onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked ? Number(f.default) : (f.disableValue as number) }))}
+                              onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: e.target.checked ? onVal : (f.disableValue as number) }))}
                               className="accent-violet-500"
                             />
                             <span className={`text-[10px] font-bold w-6 ${off ? 'text-amber-300' : 'text-emerald-300'}`}>{off ? 'OFF' : 'ON'}</span>
@@ -1420,7 +1423,7 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                           <input
                             type="number"
                             min={f.min} max={f.max} step={f.step ?? 1}
-                            value={off ? Number(f.default) : cur}
+                            value={off ? onVal : cur}
                             disabled={off}
                             onChange={e => setStrategyFlags(prev => ({ ...prev, [f.key]: Math.max(f.min ?? 1, Math.min(f.max ?? 9999, Number(e.target.value) || (f.min ?? 1))) }))}
                             className={`w-14 px-2 py-1 rounded bg-[#0f1729] border border-violet-500/30 text-[11px] text-slate-100 ${off ? 'opacity-40' : ''}`}

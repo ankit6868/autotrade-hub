@@ -17,6 +17,11 @@ export type StratFlag = {
   // On restores the stepper value (default). Lets the user RAISE or DISABLE a
   // bar-hold timer with one click instead of remembering "0 means off".
   disableValue?: number;
+  // number type only: value applied when the switch is toggled ON for an
+  // OFF-by-default flag (i.e. when `default` itself equals `disableValue`).
+  // Without this, turning ON would re-apply the default (= the disable value)
+  // and the switch could never leave OFF. Defaults to 20 when omitted.
+  onValue?: number;
 };
 
 export const STRATEGY_FLAGS: Record<string, StratFlag[]> = {
