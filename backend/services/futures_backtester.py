@@ -346,6 +346,12 @@ def run_futures_backtest(
     take_profit_pct: float = 1.5,     # % e.g. 1.5 → +1.5%
     risk_per_trade: float = 0.05,     # fraction of balance used as margin per trade
     generated_code: str | None = None,  # user's IStrategy Python class (Freqtrade-style)
+    sl_structure_buffer_pct: float = 0.0,  # "stop beyond structure" (the book's #1 risk
+                                        # rule): push a STRUCTURAL stop this % of entry
+                                        # FURTHER from entry, so it sits past the swing
+                                        # level instead of on it (where stops get hunted).
+                                        # 0 = off (no change). Only affects strategy-
+                                        # provided structural SLs, never slider SLs.
     force_slider_sltp: bool = False,    # when True, override strategy-defined structural SL/TP
                                         # with slider values. Used by auto-tune so each grid
                                         # cell actually tests a different SL/TP combo even
@@ -1629,6 +1635,13 @@ def run_futures_backtest(
                     risk_dist = abs(sig_entry - sl_raw)
                     if risk_dist > 0 and risk_dist <= sig_entry * 0.25:
                         sig_sl, sig_tp = sl_raw, tp_raw
+                        # "Stop beyond structure" — push the structural stop a
+                        # little FURTHER from entry so it sits past the swing
+                        # (not on the obvious level that gets hunted). Off (0)
+                        # by default → identical to before.
+                        if sl_structure_buffer_pct > 0:
+                            _buf = sig_entry * sl_structure_buffer_pct / 100.0
+                            sig_sl = (sig_sl - _buf) if sig_dir == "long" else (sig_sl + _buf)
                         use_signal_sltp = True
                         # TP2 only honoured when (a) strategy returned it
                         # AND (b) it's further from entry than TP1 in the
