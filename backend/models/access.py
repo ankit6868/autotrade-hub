@@ -29,6 +29,10 @@ class AccessCode(Base):
     expires_at    = Column(DateTime, nullable=True)           # activated_at + duration; NULL = never
     # Admin kill-switch — revoked codes stop granting access immediately.
     revoked       = Column(Boolean, nullable=False, default=False)
+    # When an admin PAUSES a subscription we stamp this; on resume we shift
+    # expires_at forward by (now - paused_at) so the timer is FROZEN during the
+    # pause and the user continues with the same days remaining. NULL = not paused.
+    paused_at     = Column(DateTime, nullable=True)
     note          = Column(Text, nullable=True)               # optional admin label ("June batch", etc.)
     created_at    = Column(DateTime, server_default=func.now())
 

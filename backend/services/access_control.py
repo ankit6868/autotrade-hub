@@ -278,16 +278,31 @@ def extend_user(db: Session, *, user_id: str, add_days: int) -> dict:
 
 
 def set_user_paused(db: Session, *, user_id: str, paused: bool) -> dict:
-    """Admin: pause (revoke) or resume (un-revoke) ALL of a user's codes.
-    Pausing gates them immediately; resuming restores access (unless the
-    subscription has also expired by time — extend it for that)."""
+    """Admin: pause or resume a user. Pausing gates them immediately AND
+    FREEZES the subscription clock; resuming shifts expires_at forward by the
+    paused duration, so the user continues with the SAME days remaining (no
+    time lost during the pause). Unlimited codes have no clock to freeze."""
     codes = _codes_for_user(db, user_id)
     if not codes:
         return {"ok": False, "error": "User has no redeemed code."}
+    now = _utcnow()
     for c in codes:
-        c.revoked = bool(paused)
+        if paused:
+            c.revoked = True
+            # stamp the freeze start once (only for time-based subscriptions)
+            if c.kind == "subscription" and c.expires_at and c.paused_at is None:
+                c.paused_at = now
+        else:
+            # resume → push expiry out by however long it was paused
+            if c.paused_at is not None and c.expires_at is not None:
+                c.expires_at = c.expires_at + (now - c.paused_at)
+            c.paused_at = None
+            c.revoked = False
     db.commit()
-    return {"ok": True, "user_id": user_id, "paused": bool(paused)}
+    out = {"ok": True, "user_id": user_id, "paused": bool(paused)}
+    if not paused:
+        out["status"] = compute_access(db, user_id=user_id, email="")
+    return out
 
 
 def admin_change_code(db: Session, *, user_id: str, new_code: str | None = None) -> dict:
