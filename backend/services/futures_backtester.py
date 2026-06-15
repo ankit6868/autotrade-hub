@@ -522,14 +522,45 @@ def run_futures_backtest(
     # 30 days so we don't blow up downloads on small backtests.
     RESOLVE_BUFFER_SECS = 30 * 24 * 3600
 
+    # ── Deep-history WARMUP for ML strategies (e.g. LDC max_bars_back=2000) ──
+    # The LIVE bot deep-fetches `max_bars_back` candles so its ML model has its
+    # full training window. The backtester previously fetched ONLY the user's
+    # window, so on a short period (e.g. 1M/4h ≈ 180 bars) the Lorentzian
+    # Classifier was data-starved and produced erratic / zero signals — and
+    # results differed run-to-run. We now pre-read the strategy's declared
+    # max_bars_back (cheap dummy compile) and fetch that many EXTRA bars BEFORE
+    # the window as warm-up. Warm-up bars feed indicators only; NEW entries
+    # still fire exclusively inside the user's [start_ts, end_ts] window.
+    # Strategies that don't declare a deep window (the vast majority) get
+    # warmup_bars=0 → byte-identical behaviour to before.
+    warmup_bars = 0
+    if use_user_strategy:
+        try:
+            from backend.services.strategy_runner import evaluate_strategy as _eval_probe
+            import pandas as _pd_probe
+            _dummy = _pd_probe.DataFrame({
+                "date":  _pd_probe.date_range("2024-01-01", periods=300, freq="15min", tz="UTC"),
+                "open":  [100.0] * 300, "high": [101.0] * 300,
+                "low":   [99.0] * 300,  "close": [100.5] * 300, "vol": [1000.0] * 300,
+            })
+            _mbb = _eval_probe(generated_code, _dummy).attrs.get("class_max_bars_back")
+            if isinstance(_mbb, int) and _mbb > 200:
+                warmup_bars = min(5000, _mbb)
+        except Exception:
+            warmup_bars = 0
+
     for pair in pairs:
         tf_secs_per_bar = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800,
                            "1h": 3600, "4h": 14400, "1d": 86400}.get(timeframe, 900)
         # ── Load FUTURES OHLCV (not spot — see comment in native_backtester) ─
         # Extended range = user's window + resolve buffer.
         fetch_end_ts = end_ts + RESOLVE_BUFFER_SECS
+        # Warm-up prefix for ML strategies: fetch `warmup_bars` candles BEFORE
+        # the user's window so the model has its full history. 0 for everything
+        # else → fetch_start_ts == start_ts (unchanged).
+        fetch_start_ts = start_ts - warmup_bars * tf_secs_per_bar
         try:
-            df = load_futures_ohlcv(pair, timeframe, start_ts, fetch_end_ts)
+            df = load_futures_ohlcv(pair, timeframe, fetch_start_ts, fetch_end_ts)
         except Exception as e:
             _restore_slip()
             return {"error": f"Futures data download failed for {pair}: {e}"}
@@ -539,12 +570,21 @@ def run_futures_backtest(
         # requested window, not the extended fetch. Buffer bars are an
         # implementation detail; the user only cares whether their
         # requested period is well-covered.
-        in_window_mask = df["date"].astype("int64") // 10**9 <= end_ts
-        in_window_count = int(in_window_mask.sum())
+        # Positional indices of the user's window [start_ts, end_ts] within the
+        # fetched df. With a warm-up prefix the window no longer starts at index
+        # 0, so we locate it by timestamp. first/last_in_window_idx bound where
+        # NEW entries may fire; warm-up bars (before first) only feed indicators.
+        _ts = (df["date"].astype("int64") // 10**9)
+        _win = ((_ts >= start_ts) & (_ts <= end_ts)).to_numpy().nonzero()[0]
+        if len(_win):
+            first_in_window_idx = int(_win[0])
+            last_in_window_idx  = int(_win[-1])
+            in_window_count     = int(len(_win))
+        else:
+            first_in_window_idx = 0
+            last_in_window_idx  = len(df) - 1
+            in_window_count     = len(df)
         expected_bars = max(1, (end_ts - start_ts) // tf_secs_per_bar)
-        # Index of the last bar inside the user's window — beyond this
-        # the main loop only manages open positions, no new entries.
-        last_in_window_idx = in_window_count - 1
         data_diagnostics[pair] = {
             "candles_loaded":    in_window_count,
             "candles_expected":  int(expected_bars),
@@ -552,7 +592,8 @@ def run_futures_backtest(
             "funding_records":   len(funding_sorted),
             "funding_source":    "kucoin_history" if funding_sorted else "fallback_0.03%",
             "signal_source":     "user_strategy" if use_user_strategy else f"builtin:{strategy_name}",
-            "resolve_buffer_bars": int(len(df) - in_window_count),
+            "resolve_buffer_bars": int(len(df) - (last_in_window_idx + 1)),
+            "warmup_bars":       int(first_in_window_idx),
         }
         df = add_indicators(df)
 
@@ -1540,7 +1581,7 @@ def run_futures_backtest(
             # Buffer bars (past the user's end_ts) only manage existing
             # positions — no new entries — so the trade list reflects only
             # signals fired within the requested window.
-            in_window = i <= last_in_window_idx
+            in_window = first_in_window_idx <= i <= last_in_window_idx
             sig = signal_fn(df, i) if (i >= 3 and in_window) else None
             if sig is not None:
                 # Accept either 4-tuple (entry, sl, tp, dir) or 5-tuple
