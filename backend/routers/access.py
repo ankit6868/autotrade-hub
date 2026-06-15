@@ -162,6 +162,19 @@ def admin_pause_user(
     return AC.set_user_paused(db, user_id=user_id, paused=bool(req.get("paused", True)))
 
 
+@router.post("/users/revoke")
+def admin_revoke_user(
+    req: dict,
+    db: Session = Depends(get_db),
+    _admin: str = Depends(require_admin),
+):
+    """Permanently revoke a user (nulls their subscription). `{user_id}`."""
+    user_id = str(req.get("user_id", "")).strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+    return AC.revoke_user(db, user_id=user_id)
+
+
 @router.post("/users/change-code")
 def admin_change_user_code(
     req: dict,

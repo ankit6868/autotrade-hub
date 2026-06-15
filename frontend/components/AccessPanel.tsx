@@ -223,11 +223,20 @@ function AdminUsers() {
     } finally { setBusy(''); }
   };
   const pauseResume = async (uid: string, paused: boolean) => {
-    if (paused && !confirm('Pause this user? They lose access immediately until resumed.')) return;
+    if (paused && !confirm('Pause this user? Access is blocked and their timer FREEZES — resume continues with the same days left.')) return;
     setBusy(uid); setNote('');
     try {
       const r: any = await api.access.pauseUser(uid, paused);
-      setNote(r?.ok ? (paused ? '✓ User paused.' : '✓ User resumed.') : (r?.error || 'Failed.'));
+      setNote(r?.ok ? (paused ? '✓ User paused (timer frozen).' : '✓ User resumed.') : (r?.error || 'Failed.'));
+      await load();
+    } finally { setBusy(''); }
+  };
+  const revoke = async (uid: string) => {
+    if (!confirm('REVOKE permanently? This NULLS their subscription (wipes remaining time). They will need a new code to return.')) return;
+    setBusy(uid); setNote('');
+    try {
+      const r: any = await api.access.revokeUser(uid);
+      setNote(r?.ok ? '✓ User revoked (subscription nulled).' : (r?.error || 'Failed.'));
       await load();
     } finally { setBusy(''); }
   };
@@ -257,8 +266,10 @@ function AdminUsers() {
                     <div className="text-[9px] text-slate-500 font-mono">{u.current_code}</div>
                   </td>
                   <td className="p-2 text-center">
-                    <span className={u.kind === 'unlimited' ? 'text-emerald-300' : (u.active ? 'text-sky-300' : (u.paused ? 'text-amber-300' : 'text-rose-400'))}>
-                      {u.kind === 'unlimited' ? 'Lifetime' : (u.active ? 'Sub' : (u.paused ? 'Paused' : 'Expired'))}
+                    <span className={u.active ? (u.kind === 'unlimited' ? 'text-emerald-300' : 'text-sky-300')
+                        : u.paused ? 'text-amber-300' : u.revoked ? 'text-rose-500' : 'text-rose-400'}>
+                      {u.active ? (u.kind === 'unlimited' ? 'Lifetime' : 'Sub')
+                        : u.paused ? 'Paused' : u.revoked ? 'Revoked' : 'Expired'}
                     </span>
                   </td>
                   <td className="p-2 text-center text-slate-400">
@@ -275,7 +286,8 @@ function AdminUsers() {
                     <div className="flex flex-wrap gap-1 justify-center mt-1">
                       {u.paused
                         ? <button disabled={busy === u.user_id} onClick={() => pauseResume(u.user_id, false)} className="px-1.5 py-0.5 rounded border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10">resume</button>
-                        : u.active && <button disabled={busy === u.user_id} onClick={() => pauseResume(u.user_id, true)} className="px-1.5 py-0.5 rounded border border-rose-500/30 text-rose-300 hover:bg-rose-500/10">pause</button>}
+                        : u.active && <button disabled={busy === u.user_id} onClick={() => pauseResume(u.user_id, true)} className="px-1.5 py-0.5 rounded border border-sky-500/30 text-sky-300 hover:bg-sky-500/10">pause</button>}
+                      {!u.revoked && <button disabled={busy === u.user_id} onClick={() => revoke(u.user_id)} className="px-1.5 py-0.5 rounded border border-rose-500/30 text-rose-300 hover:bg-rose-500/10">revoke</button>}
                       <button disabled={busy === u.user_id} onClick={() => changeCode(u.user_id)} className="px-1.5 py-0.5 rounded border border-amber-500/30 text-amber-300 hover:bg-amber-500/10">change code</button>
                     </div>
                   </td>

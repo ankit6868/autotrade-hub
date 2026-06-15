@@ -272,6 +272,8 @@ export const api = {
       request<any>('/api/access/users/change-code', { method: 'POST', body: JSON.stringify({ user_id, new_code }) }),
     pauseUser: (user_id: string, paused: boolean) =>
       request<any>('/api/access/users/pause', { method: 'POST', body: JSON.stringify({ user_id, paused }) }),
+    revokeUser: (user_id: string) =>
+      request<any>('/api/access/users/revoke', { method: 'POST', body: JSON.stringify({ user_id }) }),
   },
 
   config: {
