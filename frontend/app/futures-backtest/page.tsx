@@ -118,6 +118,10 @@ function FuturesBacktestInner() {
   type Src = 'strategy' | 'default' | 'manual';
   const [slSrc,  setSlSrc]  = useState<Src>('default');
   const [tpSrc,  setTpSrc]  = useState<Src>('default');
+  // "Stop beyond structure" buffer (the book's #1 risk rule) — % of entry to
+  // push a STRUCTURAL stop further past the swing level so it's not sitting on
+  // the obvious spot that gets hunted. 0 = off. Only affects structural SLs.
+  const [slStructBuffer, setSlStructBuffer] = useState(0);
   const [levSrc, setLevSrc] = useState<Src>('default');
   const [tfSrc,  setTfSrc]  = useState<Src>('default');
 
@@ -932,6 +936,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         // sltpMode === 'slider' → tell backend to ignore strategy's
         // structural levels and use slider values instead.
         force_slider_sltp: sltpMode === 'slider',
+        sl_structure_buffer_pct: slStructBuffer,
         // When false, backend zeros out fee/funding deductions so the
         // returned P&L reflects pure price action × leverage.
         deduct_real_costs: deductCosts,
@@ -979,6 +984,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         position_mode:    positionMode,
         risk_per_trade_pct: riskPerTrade,
         force_slider_sltp: sltpMode === 'slider',
+        sl_structure_buffer_pct: slStructBuffer,
         deduct_real_costs: deductCosts,
         arm_enabled:        armEnabled,
         arm_tp1_close_pct:  armTp1ClosePct,
@@ -1916,6 +1922,14 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
               <span>Leverage: {leverage}x</span>
               <SourceBadge src={levSrc} />
               <span className="text-orange-400 ml-2 text-[10px]">Liq ~{(100/leverage).toFixed(1)}%</span>
+              {leverage >= 10 && (
+                <span
+                  className="text-rose-400 ml-2 text-[10px]"
+                  title="The book's #1 risk lesson: at high leverage your liquidation price sits very close to entry, so a normal sweep/wick can liquidate you — turning you into the liquidity smart money hunts. Keep leverage modest unless your stop is tighter than the liq distance."
+                >
+                  ⚠ a normal wick can liquidate you at {leverage}x
+                </span>
+              )}
             </label>
             <input type="range" min={1} max={50} value={leverage}
               onChange={e => { setLeverage(Number(e.target.value)); setLevSrc('manual'); }}
@@ -1943,6 +1957,21 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
             <input type="range" min={0.1} max={10} step={0.1} value={stoploss}
               onChange={e => { setStoploss(Number(e.target.value)); setSlSrc('manual'); }}
               className="w-full accent-red-500 mt-2" />
+            {/* Stop-beyond-structure buffer (the book's #1 risk rule). Only
+                bites when the SL/TP source is structural ("From strategy").
+                0 = off → identical results. */}
+            <label
+              className="label !mb-1 mt-2 flex items-center flex-wrap text-[11px]"
+              title="The book's #1 fix: don't put your stop ON the obvious swing level — that's inside the pool that gets hunted. This pushes a STRUCTURAL stop this % of price BEYOND the level so a sweep is less likely to clip it. Only affects 'From strategy (structural)' SL/TP; 0 = off."
+            >
+              <span>Stop beyond structure: <b className="text-rose-300">{slStructBuffer}%</b></span>
+              <span className="text-slate-500 ml-2 text-[10px]">
+                {slStructBuffer === 0 ? 'off — stop sits on the structural level' : 'push structural stop past the swept level'}
+              </span>
+            </label>
+            <input type="range" min={0} max={2} step={0.05} value={slStructBuffer}
+              onChange={e => setSlStructBuffer(Number(e.target.value))}
+              className="w-full accent-rose-500" />
           </div>
           <div>
             <label className="label flex items-center flex-wrap">
