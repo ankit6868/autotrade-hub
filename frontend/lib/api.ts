@@ -270,6 +270,8 @@ export const api = {
       request<any>('/api/access/users/extend', { method: 'POST', body: JSON.stringify({ user_id, days, months }) }),
     changeUserCode: (user_id: string, new_code?: string) =>
       request<any>('/api/access/users/change-code', { method: 'POST', body: JSON.stringify({ user_id, new_code }) }),
+    pauseUser: (user_id: string, paused: boolean) =>
+      request<any>('/api/access/users/pause', { method: 'POST', body: JSON.stringify({ user_id, paused }) }),
   },
 
   config: {

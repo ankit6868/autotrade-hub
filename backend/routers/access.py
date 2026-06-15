@@ -148,6 +148,20 @@ def admin_extend_user(
     return AC.extend_user(db, user_id=user_id, add_days=add_days)
 
 
+@router.post("/users/pause")
+def admin_pause_user(
+    req: dict,
+    db: Session = Depends(get_db),
+    _admin: str = Depends(require_admin),
+):
+    """Pause (revoke) or resume (un-revoke) all of a user's codes.
+    `{user_id, paused: true|false}`."""
+    user_id = str(req.get("user_id", "")).strip()
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id required")
+    return AC.set_user_paused(db, user_id=user_id, paused=bool(req.get("paused", True)))
+
+
 @router.post("/users/change-code")
 def admin_change_user_code(
     req: dict,

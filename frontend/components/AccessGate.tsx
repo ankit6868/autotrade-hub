@@ -10,6 +10,8 @@ type Status = {
   is_admin: boolean;
   kind: string | null;
   expires_at: string | null;
+  expired?: boolean;
+  paused?: boolean;
   email_seen?: boolean;
 } | null;
 
@@ -44,6 +46,15 @@ export default function AccessGate({ children }: { children: React.ReactNode }) 
   }, []);
 
   useEffect(() => { check(); }, [check]);
+  // Live re-gate: re-check every 60s and when the tab regains focus, so an
+  // expiring subscription drops the user back to the code screen without a
+  // manual reload. (The backend also 402s their API calls immediately.)
+  useEffect(() => {
+    const id = setInterval(check, 60_000);
+    const onFocus = () => check();
+    window.addEventListener('focus', onFocus);
+    return () => { clearInterval(id); window.removeEventListener('focus', onFocus); };
+  }, [check]);
 
   const redeem = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,13 +77,21 @@ export default function AccessGate({ children }: { children: React.ReactNode }) 
   if (status?.active) return <>{children}</>;
 
   // ── Code-entry gate ──
+  const ended = status?.expired;            // had access before, now lapsed/paused
+  const paused = status?.paused;
   return (
     <div className="min-h-screen w-full flex items-center justify-center p-6">
       <div className="max-w-sm w-full space-y-5 p-7 bg-[#111827] rounded-2xl border border-[#2a3a52]">
         <div className="text-center space-y-1.5">
-          <h1 className="text-xl font-bold text-white">Enter your access code</h1>
+          <h1 className="text-xl font-bold text-white">
+            {ended ? (paused ? 'Access paused' : 'Subscription finished') : 'Enter your access code'}
+          </h1>
           <p className="text-xs text-slate-400">
-            AutoTrade Hub is invite-only. Enter the code you were given to unlock the app.
+            {ended
+              ? (paused
+                  ? 'Your access has been paused by the admin. Enter a new code, or contact the admin to resume.'
+                  : 'Your subscription period has ended. Enter a new code to continue using AutoTrade Hub.')
+              : 'AutoTrade Hub is invite-only. Enter the code you were given to unlock the app.'}
           </p>
         </div>
         <form onSubmit={redeem} className="space-y-3">

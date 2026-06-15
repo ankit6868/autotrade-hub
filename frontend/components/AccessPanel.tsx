@@ -222,6 +222,15 @@ function AdminUsers() {
       await load();
     } finally { setBusy(''); }
   };
+  const pauseResume = async (uid: string, paused: boolean) => {
+    if (paused && !confirm('Pause this user? They lose access immediately until resumed.')) return;
+    setBusy(uid); setNote('');
+    try {
+      const r: any = await api.access.pauseUser(uid, paused);
+      setNote(r?.ok ? (paused ? '✓ User paused.' : '✓ User resumed.') : (r?.error || 'Failed.'));
+      await load();
+    } finally { setBusy(''); }
+  };
 
   return (
     <div className="border-t border-white/[0.06] pt-4 space-y-3">
@@ -248,8 +257,8 @@ function AdminUsers() {
                     <div className="text-[9px] text-slate-500 font-mono">{u.current_code}</div>
                   </td>
                   <td className="p-2 text-center">
-                    <span className={u.kind === 'unlimited' ? 'text-emerald-300' : (u.active ? 'text-sky-300' : 'text-rose-400')}>
-                      {u.kind === 'unlimited' ? 'Lifetime' : (u.active ? 'Sub' : 'Expired')}
+                    <span className={u.kind === 'unlimited' ? 'text-emerald-300' : (u.active ? 'text-sky-300' : (u.paused ? 'text-amber-300' : 'text-rose-400'))}>
+                      {u.kind === 'unlimited' ? 'Lifetime' : (u.active ? 'Sub' : (u.paused ? 'Paused' : 'Expired'))}
                     </span>
                   </td>
                   <td className="p-2 text-center text-slate-400">
@@ -263,7 +272,10 @@ function AdminUsers() {
                         <button disabled={busy === u.user_id} onClick={() => extend(u.user_id, 365, 0)} className="px-1.5 py-0.5 rounded border border-[#2a3a52] hover:bg-white/5">+1yr</button>
                       </div>
                     )}
-                    <div className="flex justify-center mt-1">
+                    <div className="flex flex-wrap gap-1 justify-center mt-1">
+                      {u.paused
+                        ? <button disabled={busy === u.user_id} onClick={() => pauseResume(u.user_id, false)} className="px-1.5 py-0.5 rounded border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10">resume</button>
+                        : u.active && <button disabled={busy === u.user_id} onClick={() => pauseResume(u.user_id, true)} className="px-1.5 py-0.5 rounded border border-rose-500/30 text-rose-300 hover:bg-rose-500/10">pause</button>}
                       <button disabled={busy === u.user_id} onClick={() => changeCode(u.user_id)} className="px-1.5 py-0.5 rounded border border-amber-500/30 text-amber-300 hover:bg-amber-500/10">change code</button>
                     </div>
                   </td>

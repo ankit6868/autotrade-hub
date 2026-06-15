@@ -137,9 +137,17 @@ def compute_access(db: Session, *, user_id: str, email: str) -> dict:
                 "is_admin": False, "kind": code.kind,
                 "expires_at": _iso(code.expires_at),
                 "code": code.code, "email": email, "email_seen": bool(email)}
+    # Not active — distinguish "had access that ended" (expired or paused) from
+    # "never redeemed a code" so the gate can show the right message.
+    bound = _codes_for_user(db, user_id)
+    if bound:
+        paused = all(c.revoked for c in bound)
+        return {"active": False, "tier": "expired", "is_admin": False,
+                "kind": None, "expires_at": None, "expired": True,
+                "paused": paused, "email": email, "email_seen": bool(email)}
     return {"active": False, "tier": "none", "is_admin": False,
-            "kind": None, "expires_at": None, "email": email,
-            "email_seen": bool(email)}
+            "kind": None, "expires_at": None, "expired": False,
+            "email": email, "email_seen": bool(email)}
 
 
 def redeem_code(db: Session, *, user_id: str, email: str, code: str) -> dict:
@@ -234,6 +242,7 @@ def list_users(db: Session) -> dict:
         users.append({
             "user_id": uid, "email": email, "kind": kind, "active": active,
             "expires_at": exp, "current_code": eff.code,
+            "paused": all(c.revoked for c in codes),
             "codes": [{"code": c.code, "kind": c.kind, "revoked": c.revoked,
                        "expires_at": _iso(c.expires_at)} for c in codes],
         })
@@ -266,6 +275,19 @@ def extend_user(db: Session, *, user_id: str, add_days: int) -> dict:
     db.commit()
     return {"ok": True, "user_id": user_id, "code": target.code,
             "expires_at": _iso(target.expires_at)}
+
+
+def set_user_paused(db: Session, *, user_id: str, paused: bool) -> dict:
+    """Admin: pause (revoke) or resume (un-revoke) ALL of a user's codes.
+    Pausing gates them immediately; resuming restores access (unless the
+    subscription has also expired by time — extend it for that)."""
+    codes = _codes_for_user(db, user_id)
+    if not codes:
+        return {"ok": False, "error": "User has no redeemed code."}
+    for c in codes:
+        c.revoked = bool(paused)
+    db.commit()
+    return {"ok": True, "user_id": user_id, "paused": bool(paused)}
 
 
 def admin_change_code(db: Session, *, user_id: str, new_code: str | None = None) -> dict:
