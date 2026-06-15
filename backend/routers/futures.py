@@ -682,10 +682,6 @@ def run_futures_backtest(
     # to the strategy's design intent — e.g. SMCStrategyTV documents
     # "SL: below/above the structural swing point (dynamic)").
     force_slider    = bool(req.get("force_slider_sltp", False))
-    # "Stop beyond structure" buffer (the book's #1 risk rule) — % of entry to
-    # push a STRUCTURAL stop further from entry so it sits past the swing level.
-    # 0 = off (default; identical results). Clamped to a sane range.
-    sl_structure_buffer_pct = max(0.0, min(5.0, float(req.get("sl_structure_buffer_pct", 0.0))))
     # Whether to deduct funding fees + KuCoin taker/maker fees from the
     # simulated balance. Default False = pure strategy P&L (price action
     # × leverage only). When True, the result is what the strategy would
@@ -766,7 +762,6 @@ def run_futures_backtest(
         position_mode    = position_mode,
         risk_per_trade   = risk_per_trade,
         force_slider_sltp = force_slider,
-        sl_structure_buffer_pct = sl_structure_buffer_pct,
         deduct_real_costs = deduct_costs,
         arm_enabled       = arm_enabled,
         arm_tp1_close_pct = arm_tp1_close_pct,
