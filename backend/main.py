@@ -3238,11 +3238,154 @@ class LorentzianClassifier(IStrategy):
 '''
 
 
+_GAULS_LIQUIDITY_SWEEP_CODE = '''
+from freqtrade.strategy import IStrategy
+from pandas import DataFrame
+import pandas as pd
+import numpy as np
+import talib.abstract as ta
+
+
+class GaulsLiquiditySweep(IStrategy):
+    """Liquidity Sweep (Gauls model) — trade the reversal after a stop-hunt.
+
+    From "What Is Liquidity? — How Gauls Trade It":
+      - Sell-side liquidity (SSL) rests below recent lows; buy-side (BSL) above
+        recent highs. Price spikes into a pool, triggers stops/liquidations,
+        and reverses ~70% of the time (an edge, NOT a guarantee).
+      - A *liquidity sweep candle* has a SMALL body, a LARGE rejection wick into
+        the pool, and VOLUME above the ~70th percentile of recent candles.
+      - LONG  after an SSL sweep (wick below a prior low, close reclaims above).
+      - SHORT after a BSL sweep (wick above a prior high, close back below).
+      - Stop goes just BEYOND the swept extreme (NOT on the obvious level, where
+        stops get hunted); target is the opposite, untouched pool.
+
+    Causal / no-repaint: the pools use only PAST bars (rolling + shift(1)).
+    Best on 1H-4H liquid markets. Manage size — the ~70% is an edge to survive,
+    not a certainty to over-leverage.
+    """
+
+    timeframe   = "1h"
+    stoploss    = -0.03
+    minimal_roi = {"0": 0.06}
+    can_short   = True
+    startup_candle_count = 80
+    process_only_new_candles = True
+
+    # ── Tunable knobs (overridable via strategy_flags / UI) ──
+    SWING_LOOKBACK   = 20      # bars back that define the liquidity pools
+    WICK_RATIO       = 0.5     # rejection wick must be >= this * candle range
+    BODY_RATIO       = 0.5     # body must be <= this * candle range (small body)
+    VOL_PERCENTILE   = 0.70    # volume must exceed this percentile of recent vol
+    VOL_LOOKBACK     = 50
+    SL_ATR_BUFFER    = 0.25    # stop this * ATR BEYOND the swept extreme
+    MIN_RR           = 1.5     # if the pool target is closer than this R, use MIN_RR * risk
+    max_hold_candles = 0       # 0 = run to SL/TP; >0 = force-close after N bars
+    use_exit_signals = False
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        df = dataframe
+        df["atr"] = ta.ATR(df, timeperiod=14)
+        n = max(2, int(self.SWING_LOOKBACK))
+        # Liquidity pools from PAST bars only (shift(1) → no look-ahead).
+        df["pool_high"] = df["high"].rolling(n).max().shift(1)   # BSL above
+        df["pool_low"]  = df["low"].rolling(n).min().shift(1)    # SSL below
+        # Candle anatomy.
+        rng   = (df["high"] - df["low"]).replace(0, np.nan)
+        body  = (df["close"] - df["open"]).abs()
+        upper = df["high"] - df[["open", "close"]].max(axis=1)
+        lower = df[["open", "close"]].min(axis=1) - df["low"]
+        df["small_body"]     = (body  <= float(self.BODY_RATIO) * rng).fillna(False)
+        df["big_lower_wick"] = (lower >= float(self.WICK_RATIO) * rng).fillna(False)
+        df["big_upper_wick"] = (upper >= float(self.WICK_RATIO) * rng).fillna(False)
+        # Volume confirmation: above the configured percentile of recent volume.
+        vq = df["volume"].rolling(max(5, int(self.VOL_LOOKBACK))).quantile(float(self.VOL_PERCENTILE))
+        df["vol_ok"] = (df["volume"] >= vq).fillna(False)
+        return df
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        df = dataframe
+        df["enter_long"]  = 0
+        df["enter_short"] = 0
+        # ── The SWEEP candle (the raid into the pool) ──
+        # SSL sweep: wick below a prior low, close reclaims above it.
+        sweep_bull = (
+            (df["low"] < df["pool_low"]) & (df["close"] > df["pool_low"])
+            & df["big_lower_wick"] & df["small_body"] & df["vol_ok"]
+        ).fillna(False)
+        # BSL sweep: wick above a prior high, close back below it.
+        sweep_bear = (
+            (df["high"] > df["pool_high"]) & (df["close"] < df["pool_high"])
+            & df["big_upper_wick"] & df["small_body"] & df["vol_ok"]
+        ).fillna(False)
+
+        # ── CONFIRMATION (the book's key step: don't chase the wick) ──
+        # Enter on the bar AFTER the sweep only once the reversal confirms:
+        #   long  → this bar closes ABOVE the sweep candle's high
+        #   short → this bar closes BELOW the sweep candle's low
+        bull = (sweep_bull.shift(1).fillna(False)) & (df["close"] > df["high"].shift(1))
+        bear = (sweep_bear.shift(1).fillna(False)) & (df["close"] < df["low"].shift(1))
+        df.loc[bull, "enter_long"]  = 1
+        df.loc[bear, "enter_short"] = 1
+
+        # ── Structural SL/TP, referenced to the SWEEP candle (prev bar) ──
+        # Stop just BEYOND the swept extreme (invalidation = price reclaims the
+        # pool); target the opposite untouched pool, min MIN_RR risk-reward.
+        atr   = df["atr"].fillna(0.0)
+        buf   = float(self.SL_ATR_BUFFER) * atr
+        entry = df["close"]
+        rr    = float(self.MIN_RR)
+        swept_low  = df["low"].shift(1)     # the sweep candle's low (SSL grab)
+        swept_high = df["high"].shift(1)    # the sweep candle's high (BSL grab)
+        pool_hi    = df["pool_high"].shift(1)
+        pool_lo    = df["pool_low"].shift(1)
+
+        long_sl   = swept_low - buf
+        long_risk = (entry - long_sl).clip(lower=1e-9)
+        long_tp   = pool_hi.where(pool_hi >= entry + rr * long_risk, entry + rr * long_risk)
+
+        short_sl   = swept_high + buf
+        short_risk = (short_sl - entry).clip(lower=1e-9)
+        short_tp   = pool_lo.where(pool_lo <= entry - rr * short_risk, entry - rr * short_risk)
+
+        df["sl_price"] = np.nan
+        df["tp_price"] = np.nan
+        df.loc[bull, "sl_price"] = long_sl[bull]
+        df.loc[bull, "tp_price"] = long_tp[bull]
+        df.loc[bear, "sl_price"] = short_sl[bear]
+        df.loc[bear, "tp_price"] = short_tp[bear]
+        return df
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["exit_long"]  = 0
+        dataframe["exit_short"] = 0
+        return dataframe
+'''
+
+
 def _seed_builtin_strategies(db):
     """Ensure template strategies exist with correct trading configs."""
     from backend.models.strategy import Strategy
 
     templates = [
+        {
+            "name": "GaulsLiquiditySweep",
+            "description": "Liquidity Sweep (Gauls model) — trades the reversal after a "
+                           "stop-hunt. Marks buy-side liquidity (BSL, above recent highs) "
+                           "and sell-side liquidity (SSL, below recent lows); waits for a "
+                           "liquidity-sweep candle (small body + large rejection wick into "
+                           "the pool + volume above the ~70th percentile), then enters the "
+                           "reversal toward the opposite untouched pool. LONG after an SSL "
+                           "sweep, SHORT after a BSL sweep. Stop is placed BEYOND the swept "
+                           "extreme (not on the obvious level); target is the opposite pool "
+                           "(min 1.5R). Causal / no-repaint. Best on 1H-4H. ~70% reversal "
+                           "edge per the book — size sensibly, not a guarantee.",
+            "code": _GAULS_LIQUIDITY_SWEEP_CODE,
+            "stoploss": -0.03,
+            "take_profit": 0.06,
+            "leverage": 5,
+            "timeframe": "1h",
+        },
         {
             "name": "LorentzianClassifier",
             "description": "Lorentzian Distance Classifier (LDC) — faithful port of "
