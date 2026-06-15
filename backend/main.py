@@ -3846,7 +3846,12 @@ app.add_middleware(
     allow_origins=_cors,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    # X-User-Email is sent by the frontend (Clerk-verified email) for the
+    # access-code admin/unlimited allowlists. It MUST be allowed here or the
+    # browser's CORS preflight on cross-origin (direct-Railway) requests — e.g.
+    # the backtest POST — is rejected with 400 "Disallowed CORS headers" and
+    # the real request never fires (looks like a backend timeout).
+    allow_headers=["Authorization", "Content-Type", "X-User-Email"],
 )
 
 # --- Routers ---------------------------------------------------------------
