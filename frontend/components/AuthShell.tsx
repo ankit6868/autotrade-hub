@@ -9,6 +9,7 @@ import {
   ClerkLoaded,
   ClerkLoading,
 } from '@clerk/nextjs';
+import AccessGate from './AccessGate';
 
 const PUB_KEY = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 
@@ -59,7 +60,8 @@ function GateInner({ children }: { children: React.ReactNode }) {
     );
   }
   if (!isSignedIn) return <SignedOutLanding />;
-  return <>{children}</>;
+  // Signed in → now require an active access code (admin / unlimited / code).
+  return <AccessGate>{children}</AccessGate>;
 }
 
 export function AuthGate({ children }: { children: React.ReactNode }) {

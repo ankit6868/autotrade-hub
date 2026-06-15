@@ -3,3 +3,4 @@ from .config import Config
 from .strategy import Strategy
 from .trade import Backtest, Trade, StrategyInstance, CopySignal, CopySubscription, FuturesOrder, FuturesBacktest
 from .audit import TradeAudit
+from .access import AccessCode

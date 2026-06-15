@@ -30,8 +30,17 @@ except Exception as _e:
     print("seed warn:", _e)
 
 # Bypass Clerk auth for the test by overriding the dependency with a fixed user.
+# The futures router is now gated by an access code, so authenticate the test
+# user as an ADMIN (admin emails bypass the gate) — set ADMIN_EMAILS to this
+# user's email and stash it on request.state the way the real dependency does.
+os.environ["ADMIN_EMAILS"] = "terminal-test-admin@gmail.com"
+from fastapi import Request
 from backend.utils.clerk_auth import get_user_id as _get_user_id
-M.app.dependency_overrides[_get_user_id] = lambda: "terminal-test-user"
+def _fake_uid(request: Request):
+    request.state.user_id = "terminal-test-user"
+    request.state.user_email = "terminal-test-admin@gmail.com"
+    return "terminal-test-user"
+M.app.dependency_overrides[_get_user_id] = _fake_uid
 
 c = TestClient(M.app)
 results = []

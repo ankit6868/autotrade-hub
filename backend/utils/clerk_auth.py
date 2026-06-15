@@ -29,6 +29,21 @@ def clerk_enabled() -> bool:
     return bool(CLERK_JWKS_URL)
 
 
+def _extract_email(claims: dict[str, Any]) -> str:
+    """Pull the user's email out of the verified Clerk JWT claims.
+
+    Clerk's DEFAULT session token does NOT include email — you must add it as
+    a custom claim in the Clerk Dashboard → Sessions → "Customize session
+    token" with:  {"email": "{{user.primary_email_address}}"}
+    We also check a few alternate keys for robustness. Returns "" if absent
+    (callers then fall back to the X-User-Email header — see get_user_email)."""
+    for k in ("email", "email_address", "primary_email", "primary_email_address"):
+        v = claims.get(k)
+        if isinstance(v, str) and "@" in v:
+            return v.strip().lower()
+    return ""
+
+
 def _get_jwks() -> PyJWKClient:
     global _jwks_client, _jwks_warmed_at
     # Refresh the JWKS client every 6 hours so rotated keys are picked up.
@@ -62,6 +77,7 @@ def get_user_id(
     request.state so the rate limiter can key off it."""
     if not clerk_enabled():
         request.state.user_id = ANONYMOUS_USER_ID
+        request.state.user_email = ""   # local-dev → treated as admin downstream
         return ANONYMOUS_USER_ID
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
@@ -80,4 +96,27 @@ def get_user_id(
     if not sub:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Token missing sub claim")
     request.state.user_id = sub
+    request.state.user_email = _extract_email(claims)
     return sub
+
+
+def get_user_email(
+    request: Request,
+    authorization: str | None = Header(default=None),
+    x_user_email: str | None = Header(default=None),
+) -> str:
+    """Return the caller's verified email (lowercased), used for the admin +
+    unlimited allowlists. Source priority:
+      1. the JWT `email` claim (secure — recommended; see _extract_email), then
+      2. the `X-User-Email` header the frontend sends from Clerk's verified
+         user object (fallback so admins aren't locked out before the claim is
+         configured). The header is only honoured for a SIGNED-IN request.
+    Local dev (Clerk disabled) returns "" — treated as admin downstream."""
+    # Ensure the token is parsed and email stashed (raises 401 if no token
+    # when Clerk is enabled). Idempotent for the access endpoints.
+    get_user_id(request, authorization)
+    email = (getattr(request.state, "user_email", "") or "").strip().lower()
+    if not email and x_user_email and "@" in x_user_email:
+        email = x_user_email.strip().lower()
+        request.state.user_email = email
+    return email

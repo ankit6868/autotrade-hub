@@ -49,6 +49,15 @@ export function setTokenProvider(fn: (() => Promise<string | null>) | null) {
   _getToken = fn;
 }
 
+// Clerk-verified email, set by AuthBridge. Sent as X-User-Email so the backend
+// can resolve the admin / unlimited allowlists even before the email is added
+// to the Clerk session-token claim. (The token claim, when present, wins
+// server-side.)
+let _userEmail: string | null = null;
+export function setUserEmail(email: string | null) {
+  _userEmail = email;
+}
+
 // Retry policy. Mobile-data clients often abort TCP after ~15s, but Railway's
 // first response after the container scales from zero takes 10-30s. The retry
 // keeps the user-perceived latency in check while still surviving cold starts.
@@ -112,6 +121,7 @@ async function _buildAuthHeaders(extra?: Record<string, string>): Promise<Record
       // Anonymous request — backend allows when Clerk isn't configured.
     }
   }
+  if (_userEmail) headers['X-User-Email'] = _userEmail;
   return headers;
 }
 
@@ -240,6 +250,28 @@ if (typeof window !== 'undefined') {
 }
 
 export const api = {
+  access: {
+    status: () => request<{
+      active: boolean; tier: 'admin' | 'unlimited' | 'subscription' | 'none' | 'error_fail_open';
+      is_admin: boolean; kind: string | null; expires_at: string | null;
+      email?: string; email_seen?: boolean;
+    }>('/api/access/status'),
+    redeem: (code: string) =>
+      request<any>('/api/access/redeem', { method: 'POST', body: JSON.stringify({ code }) }),
+    // admin only
+    listCodes: () => request<{ codes: any[] }>('/api/access/codes'),
+    generate: (kind: 'subscription' | 'unlimited', count: number, duration_days?: number, note?: string) =>
+      request<any>('/api/access/codes', { method: 'POST', body: JSON.stringify({ kind, count, duration_days, note }) }),
+    revoke: (code: string, revoked = true) =>
+      request<any>('/api/access/codes/revoke', { method: 'POST', body: JSON.stringify({ code, revoked }) }),
+    // admin: user management
+    listUsers: () => request<{ users: any[]; allowlist: any[] }>('/api/access/users'),
+    extendUser: (user_id: string, days = 0, months = 0) =>
+      request<any>('/api/access/users/extend', { method: 'POST', body: JSON.stringify({ user_id, days, months }) }),
+    changeUserCode: (user_id: string, new_code?: string) =>
+      request<any>('/api/access/users/change-code', { method: 'POST', body: JSON.stringify({ user_id, new_code }) }),
+  },
+
   config: {
     setup: (data: Record<string, unknown>) =>
       request<any>('/api/config/setup', { method: 'POST', body: JSON.stringify(data) }),

@@ -13,7 +13,7 @@ _sentry_active = init_sentry()
 
 import asyncio  # noqa: E402
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, status as http_status  # noqa: E402
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Depends, status as http_status  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 from fastapi.responses import JSONResponse  # noqa: E402
 from slowapi import _rate_limit_exceeded_handler  # noqa: E402
@@ -30,6 +30,8 @@ from backend.models import init_db, SessionLocal, Config  # noqa: E402
 from backend.routers import auth, strategy, market  # noqa: E402
 from backend.routers import futures as futures_router  # noqa: E402
 from backend.routers import paper_scalp as paper_scalp_router  # noqa: E402
+from backend.routers import access as access_router  # noqa: E402
+from backend.routers.access import require_active_access  # noqa: E402
 from backend.utils.clerk_auth import (  # noqa: E402
     ANONYMOUS_USER_ID,
     CLERK_AUDIENCE,
@@ -3849,9 +3851,15 @@ app.add_middleware(
 
 # --- Routers ---------------------------------------------------------------
 app.include_router(auth.router)
+app.include_router(access_router.router)  # access-code gate (NOT itself gated)
 app.include_router(strategy.router)
 app.include_router(market.router)        # market data (price/pairs/orderbook) — shared by chart + futures
-app.include_router(futures_router.router)
+# Futures = the real-money trading surface → gate it behind an active access
+# code (admin / unlimited-allowlist / valid code). The dependency fails OPEN on
+# infra errors so a glitch can't brick trading; the frontend AccessGate is the
+# primary UX barrier. The /api/access/* router above is intentionally NOT gated
+# so a code-less user can still reach /status and /redeem.
+app.include_router(futures_router.router, dependencies=[Depends(require_active_access)])
 app.include_router(paper_scalp_router.router)
 
 

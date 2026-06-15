@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import AccessPanel from '@/components/AccessPanel';
 
 /**
  * Futures-only landing page. Replaces the old multi-widget spot dashboard
@@ -46,6 +47,8 @@ export default function Home() {
           <span className="ml-2 text-xs text-slate-500">backend: {health}</span>
         </p>
       </header>
+
+      <AccessPanel />
 
       <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         <Link
