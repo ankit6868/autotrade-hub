@@ -25,6 +25,28 @@ export type StratFlag = {
 };
 
 export const STRATEGY_FLAGS: Record<string, StratFlag[]> = {
+  GaulsLiquiditySweep: [
+    {
+      key: 'SWING_LOOKBACK', type: 'number', label: 'Pool lookback', default: 20, min: 5, max: 100,
+      hint: 'Bars back used to define the liquidity pools (recent swing high = BSL, swing low = SSL). Larger = only sweeps of bigger/older levels qualify (fewer, higher-quality signals).',
+    },
+    {
+      key: 'VOL_PERCENTILE', type: 'number', label: 'Volume percentile', default: 0.7, min: 0.5, max: 0.95, step: 0.05,
+      hint: 'The sweep candle’s volume must exceed this percentile of recent volume (the book’s ~70% rule). Higher = demand a bigger volume spike = stricter, fewer trades.',
+    },
+    {
+      key: 'WICK_RATIO', type: 'number', label: 'Rejection wick ratio', default: 0.5, min: 0.3, max: 0.9, step: 0.05,
+      hint: 'How dominant the rejection wick must be (wick ≥ this × candle range). Higher = only strong, clean rejections qualify.',
+    },
+    {
+      key: 'SL_ATR_BUFFER', type: 'number', label: 'Stop buffer (×ATR)', default: 0.25, min: 0, max: 2, step: 0.05,
+      hint: 'Stop is placed this × ATR BEYOND the swept extreme (not on the obvious level, where stops get hunted). Larger = more room, wider stop.',
+    },
+    {
+      key: 'MIN_RR', type: 'number', label: 'Min reward:risk', default: 1.5, min: 1, max: 5, step: 0.5,
+      hint: 'If the opposite pool target is closer than this multiple of risk, the target is pushed out to this R. Higher = bigger winners required (lower hit rate, larger wins).',
+    },
+  ],
   StrategyAsh: [
     {
       key: 'max_hold_candles',
