@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import urllib.request
 
 _DEFAULT_FROM = "AutoTrade Hub <onboarding@resend.dev>"
@@ -39,6 +40,15 @@ def send_email(to: str, subject: str, html: str) -> tuple[bool, str]:
         if data.get("id"):
             return True, ""
         return False, data.get("message") or str(data)
+    except urllib.error.HTTPError as he:
+        # Resend returns a JSON body explaining the failure (e.g. test-mode:
+        # "you can only send to your own email until you verify a domain").
+        # Surface it instead of a bare "Forbidden".
+        try:
+            err = json.loads(he.read().decode())
+            return False, err.get("message") or f"HTTP {he.code}: {err}"
+        except Exception:
+            return False, f"HTTP {he.code} {he.reason}"
     except Exception as e:  # pragma: no cover — network/transport
         return False, str(e)
 
