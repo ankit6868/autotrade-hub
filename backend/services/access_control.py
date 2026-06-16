@@ -366,6 +366,63 @@ def admin_change_code(db: Session, *, user_id: str, new_code: str | None = None)
             "kind": kind, "expires_at": _iso(row.expires_at)}
 
 
+def list_recent_signups(db: Session, *, limit: int = 50) -> dict:
+    """Admin: recent Clerk sign-ups (email + when), flagged with whether they
+    already hold a code. Uses the Clerk Backend API (CLERK_SECRET_KEY)."""
+    import json as _json, urllib.request as _ur
+    sk = os.getenv("CLERK_SECRET_KEY", "").strip()
+    if not sk:
+        return {"error": "CLERK_SECRET_KEY not configured — add it in Railway to list sign-ups.",
+                "signups": []}
+    url = f"https://api.clerk.com/v1/users?limit={max(1, min(100, int(limit)))}&order_by=-created_at"
+    try:
+        req = _ur.Request(url, headers={"Authorization": f"Bearer {sk}"})
+        with _ur.urlopen(req, timeout=15) as r:
+            raw = _json.loads(r.read().decode())
+    except Exception as e:
+        return {"error": f"Clerk API error: {e}", "signups": []}
+    users = raw if isinstance(raw, list) else (raw.get("data") or [])
+    # emails that already have ANY bound code
+    bound = {(c.bound_email or "").lower()
+             for c in db.execute(select(AccessCode).where(AccessCode.bound_email.isnot(None))).scalars().all()}
+    out = []
+    for u in users:
+        pid = u.get("primary_email_address_id")
+        emails = u.get("email_addresses") or []
+        email = next((e.get("email_address") for e in emails if e.get("id") == pid), None) \
+            or (emails[0].get("email_address") if emails else None)
+        email = (email or "").lower()
+        out.append({
+            "user_id": u.get("id"),
+            "email": email,
+            "created_at": u.get("created_at"),   # ms epoch
+            "has_code": email in bound,
+            "is_allowlisted": email in admin_emails() or email in unlimited_emails(),
+        })
+    return {"signups": out}
+
+
+def give_code_to_email(db: Session, *, email: str, kind: str = "subscription",
+                       duration_days: int | None = None) -> dict:
+    """Admin: mint a fresh code for an email and email it via Resend. Returns
+    the code regardless of email success so the admin can copy it manually."""
+    from backend.services.emailer import send_email, code_email_html
+    email = (email or "").strip().lower()
+    if not email or "@" not in email:
+        return {"ok": False, "error": "A valid email is required."}
+    kind = (kind or "subscription").strip().lower()
+    if kind not in ("subscription", "unlimited"):
+        kind = "subscription"
+    code = generate_codes(db, kind=kind, count=1, duration_days=duration_days,
+                          note=f"issued to {email}")[0]
+    exp_note = (f" — valid {duration_days or DEFAULT_SUBSCRIPTION_DAYS} days from first use"
+                if kind == "subscription" else " — lifetime")
+    ok, err = send_email(email, "Your AutoTrade Hub access code",
+                         code_email_html(code, kind, exp_note))
+    return {"ok": True, "code": code, "kind": kind, "emailed": ok,
+            "email_error": (None if ok else err)}
+
+
 def revoke_code(db: Session, *, code: str, revoked: bool = True) -> dict:
     row = db.execute(select(AccessCode).where(AccessCode.code == (code or "").strip().upper())).scalar_one_or_none()
     if row is None:

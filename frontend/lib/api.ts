@@ -274,6 +274,14 @@ export const api = {
       request<any>('/api/access/users/pause', { method: 'POST', body: JSON.stringify({ user_id, paused }) }),
     revokeUser: (user_id: string) =>
       request<any>('/api/access/users/revoke', { method: 'POST', body: JSON.stringify({ user_id }) }),
+    // admin: recent Clerk sign-ups + give-code-and-email
+    listSignups: () => request<{
+      error?: string;
+      signups: { user_id: string; email: string; created_at: number; has_code: boolean; is_allowlisted: boolean }[];
+    }>('/api/access/signups'),
+    giveCode: (email: string, kind: 'subscription' | 'unlimited' = 'subscription', days?: number) =>
+      request<{ ok: boolean; code?: string; kind?: string; emailed?: boolean; email_error?: string | null; error?: string }>(
+        '/api/access/give-code', { method: 'POST', body: JSON.stringify({ email, kind, days }) }),
   },
 
   config: {

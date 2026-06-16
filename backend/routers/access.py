@@ -162,6 +162,28 @@ def admin_pause_user(
     return AC.set_user_paused(db, user_id=user_id, paused=bool(req.get("paused", True)))
 
 
+@router.get("/signups")
+def admin_list_signups(db: Session = Depends(get_db), _admin: str = Depends(require_admin)):
+    """Recent Clerk sign-ups (email + when + has-code), for the admin panel."""
+    return AC.list_recent_signups(db)
+
+
+@router.post("/give-code")
+def admin_give_code(
+    req: dict,
+    db: Session = Depends(get_db),
+    _admin: str = Depends(require_admin),
+):
+    """Mint a code for an email and email it (Resend). `{email, kind, days?}`."""
+    email = str(req.get("email", "")).strip()
+    if not email:
+        raise HTTPException(status_code=400, detail="email required")
+    kind = str(req.get("kind", "subscription"))
+    days = req.get("days")
+    return AC.give_code_to_email(db, email=email, kind=kind,
+                                 duration_days=int(days) if days else None)
+
+
 @router.post("/users/revoke")
 def admin_revoke_user(
     req: dict,

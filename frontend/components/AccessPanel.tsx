@@ -95,7 +95,111 @@ export default function AccessPanel() {
 
       {tier === 'admin' && <AdminCodes />}
       {tier === 'admin' && <AdminUsers />}
+      {tier === 'admin' && <AdminSignups />}
     </section>
+  );
+}
+
+/** Relative "x ago" from a ms-epoch timestamp (Clerk created_at). */
+function ago(ms: number): string {
+  if (!ms) return '—';
+  const s = Math.floor((Date.now() - ms) / 1000);
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60); if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60); if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24); return d < 30 ? `${d}d ago` : `${Math.floor(d / 30)}mo ago`;
+}
+
+/** Admin-only: recent Clerk sign-ups + one-click "Give code" (generates a code
+ *  and emails it via Resend). For people who paid on another site. */
+function AdminSignups() {
+  const [rows, setRows] = useState<any[] | null>(null);
+  const [err, setErr] = useState('');
+  const [busy, setBusy] = useState('');
+  const [note, setNote] = useState('');
+  const [kindFor, setKindFor] = useState<Record<string, 'subscription' | 'unlimited'>>({});
+
+  const load = useCallback(async () => {
+    setErr(''); setNote('');
+    try {
+      const r = await api.access.listSignups();
+      if (r.error) { setErr(r.error); setRows([]); }
+      else setRows(r.signups || []);
+    } catch { setErr('Could not load sign-ups.'); }
+  }, []);
+  useEffect(() => { load(); }, [load]);
+
+  const give = async (email: string) => {
+    const kind = kindFor[email] || 'subscription';
+    if (!confirm(`Generate a ${kind} code for ${email} and email it now?`)) return;
+    setBusy(email); setNote('');
+    try {
+      const r = await api.access.giveCode(email, kind);
+      if (!r.ok) { setNote(r.error || 'Failed.'); }
+      else if (r.emailed) { setNote(`✓ ${r.code} emailed to ${email}.`); }
+      else { setNote(`⚠ Code ${r.code} created but email failed (${r.email_error}). Copy it manually.`); }
+      await load();
+    } catch { setNote('Network error.'); }
+    finally { setBusy(''); }
+  };
+
+  return (
+    <div className="border-t border-white/[0.06] pt-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="text-xs font-bold text-amber-300">Admin · recent sign-ups</div>
+        <button onClick={load} className="text-[11px] underline text-slate-400 hover:text-slate-200">refresh</button>
+      </div>
+      <p className="text-[10px] text-slate-500">
+        Newest accounts that signed in. For someone who paid elsewhere, pick a plan and click <b className="text-slate-300">Give code</b> — a code is generated and emailed to them.
+      </p>
+      {note && <p className="text-[11px] text-slate-300">{note}</p>}
+      {err && <p className="text-[11px] text-rose-400">{err}</p>}
+
+      {rows && rows.length > 0 ? (
+        <div className="max-h-72 overflow-auto rounded-lg border border-[#2a3a52]">
+          <table className="w-full text-[11px]">
+            <thead className="text-slate-500 sticky top-0 bg-[#0f1830]">
+              <tr>
+                <th className="text-left p-2">Email</th><th className="p-2">Signed up</th>
+                <th className="p-2">Status</th><th className="p-2">Give code</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((u) => (
+                <tr key={u.user_id} className="border-t border-white/[0.04] align-middle">
+                  <td className="p-2 text-slate-200 break-all">{u.email || u.user_id}</td>
+                  <td className="p-2 text-center text-slate-400">{ago(u.created_at)}</td>
+                  <td className="p-2 text-center">
+                    {u.is_allowlisted ? <span className="text-amber-300">allowlist</span>
+                      : u.has_code ? <span className="text-emerald-300">has code</span>
+                      : <span className="text-slate-500">none</span>}
+                  </td>
+                  <td className="p-2">
+                    {!u.email ? <span className="text-slate-600">—</span> : (
+                      <div className="flex gap-1 justify-center items-center">
+                        <select
+                          value={kindFor[u.email] || 'subscription'}
+                          onChange={(e) => setKindFor((m) => ({ ...m, [u.email]: e.target.value as any }))}
+                          className="px-1 py-0.5 rounded bg-[#0f1729] border border-[#2a3a52] text-[10px] text-slate-100">
+                          <option value="subscription">30d</option>
+                          <option value="unlimited">∞</option>
+                        </select>
+                        <button disabled={busy === u.email} onClick={() => give(u.email)}
+                          className="px-2 py-0.5 rounded border border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/10 disabled:opacity-50">
+                          {busy === u.email ? '…' : 'Give code'}
+                        </button>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : rows && !err ? (
+        <p className="text-[11px] text-slate-500">No sign-ups found.</p>
+      ) : null}
+    </div>
   );
 }
 
