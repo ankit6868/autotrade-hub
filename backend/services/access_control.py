@@ -375,10 +375,25 @@ def list_recent_signups(db: Session, *, limit: int = 50) -> dict:
         return {"error": "CLERK_SECRET_KEY not configured — add it in Railway to list sign-ups.",
                 "signups": []}
     url = f"https://api.clerk.com/v1/users?limit={max(1, min(100, int(limit)))}&order_by=-created_at"
+    headers = {
+        "Authorization": f"Bearer {sk}",
+        # Clerk's API sits behind Cloudflare, which 403s the default
+        # "Python-urllib/x.y" agent as a bot. A real UA fixes it.
+        "User-Agent": "AutoTradeHub/1.0 (+https://autotrade-hub)",
+        "Accept": "application/json",
+    }
     try:
-        req = _ur.Request(url, headers={"Authorization": f"Bearer {sk}"})
+        req = _ur.Request(url, headers=headers)
         with _ur.urlopen(req, timeout=15) as r:
             raw = _json.loads(r.read().decode())
+    except _ur.HTTPError as he:
+        body = ""
+        try:
+            body = he.read().decode()[:300]
+        except Exception:
+            pass
+        return {"error": f"Clerk API error: HTTP {he.code} {he.reason}. {body}".strip(),
+                "signups": []}
     except Exception as e:
         return {"error": f"Clerk API error: {e}", "signups": []}
     users = raw if isinstance(raw, list) else (raw.get("data") or [])

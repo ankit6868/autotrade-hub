@@ -30,7 +30,8 @@ def send_email(to: str, subject: str, html: str) -> tuple[bool, str]:
     body = json.dumps({"from": frm, "to": [to], "subject": subject, "html": html}).encode()
     req = urllib.request.Request(
         "https://api.resend.com/emails", data=body, method="POST",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+                 "User-Agent": "AutoTradeHub/1.0", "Accept": "application/json"},
     )
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
