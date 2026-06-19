@@ -639,6 +639,7 @@ def list_strategies(
     user_id: str = Depends(get_user_id),
 ):
     from sqlalchemy import or_
+    from backend.services.strategy_runner import detect_strategy_indicators
     try:
         result = db.execute(
             select(Strategy)
@@ -674,6 +675,9 @@ def list_strategies(
                 # Phase 5 — confidence + live permission (decoded by validator)
                 "confidence_score":   int(getattr(s, "confidence_score", 0) or 0),
                 "live_permission":    getattr(s, "live_permission", "blocked") or "blocked",
+                # Which chart indicators this strategy follows (vwap/ema/rsi/…),
+                # so the chart can auto-show exactly those overlays.
+                "indicators":         detect_strategy_indicators(getattr(s, "generated_code", None)),
                 "created_at":         str(s.created_at),
             }
             for s in strategies

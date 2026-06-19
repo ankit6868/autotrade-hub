@@ -12,6 +12,10 @@ import { useVisibleInterval } from '@/lib/useVisibleInterval';
 interface Props {
   pair: string;
   defaultInterval?: string;
+  // When provided (e.g. the strategy a bot follows), the chart auto-enables
+  // the matching overlays — e.g. ['vwap','ema'] turns those on. Users can
+  // still toggle any indicator on/off manually afterwards.
+  strategyIndicators?: string[];
 }
 
 const TIMEFRAMES = [
@@ -99,6 +103,25 @@ function calcMACD(closes: number[], fast = 12, slow = 26, sig = 9) {
   return { macd, signal, hist };
 }
 
+// Session VWAP anchored to the UTC day (resets each session) — the standard
+// intraday/scalping reference. `times` are unix seconds. Mirrors the backend
+// ta.VWAP() so what a strategy trades matches what the chart shows.
+function calcVWAP(
+  highs: number[], lows: number[], closes: number[], vols: number[], times: number[],
+): (number | null)[] {
+  const out: (number | null)[] = new Array(closes.length).fill(null);
+  let day = -1, cumPV = 0, cumV = 0;
+  for (let i = 0; i < closes.length; i++) {
+    const d = Math.floor((times[i] || 0) / 86400);
+    if (d !== day) { day = d; cumPV = 0; cumV = 0; }   // new UTC day → reset
+    const tp = (highs[i] + lows[i] + closes[i]) / 3;
+    const v  = vols[i] || 0;
+    cumPV += tp * v; cumV += v;
+    out[i] = cumV > 0 ? cumPV / cumV : null;
+  }
+  return out;
+}
+
 function hideAttribution(container: HTMLElement) {
   const els = container.querySelectorAll('a[href*="tradingview"], div[class*="apply-common"]');
   els.forEach(el => (el as HTMLElement).style.display = 'none');
@@ -141,7 +164,7 @@ function chartOpts(bg = '#0d1117') {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Props) {
+export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', strategyIndicators }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const mainRef    = useRef<HTMLDivElement>(null);
   const rsiRef     = useRef<HTMLDivElement>(null);
@@ -156,6 +179,9 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
   const serBBMid   = useRef<ISeriesApi<'Line'>        | null>(null);
   const serBBUp    = useRef<ISeriesApi<'Line'>        | null>(null);
   const serBBLow   = useRef<ISeriesApi<'Line'>        | null>(null);
+  const serVWAP    = useRef<ISeriesApi<'Line'>        | null>(null);
+  const serEMA9    = useRef<ISeriesApi<'Line'>        | null>(null);
+  const serEMA21   = useRef<ISeriesApi<'Line'>        | null>(null);
   const serRSI     = useRef<ISeriesApi<'Line'>        | null>(null);
   const serMACDL   = useRef<ISeriesApi<'Line'>        | null>(null);
   const serMACDS   = useRef<ISeriesApi<'Line'>        | null>(null);
@@ -167,6 +193,10 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
   const [showBB, setShowBB]     = useState(true);
   const [showRSI, setShowRSI]   = useState(true);
   const [showMACD, setShowMACD] = useState(true);
+  // Scalping overlays — OFF by default (only used when a user adds them, or
+  // when a running strategy follows them via the strategyIndicators prop).
+  const [showVWAP, setShowVWAP] = useState(false);
+  const [showEMA, setShowEMA]   = useState(false);
   const [error, setError]       = useState('');
   const [isMobile, setIsMobile] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -215,6 +245,10 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
     serBBMid.current = mc.addLineSeries({ ...lineBase, color: 'rgba(255,165,0,0.65)' });
     serBBUp.current  = mc.addLineSeries({ ...lineBase, color: 'rgba(100,180,255,0.45)' });
     serBBLow.current = mc.addLineSeries({ ...lineBase, color: 'rgba(100,180,255,0.45)' });
+    // Scalping overlays (price pane) — VWAP (yellow), EMA9 (cyan), EMA21 (pink).
+    serVWAP.current  = mc.addLineSeries({ ...lineBase, color: 'rgba(250,204,21,0.9)', lineWidth: 2 as const });
+    serEMA9.current  = mc.addLineSeries({ ...lineBase, color: 'rgba(34,211,238,0.8)' });
+    serEMA21.current = mc.addLineSeries({ ...lineBase, color: 'rgba(244,114,182,0.8)' });
 
     if (rsiRef.current) {
       const rc = createChart(rsiRef.current, {
@@ -311,6 +345,20 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
         [serBBMid, serBBUp, serBBLow].forEach(s => s.current?.setData([]));
       }
 
+      // VWAP overlay (session-anchored, matches backend ta.VWAP)
+      if (showVWAP) {
+        const timesNum = raw.map((c: {time:number}) => c.time);
+        serVWAP.current?.setData(toLine(calcVWAP(highs, lows, closes, vols, timesNum)));
+      } else serVWAP.current?.setData([]);
+
+      // EMA 9 / 21 overlays
+      if (showEMA) {
+        serEMA9.current?.setData(toLine(calcEMA(closes, 9)));
+        serEMA21.current?.setData(toLine(calcEMA(closes, 21)));
+      } else {
+        [serEMA9, serEMA21].forEach(s => s.current?.setData([]));
+      }
+
       if (showRSI && serRSI.current) {
         serRSI.current.setData(toLine(calcRSI(closes)));
       } else serRSI.current?.setData([]);
@@ -345,7 +393,14 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
       setTimeout(hideAllAttribution, 50);
     } catch { setError('Failed to load chart data'); }
     setLoading(false);
-  }, [pair, tf, candleCount, showBB, showRSI, showMACD, hideAllAttribution]);
+  }, [pair, tf, candleCount, showBB, showRSI, showMACD, showVWAP, showEMA, hideAllAttribution]);
+
+  // Auto-enable overlays a running strategy follows (chart mirrors the bot).
+  useEffect(() => {
+    if (!strategyIndicators) return;
+    if (strategyIndicators.includes('vwap')) setShowVWAP(true);
+    if (strategyIndicators.includes('ema'))  setShowEMA(true);
+  }, [strategyIndicators]);
 
   useEffect(() => { loadData(); }, [loadData]);
   // Visibility-aware: stop refetching candles when the tab is hidden.
@@ -484,6 +539,8 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
         {/* Indicator toggles */}
         <div className="flex items-center gap-1 shrink-0">
           {[
+            { k: 'VWAP', on: showVWAP, set: setShowVWAP, cls: 'text-yellow-300 border-yellow-300/50 bg-yellow-300/10' },
+            { k: 'EMA',  on: showEMA,  set: setShowEMA,  cls: 'text-cyan-300   border-cyan-300/50   bg-cyan-300/10'   },
             { k: 'BB',   on: showBB,   set: setShowBB,   cls: 'text-orange-400 border-orange-400/50 bg-orange-400/10' },
             { k: 'RSI',  on: showRSI,  set: setShowRSI,  cls: 'text-purple-400 border-purple-400/50 bg-purple-400/10' },
             { k: 'MACD', on: showMACD, set: setShowMACD, cls: 'text-blue-400   border-blue-400/50   bg-blue-400/10'   },

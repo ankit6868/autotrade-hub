@@ -31,6 +31,7 @@ packages installed on Railway.
 from __future__ import annotations
 
 import logging
+import re
 import types
 from typing import Any
 
@@ -38,6 +39,35 @@ import numpy as np
 import pandas as pd
 
 log = logging.getLogger(__name__)
+
+
+# Indicators the chart can render as overlays/sub-panes, mapped to the regex
+# that detects their use in a strategy's generated code. Used so the UI can
+# auto-show exactly the indicators a strategy actually follows (and nothing
+# else — indicators stay off unless a strategy uses them or the user adds them).
+_INDICATOR_PATTERNS: dict[str, str] = {
+    "vwap":      r"\bVWAP\b|qtpylib\.vwap",
+    "ema":       r"\bEMA\b|\bema[_0-9]",
+    "sma":       r"\bSMA\b",
+    "rsi":       r"\bRSI\b",
+    "macd":      r"\bMACD\b",
+    "bbands":    r"\bBBANDS\b|bollinger",
+    "stoch":     r"\bSTOCH\b|stochastic",
+    "atr":       r"\bATR\b",
+    "adx":       r"\bADX\b",
+    "cci":       r"\bCCI\b",
+}
+
+
+def detect_strategy_indicators(generated_code: str | None) -> list[str]:
+    """Return the list of chart indicators a strategy's code references, e.g.
+    ['vwap', 'ema', 'rsi']. Empty list when there's no code or no match. Lets
+    the frontend auto-enable only the overlays a strategy actually uses."""
+    if not generated_code:
+        return []
+    found = [name for name, pat in _INDICATOR_PATTERNS.items()
+             if re.search(pat, generated_code, re.IGNORECASE)]
+    return found
 
 
 # ── Minimal IStrategy stub the user's code subclasses ──────────────────────
@@ -209,9 +239,38 @@ def _build_talib_stub() -> types.ModuleType:
         ci = (ap - esa) / (0.015 * d.replace(0, 1e-9))
         return ci.ewm(span=average_len, adjust=False).mean()   # wt1 (tci)
 
+    def VWAP(high, low=None, close=None, volume=None, timeperiod: int = 0):
+        """Volume-Weighted Average Price — the #1 intraday/scalping reference.
+        NOT in native TA-Lib, so provided here for scalp strategies.
+
+        Accepts a single df (extracts high/low/close/volume) OR explicit
+        arrays. Behaviour:
+          • timeperiod == 0 (default): SESSION VWAP anchored to the UTC day if
+            the df has a 'date' column (the standard intraday VWAP that resets
+            each session); falls back to cumulative VWAP if no timestamp.
+          • timeperiod  > 0: ROLLING VWAP over that many bars — handy on
+            crypto's 24/7 tape where there is no natural session reset.
+        """
+        if isinstance(high, pd.DataFrame) and low is None and close is None:
+            df = high
+            h, l, c, v = df["high"], df["low"], df["close"], df["volume"]
+            dates = df["date"] if "date" in df.columns else None
+        else:
+            h, l, c = _to_series(high), _to_series(low), _to_series(close)
+            v = _to_series(volume) if volume is not None else pd.Series(1.0, index=h.index)
+            dates = None
+        tp = (h + l + c) / 3.0       # typical price
+        pv = tp * v
+        if timeperiod and timeperiod > 0:
+            return pv.rolling(timeperiod).sum() / v.rolling(timeperiod).sum().replace(0, 1e-9)
+        if dates is not None:
+            day = pd.to_datetime(dates, utc=True, errors="coerce").dt.floor("D")
+            return pv.groupby(day).cumsum() / v.groupby(day).cumsum().replace(0, 1e-9)
+        return pv.cumsum() / v.cumsum().replace(0, 1e-9)
+
     for name, fn in dict(
         SMA=SMA, EMA=EMA, RSI=RSI, MACD=MACD, BBANDS=BBANDS,
-        ATR=ATR, ADX=ADX, STOCH=STOCH, CCI=CCI, WT=WT,
+        ATR=ATR, ADX=ADX, STOCH=STOCH, CCI=CCI, WT=WT, VWAP=VWAP,
     ).items():
         setattr(mod, name, fn)
     return mod
