@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
+import { useVisibleInterval } from '@/lib/useVisibleInterval';
 import KuCoinFuturesChart from '@/components/charts/KuCoinFuturesChart';
 import PairTabs from '@/components/futures/PairTabs';
 import OrderBook from '@/components/futures/OrderBook';
@@ -55,24 +56,22 @@ export default function FuturesTerminal() {
     } catch { /* silent */ }
   }, [futSymbol]);
 
-  useEffect(() => {
-    refreshAccount();
-    fetchLeverage();
-    const t = setInterval(refreshAccount, 15000);
-    return () => clearInterval(t);
-  }, [refreshAccount, fetchLeverage]);
-
-  useEffect(() => {
+  const fetchPrice = useCallback(() => {
     api.market.price(pair).then(d => {
       if (d.price) setLastPrice(parseFloat(d.price));
     }).catch(() => {});
-    const t = setInterval(() => {
-      api.market.price(pair).then(d => {
-        if (d.price) setLastPrice(parseFloat(d.price));
-      }).catch(() => {});
-    }, 5000);
-    return () => clearInterval(t);
   }, [pair]);
+
+  // Initial load on mount; the recurring refresh is visibility-aware (pauses
+  // when the tab is hidden — bots keep trading server-side regardless).
+  useEffect(() => {
+    refreshAccount();
+    fetchLeverage();
+  }, [refreshAccount, fetchLeverage]);
+  useVisibleInterval(refreshAccount, 15000);
+
+  useEffect(() => { fetchPrice(); }, [fetchPrice]);
+  useVisibleInterval(fetchPrice, 5000);
 
   async function handleLeverageChange(lev: number) {
     setLeverage(lev);

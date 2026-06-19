@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
+import { useVisibleInterval } from '@/lib/useVisibleInterval';
 import StrategyPreview from './StrategyPreview';
 import { STRATEGY_FLAGS, type StratFlag } from '@/lib/strategyFlags';
 
@@ -120,9 +121,9 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
     api.strategy.list().then(d => setStrategies(d.strategies || [])).catch(() => {});
     api.futures.leadTradingStatus().then(d => setLeadStatus(d)).catch(() => {});
     refreshBots();
-    const t = setInterval(refreshBots, 5000);
-    return () => clearInterval(t);
   }, [refreshBots]);
+  // Visibility-aware: 5s refresh only while the tab is on screen.
+  useVisibleInterval(refreshBots, 5000);
 
   const userStrategyCards: StrategyCard[] = strategies
     .filter(s => !BUILT_IN_BOTS.find(b => b.name === s.name))
@@ -1926,11 +1927,9 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
       .catch(e => { setError(String(e?.message || e)); setLoading(false); });
   }, [botId]);
 
-  useEffect(() => {
-    refresh();
-    const t = setInterval(refresh, 5000);
-    return () => clearInterval(t);
-  }, [refresh]);
+  useEffect(() => { refresh(); }, [refresh]);
+  // Visibility-aware: stop polling bot performance when the tab is hidden.
+  useVisibleInterval(refresh, 5000);
 
   if (loading) {
     return <div className="flex items-center justify-center h-full text-slate-500 text-xs">Loading bot data...</div>;

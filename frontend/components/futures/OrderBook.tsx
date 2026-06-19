@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
+import { useVisibleInterval } from '@/lib/useVisibleInterval';
 
 interface Props {
   symbol: string;
@@ -30,11 +31,9 @@ export default function OrderBook({ symbol, onPriceClick }: Props) {
     } catch { /* silent */ }
   }, [symbol]);
 
-  useEffect(() => {
-    fetchBook();
-    const t = setInterval(fetchBook, 2000);
-    return () => clearInterval(t);
-  }, [fetchBook]);
+  useEffect(() => { fetchBook(); }, [fetchBook]);
+  // Visibility-aware: stop polling the order book when the tab is hidden.
+  useVisibleInterval(fetchBook, 2000);
 
   const maxAskVol = Math.max(...asks.map(a => parseFloat(a[1]) || 0), 0.001);
   const maxBidVol = Math.max(...bids.map(b => parseFloat(b[1]) || 0), 0.001);

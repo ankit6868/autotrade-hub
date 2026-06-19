@@ -1,6 +1,7 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { useVisibleInterval } from '@/lib/useVisibleInterval';
 
 interface Props {
   mode: 'paper' | 'live';
@@ -22,17 +23,15 @@ export default function AssetOverview({ mode, pair, collapsed: collapsedProp, on
     ? onToggleCollapsed
     : () => setLocalCollapsed(v => !v);
 
-  useEffect(() => {
-    const fetchData = async () => {
-      try {
-        const data = await api.futures.account(mode);
-        setAccount(data);
-      } catch { /* silent */ }
-    };
-    fetchData();
-    const t = setInterval(fetchData, 10000);
-    return () => clearInterval(t);
+  const fetchData = useCallback(async () => {
+    try {
+      const data = await api.futures.account(mode);
+      setAccount(data);
+    } catch { /* silent */ }
   }, [mode]);
+  useEffect(() => { fetchData(); }, [fetchData]);
+  // Visibility-aware: stops polling when the tab is hidden.
+  useVisibleInterval(fetchData, 10000);
 
   const baseCoin = pair?.split('/')[0] || 'BTC';
   const isLive = account?.source === 'kucoin_lead_trading';

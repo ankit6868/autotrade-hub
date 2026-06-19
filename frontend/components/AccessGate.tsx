@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useClerk } from '@clerk/nextjs';
 import { api } from '@/lib/api';
+import { useVisibleInterval } from '@/lib/useVisibleInterval';
 
 type Status = {
   active: boolean;
@@ -46,15 +47,11 @@ export default function AccessGate({ children }: { children: React.ReactNode }) 
   }, []);
 
   useEffect(() => { check(); }, [check]);
-  // Live re-gate: re-check every 60s and when the tab regains focus, so an
-  // expiring subscription drops the user back to the code screen without a
-  // manual reload. (The backend also 402s their API calls immediately.)
-  useEffect(() => {
-    const id = setInterval(check, 60_000);
-    const onFocus = () => check();
-    window.addEventListener('focus', onFocus);
-    return () => { clearInterval(id); window.removeEventListener('focus', onFocus); };
-  }, [check]);
+  // Live re-gate: re-check every 60s while the tab is visible, and immediately
+  // when the tab regains visibility, so an expiring subscription drops the user
+  // back to the code screen without a manual reload. Hidden tabs don't poll.
+  // (The backend also 402s their API calls immediately.)
+  useVisibleInterval(check, 60_000);
 
   const redeem = async (e: React.FormEvent) => {
     e.preventDefault();

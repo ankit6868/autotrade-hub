@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
+import { useVisibleInterval } from '@/lib/useVisibleInterval';
 import MarginAdjustModal from './MarginAdjustModal';
 
 interface Props {
@@ -72,11 +73,9 @@ export default function PositionsPanel({
     setMainEngine(engineStatus?.running ? engineStatus : null);
   }, [mode]);
 
-  useEffect(() => {
-    refreshAll();
-    const t = setInterval(refreshAll, 8000);
-    return () => clearInterval(t);
-  }, [refreshAll]);
+  useEffect(() => { refreshAll(); }, [refreshAll]);
+  // Visibility-aware: stop polling positions/orders when the tab is hidden.
+  useVisibleInterval(refreshAll, 8000);
 
   // Immediate refresh when parent signals an order was placed
   useEffect(() => {

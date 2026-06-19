@@ -1,6 +1,7 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { api } from '@/lib/api';
+import { useVisibleInterval } from '@/lib/useVisibleInterval';
 
 interface Props {
   activePair: string;
@@ -17,19 +18,17 @@ export default function PairTabs({ activePair, onPairChange }: Props) {
   const [search, setSearch] = useState('');
 
   // Fetch prices for open tabs
-  useEffect(() => {
-    const fetchPrices = async () => {
-      for (const pair of openPairs) {
-        try {
-          const data = await api.market.price(pair);
-          if (data.price) setPrices(prev => ({ ...prev, [pair]: parseFloat(data.price) }));
-        } catch { /* */ }
-      }
-    };
-    fetchPrices();
-    const t = setInterval(fetchPrices, 5000);
-    return () => clearInterval(t);
+  const fetchPrices = useCallback(async () => {
+    for (const pair of openPairs) {
+      try {
+        const data = await api.market.price(pair);
+        if (data.price) setPrices(prev => ({ ...prev, [pair]: parseFloat(data.price) }));
+      } catch { /* */ }
+    }
   }, [openPairs]);
+  useEffect(() => { fetchPrices(); }, [fetchPrices]);
+  // Visibility-aware: stop polling tab prices when the tab is hidden.
+  useVisibleInterval(fetchPrices, 5000);
 
   function addPair(pair: string) {
     if (!openPairs.includes(pair)) {

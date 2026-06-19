@@ -12,6 +12,7 @@
  * positions/PNL panel stays fresh without hammering the backend.
  */
 import { useEffect, useState, useCallback } from 'react';
+import { useVisibleInterval } from '@/lib/useVisibleInterval';
 
 type StatusSnapshot = {
   status: string;
@@ -84,11 +85,9 @@ export default function ScalpEnginePanel({ strategies }: { strategies: Strategy[
     }
   }, []);
 
-  useEffect(() => {
-    refresh();
-    const tick = setInterval(refresh, 3000);
-    return () => clearInterval(tick);
-  }, [refresh]);
+  useEffect(() => { refresh(); }, [refresh]);
+  // Visibility-aware: stop polling the scalp engine status when the tab is hidden.
+  useVisibleInterval(refresh, 3000);
 
   const startEngine = async () => {
     if (!strategyId) { setErrorMsg('Pick a strategy first'); return; }

@@ -7,6 +7,7 @@ import {
   HistogramData,
 } from 'lightweight-charts';
 import { api } from '@/lib/api';
+import { useVisibleInterval } from '@/lib/useVisibleInterval';
 
 interface Props {
   pair: string;
@@ -347,11 +348,8 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m' }: Pr
   }, [pair, tf, candleCount, showBB, showRSI, showMACD, hideAllAttribution]);
 
   useEffect(() => { loadData(); }, [loadData]);
-
-  useEffect(() => {
-    const t = window.setInterval(loadData, 30_000);
-    return () => window.clearInterval(t);
-  }, [loadData]);
+  // Visibility-aware: stop refetching candles when the tab is hidden.
+  useVisibleInterval(loadData, 30_000);
 
   // ── Zoom controls ──────────────────────────────────────────────────────────
   const zoomIn = () => {

@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
+import { useVisibleInterval } from '@/lib/useVisibleInterval';
 
 interface Props {
   symbol: string;
@@ -17,11 +18,9 @@ export default function RecentTrades({ symbol }: Props) {
     } catch { /* silent */ }
   }, [symbol]);
 
-  useEffect(() => {
-    fetchTrades();
-    const t = setInterval(fetchTrades, 2000);
-    return () => clearInterval(t);
-  }, [fetchTrades]);
+  useEffect(() => { fetchTrades(); }, [fetchTrades]);
+  // Visibility-aware: stop polling recent trades when the tab is hidden.
+  useVisibleInterval(fetchTrades, 2000);
 
   return (
     <div className="flex flex-col h-full text-xs">
