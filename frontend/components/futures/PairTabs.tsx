@@ -8,7 +8,9 @@ interface Props {
   onPairChange: (pair: string) => void;
 }
 
-const DEFAULT_PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'];
+// XAUT = Tether Gold, PAXG = PAX Gold — gold-backed token perpetuals on
+// KuCoin futures, so traders can play gold alongside crypto.
+const DEFAULT_PAIRS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XAUT/USDT'];
 
 export default function PairTabs({ activePair, onPairChange }: Props) {
   const [openPairs, setOpenPairs] = useState<string[]>([activePair]);

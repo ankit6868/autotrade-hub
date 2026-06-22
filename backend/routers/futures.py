@@ -155,6 +155,8 @@ def _futures_ticker_price(pair: str) -> float | None:
 # here if users start trading new pairs; unknown symbols fall back to 0.001.
 _LOT_SIZE_BY_SYMBOL: dict[str, float] = {
     "XBTUSDTM":  0.001,
+    "XAUTUSDTM": 0.001,   # Tether Gold (gold-backed token perp)
+    "PAXGUSDTM": 0.001,   # PAX Gold (gold-backed token perp)
     "ETHUSDTM":  0.01,
     "SOLUSDTM":  0.1,
     "XRPUSDTM":  10.0,
