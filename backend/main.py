@@ -3363,6 +3363,70 @@ class GaulsLiquiditySweep(IStrategy):
 '''
 
 
+# 5:30-candle (00:00 UTC daily-open) breakout + Fibonacci retracement. A later
+# candle that CLOSES beyond the daily-open candle's hi/lo, with body>wick AND
+# aligned with the EMA-50, arms a Fib setup: enter on the 0.25 retracement,
+# structural stop at the 0.75 level, target 1:2 (sl_price/tp_price). One setup
+# per UTC day. Works on BTC, gold (XAUT/PAXG), or any liquid perp.
+_FIVE_THIRTY_FIB_CODE = '''
+import pandas as pd
+import numpy as np
+import talib as ta
+from freqtrade.strategy import IStrategy
+
+class FiveThirtyFib(IStrategy):
+    timeframe = "1h"
+
+    def populate_indicators(self, dataframe, metadata):
+        dataframe["ema50"] = ta.EMA(dataframe["close"], timeperiod=50)
+        return dataframe
+
+    def populate_entry_trend(self, dataframe, metadata):
+        d = dataframe
+        n = len(d)
+        dt = pd.to_datetime(d["date"], utc=True, errors="coerce") if "date" in d.columns \\
+             else pd.to_datetime(d.index, utc=True)
+        day = dt.dt.floor("D").values
+        o = d["open"].values; h = d["high"].values; l = d["low"].values
+        c = d["close"].values; ema = d["ema50"].values
+        el = np.zeros(n); es = np.zeros(n)
+        slp = np.full(n, np.nan); tpp = np.full(n, np.nan)
+        cur = None; dhi = dlo = None; setup = None; traded = False
+        for i in range(n):
+            if cur is None or day[i] != cur:          # new UTC day -> anchor candle
+                cur = day[i]; dhi = h[i]; dlo = l[i]; setup = None; traded = False
+                continue
+            body = abs(c[i] - o[i])
+            wick = (h[i] - max(o[i], c[i])) + (min(o[i], c[i]) - l[i])
+            strong = body > wick
+            if setup is None and not traded:
+                if c[i] > dhi and strong and c[i] > ema[i]:        # bullish breakout
+                    mv = h[i] - dlo
+                    if mv > 0:
+                        e = h[i] - 0.25 * mv; s = h[i] - 0.75 * mv
+                        setup = ("long", e, s, e + 2 * (e - s))
+                elif c[i] < dlo and strong and c[i] < ema[i]:      # bearish breakdown
+                    mv = dhi - l[i]
+                    if mv > 0:
+                        e = l[i] + 0.25 * mv; s = l[i] + 0.75 * mv
+                        setup = ("short", e, s, e - 2 * (s - e))
+            elif setup is not None:                   # wait for 0.25 retracement fill
+                dr, e, s, t = setup
+                if dr == "long" and l[i] <= e:
+                    el[i] = 1; slp[i] = s; tpp[i] = t; setup = None; traded = True
+                elif dr == "short" and h[i] >= e:
+                    es[i] = 1; slp[i] = s; tpp[i] = t; setup = None; traded = True
+        d["enter_long"] = el.astype(int); d["enter_short"] = es.astype(int)
+        d["sl_price"] = slp; d["tp_price"] = tpp
+        return d
+
+    def populate_exit_trend(self, dataframe, metadata):
+        dataframe["exit_long"] = 0
+        dataframe["exit_short"] = 0
+        return dataframe
+'''
+
+
 def _seed_builtin_strategies(db):
     """Ensure template strategies exist with correct trading configs."""
     from backend.models.strategy import Strategy
@@ -3383,6 +3447,23 @@ def _seed_builtin_strategies(db):
             "code": _GAULS_LIQUIDITY_SWEEP_CODE,
             "stoploss": -0.03,
             "take_profit": 0.06,
+            "leverage": 5,
+            "timeframe": "1h",
+        },
+        {
+            "name": "FiveThirtyFib",
+            "description": "5:30 Candle Fib Breakout — marks the 00:00 UTC daily-open "
+                           "candle (5:30 AM IST) hi/lo. When a later candle CLOSES beyond "
+                           "it with body>wick AND aligned with the EMA-50, it draws a Fib "
+                           "from the day-open level to the breakout extreme: enters on the "
+                           "0.25 retracement, structural stop at the 0.75 level, target 1:2 "
+                           "(per-trade sl_price/tp_price). One setup per UTC day. Works on "
+                           "BTC and gold (XAUT/PAXG). Backtests near-breakeven on BTC 1h "
+                           "(RR~2.0, WR~33%); tune the entry/cutoff per market — not a "
+                           "guaranteed edge.",
+            "code": _FIVE_THIRTY_FIB_CODE,
+            "stoploss": -0.02,
+            "take_profit": 0.04,
             "leverage": 5,
             "timeframe": "1h",
         },
