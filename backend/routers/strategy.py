@@ -45,18 +45,38 @@ class UpdateStrategyRequest(BaseModel):
 
 
 def _get_openrouter_key(db: Session, user_id: str) -> str:
+    """Resolve an OpenRouter key for AI strategy parsing.
+
+    Priority: the user's own key (from Setup) if it's present AND non-empty,
+    otherwise an app-wide OPENROUTER_API_KEY from the server env. This fixes two
+    real failure modes:
+      • an empty/whitespace key saved in Setup used to pass the "configured"
+        check but decrypt to "" — OpenRouter then 401s with "Missing
+        Authentication header". We now treat that as "no user key".
+      • set OPENROUTER_API_KEY once in Railway and AI parsing works for everyone
+        with no per-user setup (and a stale per-user key can't block it)."""
+    user_key = ""
     config = db.execute(
         select(Config).where(Config.user_id == user_id).limit(1)
     ).scalar_one_or_none()
-    if not config or not config.openrouter_key_enc:
-        raise ValueError("OpenRouter key not configured. Visit /setup to add one.")
-    try:
-        return decrypt(config.openrouter_key_enc, user_id)
-    except DecryptError:
-        raise ValueError(
-            "Your OpenRouter API key could not be decrypted (server secret changed). "
-            "Please go to Setup and re-enter your OpenRouter key to continue."
-        )
+    if config and config.openrouter_key_enc:
+        try:
+            user_key = (decrypt(config.openrouter_key_enc, user_id) or "").strip()
+        except DecryptError:
+            user_key = ""   # server secret changed → fall through to env key
+    if user_key:
+        return user_key
+
+    env_key = os.getenv("OPENROUTER_API_KEY", "").strip()
+    if env_key:
+        return env_key
+
+    raise ValueError(
+        "No OpenRouter API key available. Add your key on the Setup page, or set "
+        "OPENROUTER_API_KEY in the server environment (Railway) to enable AI parsing "
+        "for everyone. Tip: you can skip AI entirely — paste code in Strategy Editor "
+        "or pick a built-in Template."
+    )
 
 
 def _get_preferred_model(db: Session, user_id: str) -> str:
