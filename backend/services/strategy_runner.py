@@ -279,10 +279,61 @@ def _build_talib_stub() -> types.ModuleType:
         mat = pd.concat([s.ewm(span=int(p), adjust=False).mean() for p in periods], axis=1)
         return (mat.max(axis=1) - mat.min(axis=1)) / s.replace(0, 1e-9)
 
+    # ── Candlestick patterns (TA-Lib-compatible: +100 bullish, -100 bearish,
+    # 0 none) — confirmation filters for entries, e.g. only take a breakout when
+    # CDLENGULFING(df) > 0. Each accepts a df OR explicit open/high/low/close.
+    def _ohlc(o, h=None, l=None, c=None):
+        if isinstance(o, pd.DataFrame) and h is None:
+            return o["open"], o["high"], o["low"], o["close"]
+        return _to_series(o), _to_series(h), _to_series(l), _to_series(c)
+
+    def _wb(o, h, l, c):
+        """body, lower-wick, upper-wick, range as Series."""
+        body = (c - o).abs()
+        oc_max = pd.concat([o, c], axis=1).max(axis=1)
+        oc_min = pd.concat([o, c], axis=1).min(axis=1)
+        return body, (oc_min - l), (h - oc_max), (h - l).replace(0, 1e-9)
+
+    def CDLENGULFING(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c)
+        pb = c.shift(1) < o.shift(1); pbu = c.shift(1) > o.shift(1)
+        bull = pb & (c > o) & (o <= c.shift(1)) & (c >= o.shift(1))
+        bear = pbu & (c < o) & (o >= c.shift(1)) & (c <= o.shift(1))
+        out = pd.Series(0, index=c.index); out[bull] = 100; out[bear] = -100
+        return out
+
+    def CDLHAMMER(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c)
+        body, low_w, up_w, rng = _wb(o, h, l, c)
+        out = pd.Series(0, index=c.index)
+        out[(low_w >= 2 * body) & (up_w <= body) & (body > 0) & (body / rng < 0.4)] = 100
+        return out
+
+    def CDLSHOOTINGSTAR(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c)
+        body, low_w, up_w, rng = _wb(o, h, l, c)
+        out = pd.Series(0, index=c.index)
+        out[(up_w >= 2 * body) & (low_w <= body) & (body > 0) & (body / rng < 0.4)] = -100
+        return out
+
+    def CDLDOJI(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c)
+        body, _, _, rng = _wb(o, h, l, c)
+        out = pd.Series(0, index=c.index); out[(body / rng) < 0.1] = 100
+        return out
+
+    def CDLINSIDE(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c)
+        out = pd.Series(0, index=c.index)
+        out[(h <= h.shift(1)) & (l >= l.shift(1))] = 100   # inside bar (compression)
+        return out
+
     for name, fn in dict(
         SMA=SMA, EMA=EMA, RSI=RSI, MACD=MACD, BBANDS=BBANDS,
         ATR=ATR, ADX=ADX, STOCH=STOCH, CCI=CCI, WT=WT, VWAP=VWAP,
         EMA_SPREAD=EMA_SPREAD,
+        CDLENGULFING=CDLENGULFING, CDLHAMMER=CDLHAMMER,
+        CDLSHOOTINGSTAR=CDLSHOOTINGSTAR, CDLDOJI=CDLDOJI, CDLINSIDE=CDLINSIDE,
     ).items():
         setattr(mod, name, fn)
     return mod

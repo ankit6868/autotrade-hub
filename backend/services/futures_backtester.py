@@ -2044,6 +2044,77 @@ AUTO_TUNE_TP_GRID = [3.0, 6.0, 10.0]            # TP percentages
 AUTO_TUNE_BUDGET_SECS = 50                       # hard deadline; returns partial
 
 
+def walk_forward_backtest(
+    strategy_name: str,
+    pairs: list[str],
+    timeframe: str,
+    timerange: str,
+    n_windows: int = 4,
+    **bt_kwargs,
+) -> dict:
+    """Out-of-sample robustness check (WolfBot-style walk-forward, simplified).
+
+    Splits `timerange` (YYYYMMDD-YYYYMMDD) into `n_windows` consecutive,
+    non-overlapping windows and runs the SAME strategy on each. A genuine edge
+    holds up across windows; a curve-fit one is positive in one window and
+    negative in others. This is the anti-overfitting tool — it tells you whether
+    a backtest result is real or a mirage BEFORE you risk money.
+
+    Returns per-window results + a verdict (robust / mostly_robust / fragile).
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    try:
+        s_str, e_str = timerange.split("-")
+        start = _dt.strptime(s_str, "%Y%m%d")
+        end = _dt.strptime(e_str, "%Y%m%d")
+    except Exception:
+        return {"error": f"Invalid timerange '{timerange}'. Use YYYYMMDD-YYYYMMDD."}
+    n_windows = max(2, min(12, int(n_windows)))
+    total_days = (end - start).days
+    if total_days < n_windows * 5:
+        return {"error": f"Period too short for {n_windows} windows "
+                         f"({total_days} days). Use a longer range or fewer windows."}
+    seg = total_days // n_windows
+
+    windows = []
+    for k in range(n_windows):
+        ws = start + _td(days=k * seg)
+        we = end if k == n_windows - 1 else start + _td(days=(k + 1) * seg)
+        tr = f"{ws.strftime('%Y%m%d')}-{we.strftime('%Y%m%d')}"
+        r = run_futures_backtest(strategy_name, pairs, timeframe, tr, **bt_kwargs)
+        m = {} if r.get("error") else r.get("metrics", {})
+        windows.append({
+            "window":   k + 1,
+            "timerange": tr,
+            "trades":    m.get("total_trades", 0),
+            "win_rate":  round(m.get("win_rate", 0) * 100, 1),
+            "net_pct":   m.get("total_profit_pct", 0),
+            "max_dd":    m.get("max_drawdown", 0),
+            "error":     r.get("error"),
+        })
+
+    scored = [w for w in windows if w["trades"] > 0]
+    nets = [w["net_pct"] for w in scored]
+    positive = sum(1 for x in nets if x > 0)
+    if not nets:
+        verdict = "insufficient_data"
+    elif positive == len(nets):
+        verdict = "robust"            # positive in EVERY window
+    elif positive >= max(1, round(len(nets) * 0.6)):
+        verdict = "mostly_robust"
+    else:
+        verdict = "fragile_or_overfit"
+    return {
+        "windows":          windows,
+        "windows_scored":   len(scored),
+        "windows_positive": positive,
+        "avg_net_pct":      round(sum(nets) / len(nets), 2) if nets else 0.0,
+        "worst_net_pct":    round(min(nets), 2) if nets else 0.0,
+        "best_net_pct":     round(max(nets), 2) if nets else 0.0,
+        "verdict":          verdict,
+    }
+
+
 def auto_tune_sltp(
     strategy_name:    str,
     pairs:            list[str],

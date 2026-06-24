@@ -832,6 +832,57 @@ def select_desc_json(result: dict) -> str:
     })
 
 
+@router.post("/backtest/walk-forward")
+def backtest_walk_forward(
+    req: dict,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Out-of-sample robustness check. Splits the period into N windows, runs
+    the strategy on each, and returns per-window results + a verdict
+    (robust / mostly_robust / fragile_or_overfit). The anti-overfitting tool:
+    a real edge holds up across windows; a curve-fit one only shines in one."""
+    from sqlalchemy import or_
+    from backend.models.strategy import Strategy
+    from backend.services.futures_backtester import walk_forward_backtest
+
+    pairs            = req.get("pairs", ["BTC/USDT"])
+    timeframe        = req.get("timeframe", "1h")
+    timerange        = req.get("timerange", "20240101-20240601")
+    n_windows        = max(2, min(12, int(req.get("n_windows", 4))))
+    leverage         = min(LEAD_MAX_LEVERAGE, int(req.get("leverage", 5)))
+    stoploss_pct     = float(req.get("stoploss_pct", 2.0))
+    take_profit_pct  = float(req.get("take_profit_pct", 4.0))
+    risk_pct         = max(1, min(50, float(req.get("risk_per_trade_pct", 5))))
+    deduct_costs     = bool(req.get("deduct_real_costs", True))   # honest default ON
+    force_slider     = bool(req.get("force_slider_sltp", False))
+    maker_only_entry = bool(req.get("maker_only_entry", False))
+    vip_tier         = max(0, min(12, int(req.get("vip_tier", 0))))
+    arm_enabled      = bool(req.get("arm_enabled", False))
+
+    strategy_name  = req.get("strategy_name", "SimpleTargetStrategy")
+    generated_code = None
+    sid = req.get("strategy_id")
+    if sid:
+        strat = db.execute(
+            select(Strategy).where(
+                Strategy.id == sid,
+                or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa
+            )
+        ).scalar_one_or_none()
+        if strat:
+            strategy_name  = strat.name
+            generated_code = strat.generated_code
+
+    return walk_forward_backtest(
+        strategy_name, pairs, timeframe, timerange, n_windows=n_windows,
+        leverage=leverage, stoploss_pct=stoploss_pct, take_profit_pct=take_profit_pct,
+        risk_per_trade=risk_pct / 100.0, generated_code=generated_code,
+        deduct_real_costs=deduct_costs, force_slider_sltp=force_slider,
+        maker_only_entry=maker_only_entry, vip_tier=vip_tier, arm_enabled=arm_enabled,
+    )
+
+
 @router.post("/backtest/timeframe-sweep")
 def backtest_timeframe_sweep(
     req: dict,
