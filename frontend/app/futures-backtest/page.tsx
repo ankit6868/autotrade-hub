@@ -137,6 +137,9 @@ function FuturesBacktestInner() {
   const [walking,    setWalking]    = useState(false);
   const [walkResult, setWalkResult] = useState<any>(null);
   const [walkWindows, setWalkWindows] = useState(4);
+  // ── ML loss-filter training ──
+  const [mlTraining, setMlTraining] = useState(false);
+  const [mlResult,   setMlResult]   = useState<any>(null);
   // Per-strategy option controls (CHoCH exit, LDC dynamic-exit / ATR-stops,
   // bar-hold…). Keyed by flag name; falls back to each flag's default.
   const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean | number>>({});
@@ -994,6 +997,25 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
       else setWalkResult(data);
     } catch (e) { setError(friendlyError(e)); }
     setWalking(false);
+  }
+
+  // ── Train an ML loss-filter for the selected strategy ──
+  // Learns which of the strategy's signals tend to lose (meta-labeling) and
+  // reports the out-of-sample lift. Stored ONLY if it passes the walk-forward
+  // gate (filtered beats unfiltered). Pools the selected pairs for more signals.
+  async function trainMlFilter() {
+    if (!strategyId) return;
+    setMlTraining(true); setMlResult(null); setError('');
+    try {
+      const data = await api.futures.ml.train({
+        strategy_id: strategyId,
+        pairs: pairs.length ? pairs : ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'],
+        timeframe,
+      });
+      if (data.error) setError(data.error);
+      else setMlResult(data);
+    } catch (e) { setError(friendlyError(e)); }
+    setMlTraining(false);
   }
 
   // ── Timeframe comparison sweep ──
@@ -2099,7 +2121,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
             {sweeping ? '⏱ Comparing 5m·15m·1h·4h…' : '⏱ Compare Timeframes'}
           </button>
           <button onClick={runWalkForward}
-            disabled={running || tuning || sweeping || walking || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
+            disabled={running || tuning || sweeping || walking || mlTraining || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
             className="px-5 py-3 rounded-xl text-sm font-semibold border border-violet-500/40 bg-violet-500/10 text-violet-200 hover:bg-violet-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
             title="Out-of-sample robustness: splits the period into N windows and runs the strategy on each, using your current settings (incl. the costs toggle). A real edge is positive across MOST windows; a curve-fit one only shines in one. The anti-overfitting check — run this before trusting any result.">
             {walking ? `🧪 Walk-forward (${walkWindows} windows)…` : '🧪 Walk-forward test'}
@@ -2110,7 +2132,62 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
               onChange={(e) => setWalkWindows(Math.max(2, Math.min(12, Number(e.target.value) || 4)))}
               className="w-14 px-2 py-1.5 rounded bg-[#0f1729] border border-[#2a3a52] text-xs text-slate-100" />
           </label>
+          <button onClick={trainMlFilter}
+            disabled={running || tuning || sweeping || walking || mlTraining || !strategyId}
+            className="px-5 py-3 rounded-xl text-sm font-semibold border border-fuchsia-500/40 bg-fuchsia-500/10 text-fuchsia-200 hover:bg-fuchsia-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Train a per-strategy ML loss-filter (meta-labeling): it learns which of THIS strategy's signals tend to lose and skips them. Pools the selected pairs. Stored ONLY if it beats unfiltered out-of-sample (walk-forward gate). Takes ~30-60s (fetches data + trains).">
+            {mlTraining ? '🧠 Training ML filter…' : '🧠 Train ML filter'}
+          </button>
         </div>
+
+        {/* ML loss-filter training report */}
+        {mlResult && (
+          <div className="mt-5 rounded-xl border border-fuchsia-500/30 bg-fuchsia-500/[0.06] p-4">
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+              <h3 className="text-sm font-bold text-fuchsia-200">🧠 ML loss-filter result</h3>
+              {mlResult.ok && (
+                <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                  mlResult.verdict === 'PASS' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-rose-500/20 text-rose-300'}`}>
+                  {mlResult.verdict}{mlResult.stored ? ' · SAVED' : ''}
+                </span>
+              )}
+            </div>
+            {!mlResult.ok ? (
+              <p className="text-[11px] text-amber-300">{mlResult.reason || 'Not enough signals to train (need ~120+). Use more pairs or a longer range / higher-frequency strategy.'}</p>
+            ) : (
+              <>
+                <p className="text-[11px] text-slate-400 mb-3">
+                  {mlResult.signals} signals · base win rate {mlResult.base_win_rate}% ·
+                  aggregate <b className="text-slate-300">unfiltered {mlResult.agg_unfiltered_net >= 0 ? '+' : ''}{mlResult.agg_unfiltered_net}%</b> →
+                  <b className={mlResult.agg_filtered_net >= mlResult.agg_unfiltered_net ? 'text-emerald-300' : 'text-rose-300'}> filtered {mlResult.agg_filtered_net >= 0 ? '+' : ''}{mlResult.agg_filtered_net}%</b> ·
+                  {mlResult.windows_better}/{mlResult.windows_total} windows improved.
+                  {mlResult.verdict === 'PASS'
+                    ? (mlResult.stored ? ' ✓ Saved — enable it on the bot to use live.' : ' ✓ Beats unfiltered.')
+                    : ' ✗ Did not beat unfiltered out-of-sample — not saved (honest).'}
+                </p>
+                <div className="overflow-x-auto rounded-lg border border-[#2a3a52]">
+                  <table className="w-full text-[11px]">
+                    <thead className="text-slate-500 bg-[#0f1830]">
+                      <tr><th className="text-left p-2">Window</th><th className="p-2">Test signals</th><th className="p-2">Kept</th><th className="p-2">Unfiltered</th><th className="p-2">Filtered</th><th className="p-2">Δ</th></tr>
+                    </thead>
+                    <tbody>
+                      {(mlResult.windows || []).map((w: any) => (
+                        <tr key={w.window} className="border-t border-white/[0.04]">
+                          <td className="p-2 text-slate-300">W{w.window}</td>
+                          <td className="p-2 text-center text-slate-400">{w.test_signals}</td>
+                          <td className="p-2 text-center text-slate-400">{w.kept}</td>
+                          <td className={`p-2 text-center font-mono ${w.unfiltered_net >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{w.unfiltered_net >= 0 ? '+' : ''}{w.unfiltered_net}%</td>
+                          <td className={`p-2 text-center font-mono ${w.filtered_net >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>{w.filtered_net >= 0 ? '+' : ''}{w.filtered_net}%</td>
+                          <td className={`p-2 text-center font-mono font-semibold ${w.improvement >= 0 ? 'text-emerald-300' : 'text-rose-300'}`}>{w.improvement >= 0 ? '+' : ''}{w.improvement}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </div>
+        )}
 
         {/* Walk-forward results */}
         {walkResult && (

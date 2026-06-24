@@ -389,6 +389,15 @@ export const api = {
       history: (limit = 20) =>
         request<any>(`/api/futures/backtest/history?limit=${limit}`),
     },
+    // Universal ML loss-filter — per-strategy take/skip meta-model.
+    ml: {
+      // Long-running: fetches data + trains LightGBM + walk-forward gate.
+      train: (data: Record<string, unknown>) =>
+        requestLongRunning<any>('/api/futures/ml/train', { method: 'POST', body: JSON.stringify(data) }),
+      models: () => request<{ models: { strategy_id: number; context: string; verdict: string; signals: number; enabled: boolean; created_at: string }[] }>('/api/futures/ml/models'),
+      toggle: (strategy_id: number, enabled: boolean) =>
+        request<any>('/api/futures/ml/toggle', { method: 'POST', body: JSON.stringify({ strategy_id, enabled }) }),
+    },
     // Live verified results — REAL closed-trade P&L per bot (not backtests).
     dashboard: () => request<{
       today_pnl: { paper: number; live: number };
