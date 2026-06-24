@@ -268,9 +268,21 @@ def _build_talib_stub() -> types.ModuleType:
             return pv.groupby(day).cumsum() / v.groupby(day).cumsum().replace(0, 1e-9)
         return pv.cumsum() / v.cumsum().replace(0, 1e-9)
 
+    def EMA_SPREAD(close, periods=(20, 50, 100, 200)):
+        """EMA compression / 'gate' detector. Returns the normalized spread of
+        several EMAs: (max_ema - min_ema) / close, per bar. SMALL = the EMAs are
+        tightly bunched (a compression 'gate' before a breakout); large = fanned
+        out (trending). Quantifies the otherwise-subjective 'EMAs stuck together'
+        rule — e.g. a gate is `ta.EMA_SPREAD(df["close"]) < 0.004` (within 0.4%).
+        Accepts a df (uses its close) or a close series/array, and any EMA set."""
+        s = _to_series(close["close"] if isinstance(close, pd.DataFrame) else close)
+        mat = pd.concat([s.ewm(span=int(p), adjust=False).mean() for p in periods], axis=1)
+        return (mat.max(axis=1) - mat.min(axis=1)) / s.replace(0, 1e-9)
+
     for name, fn in dict(
         SMA=SMA, EMA=EMA, RSI=RSI, MACD=MACD, BBANDS=BBANDS,
         ATR=ATR, ADX=ADX, STOCH=STOCH, CCI=CCI, WT=WT, VWAP=VWAP,
+        EMA_SPREAD=EMA_SPREAD,
     ).items():
         setattr(mod, name, fn)
     return mod
@@ -780,6 +792,19 @@ def make_signal_fn_from_df(df: pd.DataFrame, leverage: int,
     sl_col  = df["sl_price"].to_numpy()  if "sl_price"  in df.columns else None
     tp_col  = df["tp_price"].to_numpy()  if "tp_price"  in df.columns else None
     tp2_col = df["tp2_price"].to_numpy() if "tp2_price" in df.columns else None
+    # Optional strategy-specified EXACT entry level (e.g. the 10-EMA, or a Fib
+    # 0.25 retracement). When populated, the engine treats it as a limit price:
+    # combined with maker-only entry it fills at this exact level if the bar
+    # touched it — instead of approximating with the signal bar's close. Lets
+    # "enter at <level>" strategies backtest at the price they'd really fill.
+    entry_col = df["entry_price"].to_numpy() if "entry_price" in df.columns else None
+
+    def _entry_price_at(i: int, fallback: float) -> float:
+        if entry_col is not None and i < len(entry_col):
+            ev = entry_col[i]
+            if ev is not None and not (isinstance(ev, float) and np.isnan(ev)) and float(ev) > 0:
+                return float(ev)
+        return fallback
 
     def _structural_or_slider(entry: float, direction: str, i: int):
         """Return (sl, tp1, tp2_or_None) for this bar — structural if the
@@ -835,7 +860,7 @@ def make_signal_fn_from_df(df: pd.DataFrame, leverage: int,
         if enter_long is not None and i < len(enter_long) and enter_long[i]:
             prev = enter_long[i - 1] if i > 0 else 0
             if not prev:
-                entry = float(_df.iloc[i]["close"])
+                entry = _entry_price_at(i, float(_df.iloc[i]["close"]))
                 sl, tp1, tp2 = _structural_or_slider(entry, "long", i)
                 if tp2 is not None:
                     return entry, sl, tp1, tp2, "long"
@@ -843,7 +868,7 @@ def make_signal_fn_from_df(df: pd.DataFrame, leverage: int,
         if enter_short is not None and i < len(enter_short) and enter_short[i]:
             prev = enter_short[i - 1] if i > 0 else 0
             if not prev:
-                entry = float(_df.iloc[i]["close"])
+                entry = _entry_price_at(i, float(_df.iloc[i]["close"]))
                 sl, tp1, tp2 = _structural_or_slider(entry, "short", i)
                 if tp2 is not None:
                     return entry, sl, tp1, tp2, "short"
