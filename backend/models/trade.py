@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Text, Float, Boolean, DateTime, ForeignKey, CheckConstraint, Index
+from sqlalchemy import Column, Integer, Text, Float, Boolean, DateTime, ForeignKey, CheckConstraint, Index, LargeBinary
 from sqlalchemy.sql import func
 from .database import Base
 
@@ -160,6 +160,26 @@ class StrategyInstance(Base):
     guard_cooldown_min = Column(Integer, default=60)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class MLFilterModel(Base):
+    """Trained per-strategy ML loss-filter (meta-labeling take/skip model).
+    Stored only when it PASSES the walk-forward gate. The engine/backtester load
+    the latest passing model for a (user, strategy) and skip low-confidence
+    signals. model_blob = joblib-serialized {model, features, mu, sd, conf}."""
+    __tablename__ = "ml_filter_models"
+
+    id           = Column(Integer, primary_key=True)
+    user_id      = Column(Text, nullable=False, index=True)
+    strategy_id  = Column(Integer, ForeignKey("strategies.id"), index=True)
+    context      = Column(Text)             # e.g. "BTC,ETH,SOL · 1h"
+    model_blob   = Column(LargeBinary)       # joblib bytes
+    metrics      = Column(Text)              # JSON: walk-forward report
+    verdict      = Column(Text)              # "PASS" / "FAIL"
+    signals      = Column(Integer)           # # training signals
+    conf         = Column(Float, default=0.55)
+    enabled      = Column(Boolean, default=False)   # user opt-in to use it live
+    created_at   = Column(DateTime, server_default=func.now())
 
 
 class FuturesOrder(Base):

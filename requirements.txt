@@ -30,6 +30,11 @@ numpy==2.2.1
 pandas==2.2.3
 pyarrow==18.1.0       # required by pandas for feather/parquet I/O
 
+# ML loss-filter (meta-labeling) — per-strategy take/skip model. Imported
+# lazily (only when training/scoring), so the app still boots if absent.
+lightgbm==4.6.0
+joblib==1.4.2
+
 # Security
 cryptography==44.0.0
 

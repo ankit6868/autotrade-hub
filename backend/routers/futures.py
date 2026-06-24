@@ -709,6 +709,74 @@ def futures_dashboard(
     }
 
 
+# ── ML Loss-Filter (per-strategy take/skip meta-model) ───────────────────────
+
+@router.post("/ml/train")
+def ml_train(req: dict, db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
+    """Train a per-strategy ML loss-filter and store it ONLY if it passes the
+    walk-forward gate (filtered must beat unfiltered out-of-sample). Returns the
+    improvement report. Long-running (fetches data + trains)."""
+    import json as _json
+    from sqlalchemy import or_, delete
+    from backend.models.strategy import Strategy
+    from backend.models.trade import MLFilterModel
+    from backend.services import ml_filter as mlf
+
+    sid = req.get("strategy_id")
+    pairs = req.get("pairs") or ["BTC/USDT", "ETH/USDT", "SOL/USDT"]
+    tf = req.get("timeframe", "1h")
+    if not sid:
+        raise HTTPException(status_code=400, detail="strategy_id required")
+    strat = db.execute(select(Strategy).where(
+        Strategy.id == sid, or_(Strategy.user_id == user_id, Strategy.is_template == True))  # noqa
+    ).scalar_one_or_none()
+    if not strat or not strat.generated_code:
+        raise HTTPException(status_code=404, detail="strategy not found or has no code to train on")
+
+    res = mlf.train_strategy_filter(strat.generated_code, pairs, tf)
+    report = {k: v for k, v in res.items() if k != "model_bytes"}
+    if res.get("ok") and res.get("verdict") == "PASS" and res.get("model_bytes"):
+        db.execute(delete(MLFilterModel).where(
+            MLFilterModel.user_id == user_id, MLFilterModel.strategy_id == sid))
+        db.add(MLFilterModel(
+            user_id=user_id, strategy_id=sid, context=res.get("context"),
+            model_blob=res["model_bytes"], metrics=_json.dumps(report), verdict="PASS",
+            signals=res.get("signals"), conf=res.get("conf", 0.55), enabled=False))
+        db.commit()
+        report["stored"] = True
+    else:
+        report["stored"] = False
+    return report
+
+
+@router.get("/ml/models")
+def ml_models(db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
+    from backend.models.trade import MLFilterModel
+    rows = db.execute(
+        select(MLFilterModel.strategy_id, MLFilterModel.context, MLFilterModel.verdict,
+               MLFilterModel.signals, MLFilterModel.enabled, MLFilterModel.created_at)
+        .where(MLFilterModel.user_id == user_id)
+    ).all()
+    return {"models": [{
+        "strategy_id": r[0], "context": r[1], "verdict": r[2], "signals": r[3],
+        "enabled": bool(r[4]), "created_at": str(r[5]),
+    } for r in rows]}
+
+
+@router.post("/ml/toggle")
+def ml_toggle(req: dict, db: Session = Depends(get_db), user_id: str = Depends(get_user_id)):
+    from sqlalchemy import update
+    from backend.models.trade import MLFilterModel
+    sid = req.get("strategy_id")
+    enabled = bool(req.get("enabled", True))
+    if not sid:
+        raise HTTPException(status_code=400, detail="strategy_id required")
+    db.execute(update(MLFilterModel).where(
+        MLFilterModel.user_id == user_id, MLFilterModel.strategy_id == sid).values(enabled=enabled))
+    db.commit()
+    return {"ok": True, "enabled": enabled}
+
+
 # ── Futures Backtest ─────────────────────────────────────────────────────────
 
 @router.post("/backtest/run")
