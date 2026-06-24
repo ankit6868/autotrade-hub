@@ -382,6 +382,10 @@ export const api = {
       // cherry-pick the best number). Long-running: each TF is a full backtest.
       timeframeSweep: (data: Record<string, unknown>) =>
         requestLongRunning<any>('/api/futures/backtest/timeframe-sweep', { method: 'POST', body: JSON.stringify(data) }),
+      // Out-of-sample robustness: splits the period into N windows, runs the
+      // strategy on each, returns per-window results + a robust/fragile verdict.
+      walkForward: (data: Record<string, unknown>) =>
+        requestLongRunning<any>('/api/futures/backtest/walk-forward', { method: 'POST', body: JSON.stringify(data) }),
       history: (limit = 20) =>
         request<any>(`/api/futures/backtest/history?limit=${limit}`),
     },

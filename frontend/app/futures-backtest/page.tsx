@@ -133,6 +133,10 @@ function FuturesBacktestInner() {
   // ── Timeframe comparison sweep (exploration tool) ──
   const [sweeping,    setSweeping]    = useState(false);
   const [sweepResult, setSweepResult] = useState<any>(null);
+  // ── Walk-forward (out-of-sample robustness check) ──
+  const [walking,    setWalking]    = useState(false);
+  const [walkResult, setWalkResult] = useState<any>(null);
+  const [walkWindows, setWalkWindows] = useState(4);
   // Per-strategy option controls (CHoCH exit, LDC dynamic-exit / ATR-stops,
   // bar-hold…). Keyed by flag name; falls back to each flag's default.
   const [strategyFlags, setStrategyFlags] = useState<Record<string, boolean | number>>({});
@@ -959,6 +963,37 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
       }
     } catch (e) { setError(friendlyError(e)); }
     setRunning(false);
+  }
+
+  // ── Walk-forward robustness test ──
+  // Splits the SAME settings across N consecutive windows. A real edge holds up
+  // across windows; a curve-fit one only shines in one. Uses whatever cost /
+  // ARM / SL-TP settings are currently selected (incl. the costs toggle).
+  async function runWalkForward() {
+    if (!strategyId) return;
+    setWalking(true); setWalkResult(null); setError('');
+    const activeRange = selectedPreset === 'Custom' ? customRange : timerange;
+    try {
+      const data = await api.futures.backtest.walkForward({
+        strategy_id:        strategyId,
+        pairs,
+        timeframe,
+        timerange:          activeRange,
+        n_windows:          walkWindows,
+        leverage,
+        stoploss_pct:       stoploss,
+        take_profit_pct:    takeProfit,
+        risk_per_trade_pct: riskPerTrade,
+        force_slider_sltp:  sltpMode === 'slider',
+        deduct_real_costs:  deductCosts,   // respects the UI "Include real trading costs" toggle
+        arm_enabled:        armEnabled,
+        maker_only_entry:   makerOnlyEntry,
+        vip_tier:           vipTier,
+      });
+      if (data.error) setError(data.error);
+      else setWalkResult(data);
+    } catch (e) { setError(friendlyError(e)); }
+    setWalking(false);
   }
 
   // ── Timeframe comparison sweep ──
@@ -2058,12 +2093,70 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
             {tuning ? '🔬 Auto-tuning (20 runs)…' : '🔬 Auto-tune SL/TP'}
           </button>
           <button onClick={runSweep}
-            disabled={running || tuning || sweeping || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
+            disabled={running || tuning || sweeping || walking || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
             className="px-5 py-3 rounded-xl text-sm font-semibold border border-sky-500/40 bg-sky-500/10 text-sky-200 hover:bg-sky-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
             title="Run this strategy across 5m / 15m / 1h / 4h and compare — to see which timeframe it's suited to. Exploration only: pick a CONSISTENTLY good TF, don't cherry-pick the best number. Takes a few minutes (4 full backtests).">
             {sweeping ? '⏱ Comparing 5m·15m·1h·4h…' : '⏱ Compare Timeframes'}
           </button>
+          <button onClick={runWalkForward}
+            disabled={running || tuning || sweeping || walking || !strategyId || (selectedPreset === 'Custom' && (!customRange || customRange.length < 17))}
+            className="px-5 py-3 rounded-xl text-sm font-semibold border border-violet-500/40 bg-violet-500/10 text-violet-200 hover:bg-violet-500/20 disabled:opacity-40 disabled:cursor-not-allowed"
+            title="Out-of-sample robustness: splits the period into N windows and runs the strategy on each, using your current settings (incl. the costs toggle). A real edge is positive across MOST windows; a curve-fit one only shines in one. The anti-overfitting check — run this before trusting any result.">
+            {walking ? `🧪 Walk-forward (${walkWindows} windows)…` : '🧪 Walk-forward test'}
+          </button>
+          <label className="text-[11px] text-slate-400 flex items-center gap-1">
+            windows
+            <input type="number" min={2} max={12} value={walkWindows}
+              onChange={(e) => setWalkWindows(Math.max(2, Math.min(12, Number(e.target.value) || 4)))}
+              className="w-14 px-2 py-1.5 rounded bg-[#0f1729] border border-[#2a3a52] text-xs text-slate-100" />
+          </label>
         </div>
+
+        {/* Walk-forward results */}
+        {walkResult && (
+          <div className="mt-5 rounded-xl border border-violet-500/30 bg-violet-500/[0.06] p-4">
+            <div className="flex items-center justify-between flex-wrap gap-2 mb-2">
+              <h3 className="text-sm font-bold text-violet-200">🧪 Walk-forward robustness</h3>
+              <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full ${
+                walkResult.verdict === 'robust' ? 'bg-emerald-500/20 text-emerald-300'
+                : walkResult.verdict === 'mostly_robust' ? 'bg-amber-500/20 text-amber-300'
+                : 'bg-rose-500/20 text-rose-300'}`}>
+                {String(walkResult.verdict || '').replace(/_/g, ' ').toUpperCase()}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-400 mb-3">
+              {walkResult.windows_positive}/{walkResult.windows_scored} windows positive ·
+              avg {walkResult.avg_net_pct >= 0 ? '+' : ''}{walkResult.avg_net_pct}% ·
+              worst {walkResult.worst_net_pct}% · best {walkResult.best_net_pct}%.
+              {walkResult.verdict === 'fragile_or_overfit'
+                ? ' ⚠️ The edge is concentrated in a few windows — likely overfit. Don\'t size up.'
+                : walkResult.verdict === 'robust'
+                ? ' ✓ Positive in every window — this edge holds up.'
+                : ' Positive in most windows — decent, but watch the losing ones.'}
+            </p>
+            <div className="overflow-x-auto rounded-lg border border-[#2a3a52]">
+              <table className="w-full text-[11px]">
+                <thead className="text-slate-500 bg-[#0f1830]">
+                  <tr><th className="text-left p-2">Window</th><th className="p-2">Period</th><th className="p-2">Trades</th><th className="p-2">Win rate</th><th className="p-2">Net</th><th className="p-2">Max DD</th></tr>
+                </thead>
+                <tbody>
+                  {(walkResult.windows || []).map((w: any) => (
+                    <tr key={w.window} className="border-t border-white/[0.04]">
+                      <td className="p-2 text-slate-300">W{w.window}</td>
+                      <td className="p-2 text-center text-slate-500">{w.timerange}</td>
+                      <td className="p-2 text-center text-slate-400">{w.trades}</td>
+                      <td className="p-2 text-center text-slate-400">{w.win_rate}%</td>
+                      <td className={`p-2 text-center font-semibold ${w.net_pct >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {w.net_pct >= 0 ? '+' : ''}{w.net_pct}%
+                      </td>
+                      <td className="p-2 text-center text-slate-500">{w.max_dd}%</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
 
         {/* Summary row */}
         {!running && strategyId && (
