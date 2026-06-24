@@ -6490,6 +6490,11 @@ def create_futures_bot(
     arm_be_buffer_pct = max(0.0, min(10.0,   float(req.get("arm_be_buffer_pct", 1.0))))
     arm_trail_to_tp1  = bool(req.get("arm_trail_to_tp1", True))
 
+    # Consecutive-loss adaptive cooldown guardrail (per-bot config)
+    guard_enabled      = bool(req.get("guard_enabled", True))
+    guard_max_consec   = max(2, min(20, int(req.get("guard_max_consec", 5))))
+    guard_cooldown_min = max(5, min(1440, int(req.get("guard_cooldown_min", 60))))
+
     # Phase 8 — Cooldown / max-trades-per-day / daily DD trip.
     # Defaults follow the validator's TRADE_LIMIT_DEFAULT: when the
     # strategy doesn't declare its own max_trades_per_day, the bot uses
@@ -6748,6 +6753,10 @@ def create_futures_bot(
         force_slider_sltp    = force_slider_sltp,
         # Paper-mode cost realism — persist so auto-resume keeps it on.
         paper_sim_costs      = paper_sim_costs,
+        # Consecutive-loss adaptive cooldown guardrail — persist for auto-resume.
+        guard_enabled        = guard_enabled,
+        guard_max_consec     = guard_max_consec,
+        guard_cooldown_min   = guard_cooldown_min,
     )
     db.add(instance)
     db.commit()
@@ -6795,6 +6804,9 @@ def create_futures_bot(
         force_slider_sltp    = force_slider_sltp,
         paper_sim_costs      = paper_sim_costs,
         strategy_flags       = strategy_flags,
+        guard_enabled        = guard_enabled,
+        guard_max_consec     = guard_max_consec,
+        guard_cooldown_min   = guard_cooldown_min,
     )
 
     log_event(db, user_id, "futures.create_bot", request, payload={

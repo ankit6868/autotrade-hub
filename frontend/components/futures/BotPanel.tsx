@@ -5,6 +5,13 @@ import { useVisibleInterval } from '@/lib/useVisibleInterval';
 import StrategyPreview from './StrategyPreview';
 import { STRATEGY_FLAGS, type StratFlag } from '@/lib/strategyFlags';
 
+/** Minutes left on a Risk-Guard cooldown from its ISO end timestamp. */
+function guardMinsLeft(iso?: string | null): number {
+  if (!iso) return 0;
+  const ms = new Date(iso).getTime() - Date.now();
+  return ms > 0 ? Math.ceil(ms / 60000) : 0;
+}
+
 interface Props {
   pair: string;
   mode: 'paper' | 'live';
@@ -457,6 +464,13 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
                 </div>
               </div>
 
+              {/* Risk Guard cooldown badge */}
+              {bot.guard_state === 'cooldown' && (
+                <div className="mt-2 px-1.5 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-[9px] text-amber-300 font-medium">
+                  ⏸ Risk Guard cooldown{guardMinsLeft(bot.guard_cooldown_until) ? ` — ${guardMinsLeft(bot.guard_cooldown_until)}m left` : ''} (loss streak — new entries paused)
+                </div>
+              )}
+
               {/* Signal / Last action */}
               <div className="mt-2 p-1.5 rounded bg-[#131722] border border-white/[0.03]">
                 <div className="flex items-center gap-1.5">
@@ -695,6 +709,10 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   // as overridable inputs; 0 / blank = use strategy default.
   const [maxTradesPerDay, setMaxTradesPerDay] = useState<number | ''>('');
   const [cooldownCandles, setCooldownCandles] = useState<number | ''>('');
+  // Consecutive-loss adaptive cooldown guardrail
+  const [guardEnabled,     setGuardEnabled]     = useState(true);
+  const [guardMaxConsec,   setGuardMaxConsec]   = useState(5);
+  const [guardCooldownMin, setGuardCooldownMin] = useState(60);
   // Region / session preset → maps to UTC hours sent as session_start_hr_utc /
   // session_end_hr_utc. Lets the user pick "NY", "London", "Tokyo", or "24/7"
   // instead of having to know the UTC hour ranges. PDF §6 lists NY as the
@@ -919,6 +937,10 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         arm_be_mode:        armBeMode,
         arm_be_buffer_pct:  armBeBufferPct,
         arm_trail_to_tp1:   armTrailToTp1,
+        // Consecutive-loss adaptive cooldown guardrail.
+        guard_enabled:      guardEnabled,
+        guard_max_consec:   guardMaxConsec,
+        guard_cooldown_min: guardCooldownMin,
         // Trade-limits override (when blank, backend uses validator's
         // mode-based default per PDF §7 safe-defaults table).
         ...(maxTradesPerDay !== '' ? { max_trades_per_day: maxTradesPerDay } : {}),
@@ -1254,6 +1276,44 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                   <span className="text-emerald-400 font-medium">{((parseFloat(investment) || availableBalance || 1000) * maxPositionPct / 100 * leverage).toFixed(2)} USDT position</span>
                 </div>
               </div>
+            </div>
+
+            {/* Risk Guard — consecutive-loss adaptive cooldown. Pauses NEW
+                entries after a losing streak, then resumes (open positions stay
+                managed). Stops the bot trading into a hostile market. */}
+            <div className="rounded-lg border border-[#2a3a52] p-2.5">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={guardEnabled}
+                  onChange={e => setGuardEnabled(e.target.checked)}
+                  className="accent-amber-500 w-3.5 h-3.5"
+                />
+                <span className="text-xs font-bold text-white">🛡️ Risk Guard — loss-streak cooldown</span>
+                <span className="text-[8px] font-medium px-1.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 ml-auto">
+                  {guardEnabled ? 'on' : 'off'}
+                </span>
+              </label>
+              <p className="text-[10px] text-slate-500 mt-1 leading-snug">
+                After <b className="text-amber-300">{guardMaxConsec}</b> losses in a row, pause new entries for{' '}
+                <b className="text-amber-300">{guardCooldownMin}m</b>, then resume. Open trades keep their SL/TP.
+              </p>
+              {guardEnabled && (
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <label className="text-[10px] text-slate-400">
+                    Losses → cooldown
+                    <input type="number" min={2} max={20} value={guardMaxConsec}
+                      onChange={e => setGuardMaxConsec(Math.max(2, Math.min(20, Number(e.target.value) || 5)))}
+                      className="block mt-1 w-full px-2 py-1.5 rounded bg-[#0f1729] border border-[#2a3a52] text-xs text-slate-100" />
+                  </label>
+                  <label className="text-[10px] text-slate-400">
+                    Cooldown (minutes)
+                    <input type="number" min={5} max={1440} value={guardCooldownMin}
+                      onChange={e => setGuardCooldownMin(Math.max(5, Math.min(1440, Number(e.target.value) || 60)))}
+                      className="block mt-1 w-full px-2 py-1.5 rounded bg-[#0f1729] border border-[#2a3a52] text-xs text-slate-100" />
+                  </label>
+                </div>
+              )}
             </div>
 
             {/* Advanced Risk Management — port of the futures-backtest ARM panel.
