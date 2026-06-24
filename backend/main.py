@@ -3494,6 +3494,89 @@ class FiveThirtyFibPure(IStrategy):
 '''
 
 
+# EMA Gate — EMA(20/50/100/200) compression "gate" breakout. When the EMAs bunch
+# tight (EMA_SPREAD < 0.6%) a gate forms; we SKIP the first breakout and enter
+# the SECOND one AT the 10-EMA (precise entry_price limit), SL below the 20-EMA,
+# big 1:3 target. The 1h-200-EMA sets directional bias (only buy-side breakouts
+# above it, only breakdowns below). Very selective / low-frequency. Best on 1H.
+_EMA_GATE_CODE = '''
+import pandas as pd
+import numpy as np
+import talib as ta
+from freqtrade.strategy import IStrategy
+
+class EmaGate(IStrategy):
+    timeframe = "1h"
+
+    def populate_indicators(self, dataframe, metadata):
+        d = dataframe
+        d["e10"]  = ta.EMA(d["close"], timeperiod=10)
+        d["e20"]  = ta.EMA(d["close"], timeperiod=20)
+        d["e50"]  = ta.EMA(d["close"], timeperiod=50)
+        d["e100"] = ta.EMA(d["close"], timeperiod=100)
+        d["e200"] = ta.EMA(d["close"], timeperiod=200)
+        d["spread"] = ta.EMA_SPREAD(d["close"], (20, 50, 100, 200))
+        try:
+            dt = pd.to_datetime(d["date"], utc=True)
+            s = pd.Series(d["close"].values, index=dt)
+            h1 = s.resample("1h").last().ffill()
+            e2h = h1.ewm(span=200, adjust=False).mean()
+            d["bias"] = e2h.reindex(dt, method="ffill").values
+        except Exception:
+            d["bias"] = d["e200"].values
+        return d
+
+    def populate_entry_trend(self, dataframe, metadata):
+        d = dataframe
+        n = len(d)
+        c = d["close"].values; lo = d["low"].values; hi = d["high"].values
+        e10 = d["e10"].values; e20 = d["e20"].values; e50 = d["e50"].values
+        e100 = d["e100"].values; e200 = d["e200"].values
+        sp = d["spread"].values; bias = d["bias"].values
+        el = np.zeros(n); es = np.zeros(n)
+        slp = np.full(n, np.nan); epx = np.full(n, np.nan); tpp = np.full(n, np.nan)
+        GATE = 0.006        # EMA(20/50/100/200) spread < 0.6% = compression gate
+        gate_seen = False; up = 0; dn = 0; armed = None
+        for i in range(1, n):
+            if np.isnan(sp[i]) or np.isnan(e200[i]):
+                continue
+            gtop = max(e20[i], e50[i], e100[i], e200[i])
+            gbot = min(e20[i], e50[i], e100[i], e200[i])
+            if sp[i] < GATE:                      # inside the gate -> wait for breakout
+                gate_seen = True; up = 0; dn = 0; armed = None
+                continue
+            if not gate_seen:
+                continue
+            above = c[i] > bias[i]                 # 1h-200-EMA bias
+            if c[i] > gtop and above:              # bullish breakouts
+                if c[i - 1] <= gtop:
+                    up += 1
+                if up >= 2:                        # arm on the SECOND breakout
+                    armed = "long"
+            if c[i] < gbot and (not above):        # bearish breakdowns
+                if c[i - 1] >= gbot:
+                    dn += 1
+                if dn >= 2:
+                    armed = "short"
+            if armed == "long" and lo[i] <= e10[i] and c[i] > e20[i]:
+                e = e10[i]; s = e20[i] * 0.999     # enter at 10-EMA, SL below 20-EMA
+                el[i] = 1; epx[i] = e; slp[i] = s; tpp[i] = e + 3 * (e - s)
+                gate_seen = False; armed = None; up = 0
+            elif armed == "short" and hi[i] >= e10[i] and c[i] < e20[i]:
+                e = e10[i]; s = e20[i] * 1.001
+                es[i] = 1; epx[i] = e; slp[i] = s; tpp[i] = e - 3 * (s - e)
+                gate_seen = False; armed = None; dn = 0
+        d["enter_long"] = el.astype(int); d["enter_short"] = es.astype(int)
+        d["entry_price"] = epx; d["sl_price"] = slp; d["tp_price"] = tpp
+        return d
+
+    def populate_exit_trend(self, dataframe, metadata):
+        dataframe["exit_long"] = 0
+        dataframe["exit_short"] = 0
+        return dataframe
+'''
+
+
 def _seed_builtin_strategies(db):
     """Ensure template strategies exist with correct trading configs."""
     from backend.models.strategy import Strategy
@@ -3548,6 +3631,22 @@ def _seed_builtin_strategies(db):
             "code": _FIVE_THIRTY_FIB_PURE_CODE,
             "stoploss": -0.02,
             "take_profit": 0.04,
+            "leverage": 5,
+            "timeframe": "1h",
+        },
+        {
+            "name": "EmaGate",
+            "description": "EMA Gate — EMA(20/50/100/200) compression breakout. When the "
+                           "EMAs bunch tight (a 'gate'), SKIP the first breakout and enter "
+                           "the SECOND one AT the 10-EMA (precise limit entry), SL below "
+                           "the 20-EMA, big 1:3 target. The 1h-200-EMA sets directional "
+                           "bias (buys only above it, breakdowns only below). Very "
+                           "selective / low-frequency (~2-3 trades/mo). Walk-forward on "
+                           "BTC 1h: mostly_robust (3/4 windows positive, tiny drawdown). "
+                           "Best on 1H; loses on 15m + gold. Verify forward before sizing.",
+            "code": _EMA_GATE_CODE,
+            "stoploss": -0.02,
+            "take_profit": 0.06,
             "leverage": 5,
             "timeframe": "1h",
         },
