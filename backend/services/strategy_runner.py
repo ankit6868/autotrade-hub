@@ -440,6 +440,262 @@ def _build_talib_stub() -> types.ModuleType:
                 st[i], trend[i] = (flb[i], 1) if cv[i] >= flb[i] else (fub[i], -1)
         return pd.Series(st, index=c.index), pd.Series(trend, index=c.index)
 
+    # ── Extended set 2 — MAs, momentum, trend, volume, stats, Fib ──
+    def TRIMA(close, timeperiod=30):
+        s = _to_series(close); half = (int(timeperiod) + 1) // 2
+        return s.rolling(half).mean().rolling(half).mean()
+
+    def VWMA(close, volume=None, timeperiod=20):
+        if isinstance(close, pd.DataFrame) and volume is None:
+            c, v = close["close"], close["volume"]
+        else:
+            c, v = _to_series(close), _to_series(volume)
+        return (c * v).rolling(timeperiod).sum() / v.rolling(timeperiod).sum().replace(0, 1e-9)
+
+    def ZLEMA(close, timeperiod=20):
+        s = _to_series(close); lag = (int(timeperiod) - 1) // 2
+        return (s + (s - s.shift(lag))).ewm(span=timeperiod, adjust=False).mean()
+
+    def KAMA(close, timeperiod=10, fast=2, slow=30):
+        s = _to_series(close); n = int(timeperiod); vals = s.values; m = len(vals)
+        chg = (s - s.shift(n)).abs(); vol = s.diff().abs().rolling(n).sum()
+        er = (chg / vol.replace(0, 1e-9)).fillna(0).values
+        sc = (er * (2 / (fast + 1) - 2 / (slow + 1)) + 2 / (slow + 1)) ** 2
+        out = np.full(m, np.nan)
+        if m > n:
+            out[n] = vals[n]
+            for i in range(n + 1, m):
+                prev = out[i - 1] if not np.isnan(out[i - 1]) else vals[i - 1]
+                out[i] = prev + sc[i] * (vals[i] - prev)
+        return pd.Series(out, index=s.index)
+
+    def CMO(close, timeperiod=14):
+        s = _to_series(close); d = s.diff()
+        up = d.clip(lower=0).rolling(timeperiod).sum(); dn = (-d.clip(upper=0)).rolling(timeperiod).sum()
+        return 100 * (up - dn) / (up + dn).replace(0, 1e-9)
+
+    def BOP(open_, high=None, low=None, close=None):
+        o, h, l, c = _ohlc(open_, high, low, close)
+        return (c - o) / (h - l).replace(0, 1e-9)
+
+    def APO(close, fastperiod=12, slowperiod=26):
+        s = _to_series(close)
+        return s.ewm(span=fastperiod, adjust=False).mean() - s.ewm(span=slowperiod, adjust=False).mean()
+
+    def ROCP(close, timeperiod=10):
+        s = _to_series(close); return (s - s.shift(timeperiod)) / s.shift(timeperiod).replace(0, 1e-9)
+
+    def ROCR(close, timeperiod=10):
+        s = _to_series(close); return s / s.shift(timeperiod).replace(0, 1e-9)
+
+    def DPO(close, timeperiod=20):
+        s = _to_series(close); return s.shift(int(timeperiod) // 2 + 1) - s.rolling(timeperiod).mean()
+
+    def TSI(close, r=25, s_=13):
+        s = _to_series(close); mm = s.diff()
+        m1 = mm.ewm(span=r, adjust=False).mean().ewm(span=s_, adjust=False).mean()
+        a1 = mm.abs().ewm(span=r, adjust=False).mean().ewm(span=s_, adjust=False).mean()
+        return 100 * m1 / a1.replace(0, 1e-9)
+
+    def AROON(high, low=None, close=None, timeperiod=14):
+        h, l, c = _hlc(high, low, close); p = int(timeperiod)
+        up = h.rolling(p + 1).apply(lambda x: 100 * np.argmax(x) / p, raw=True)
+        dn = l.rolling(p + 1).apply(lambda x: 100 * np.argmin(x) / p, raw=True)
+        return up, dn
+
+    def AROONOSC(high, low=None, close=None, timeperiod=14):
+        up, dn = AROON(high, low, close, timeperiod); return up - dn
+
+    def ULTOSC(high, low=None, close=None, t1=7, t2=14, t3=28):
+        h, l, c = _hlc(high, low, close); pc = c.shift(1)
+        bp = c - pd.concat([l, pc], axis=1).min(axis=1)
+        tr = pd.concat([h, pc], axis=1).max(axis=1) - pd.concat([l, pc], axis=1).min(axis=1)
+        a = lambda t: bp.rolling(t).sum() / tr.rolling(t).sum().replace(0, 1e-9)
+        return 100 * (4 * a(t1) + 2 * a(t2) + a(t3)) / 7
+
+    def PLUS_DI(high, low=None, close=None, timeperiod=14):
+        h, l, c = _hlc(high, low, close); up = h.diff(); dn = -l.diff()
+        plus = up.where((up > dn) & (up > 0), 0.0)
+        tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1 / timeperiod, adjust=False).mean()
+        return 100 * plus.ewm(alpha=1 / timeperiod, adjust=False).mean() / atr.replace(0, 1e-9)
+
+    def MINUS_DI(high, low=None, close=None, timeperiod=14):
+        h, l, c = _hlc(high, low, close); up = h.diff(); dn = -l.diff()
+        minus = dn.where((dn > up) & (dn > 0), 0.0)
+        tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+        atr = tr.ewm(alpha=1 / timeperiod, adjust=False).mean()
+        return 100 * minus.ewm(alpha=1 / timeperiod, adjust=False).mean() / atr.replace(0, 1e-9)
+
+    def VORTEX(high, low=None, close=None, timeperiod=14):
+        h, l, c = _hlc(high, low, close)
+        vmp = (h - l.shift(1)).abs(); vmm = (l - h.shift(1)).abs()
+        tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+        trn = tr.rolling(timeperiod).sum().replace(0, 1e-9)
+        return vmp.rolling(timeperiod).sum() / trn, vmm.rolling(timeperiod).sum() / trn
+
+    def PSAR(high, low=None, close=None, acceleration=0.02, maximum=0.2):
+        h, l, c = _hlc(high, low, close); n = len(c); hv = h.values; lv = l.values
+        ps = np.zeros(n)
+        if n:
+            bull = True; af = acceleration; ep = hv[0]; ps[0] = lv[0]
+            for i in range(1, n):
+                ps[i] = ps[i - 1] + af * (ep - ps[i - 1])
+                if bull:
+                    if lv[i] < ps[i]:
+                        bull = False; ps[i] = ep; ep = lv[i]; af = acceleration
+                    elif hv[i] > ep:
+                        ep = hv[i]; af = min(af + acceleration, maximum)
+                else:
+                    if hv[i] > ps[i]:
+                        bull = True; ps[i] = ep; ep = hv[i]; af = acceleration
+                    elif lv[i] < ep:
+                        ep = lv[i]; af = min(af + acceleration, maximum)
+        return pd.Series(ps, index=c.index)
+
+    def AD(high, low=None, close=None, volume=None):
+        if isinstance(high, pd.DataFrame) and low is None:
+            df = high; h, l, c, v = df["high"], df["low"], df["close"], df["volume"]
+        else:
+            h, l, c, v = _to_series(high), _to_series(low), _to_series(close), _to_series(volume)
+        mfm = ((c - l) - (h - c)) / (h - l).replace(0, 1e-9)
+        return (mfm * v).cumsum()
+
+    def ADOSC(high, low=None, close=None, volume=None, fast=3, slow=10):
+        ad = AD(high, low, close, volume)
+        return ad.ewm(span=fast, adjust=False).mean() - ad.ewm(span=slow, adjust=False).mean()
+
+    def CMF(high, low=None, close=None, volume=None, timeperiod=20):
+        if isinstance(high, pd.DataFrame) and low is None:
+            df = high; h, l, c, v = df["high"], df["low"], df["close"], df["volume"]
+        else:
+            h, l, c, v = _to_series(high), _to_series(low), _to_series(close), _to_series(volume)
+        mfv = (((c - l) - (h - c)) / (h - l).replace(0, 1e-9)) * v
+        return mfv.rolling(timeperiod).sum() / v.rolling(timeperiod).sum().replace(0, 1e-9)
+
+    def PVT(close, volume=None):
+        if isinstance(close, pd.DataFrame) and volume is None:
+            c, v = close["close"], close["volume"]
+        else:
+            c, v = _to_series(close), _to_series(volume)
+        return (c.pct_change().fillna(0) * v).cumsum()
+
+    def FORCE(close, volume=None, timeperiod=13):
+        if isinstance(close, pd.DataFrame) and volume is None:
+            c, v = close["close"], close["volume"]
+        else:
+            c, v = _to_series(close), _to_series(volume)
+        return (c.diff() * v).ewm(span=timeperiod, adjust=False).mean()
+
+    def LINEARREG_SLOPE(close, timeperiod=14):
+        s = _to_series(close); p = int(timeperiod); x = np.arange(p); xm = x.mean()
+        denom = ((x - xm) ** 2).sum()
+        return s.rolling(p).apply(lambda y: ((x - xm) * (y - y.mean())).sum() / denom, raw=True)
+
+    def LINEARREG(close, timeperiod=14):
+        s = _to_series(close); p = int(timeperiod); x = np.arange(p); xm = x.mean()
+        denom = ((x - xm) ** 2).sum()
+        def _lr(y):
+            mm = ((x - xm) * (y - y.mean())).sum() / denom
+            return mm * (p - 1) + (y.mean() - mm * xm)
+        return s.rolling(p).apply(_lr, raw=True)
+
+    def MIDPOINT(close, timeperiod=14):
+        s = _to_series(close); return (s.rolling(timeperiod).max() + s.rolling(timeperiod).min()) / 2
+
+    def MIDPRICE(high, low=None, close=None, timeperiod=14):
+        h, l, c = _hlc(high, low, close)
+        return (h.rolling(timeperiod).max() + l.rolling(timeperiod).min()) / 2
+
+    def FIB_RETRACEMENT(high, low=None, close=None, timeperiod=50):
+        """Rolling Fibonacci retracement levels from the swing high/low over
+        `timeperiod` bars. DataFrame cols: level_0 (low) … level_1 (high)."""
+        h, l, c = _hlc(high, low, close)
+        hi = h.rolling(timeperiod).max(); lo = l.rolling(timeperiod).min(); rng = hi - lo
+        return pd.DataFrame({
+            "level_0": lo, "level_236": lo + 0.236 * rng, "level_382": lo + 0.382 * rng,
+            "level_5": lo + 0.5 * rng, "level_618": lo + 0.618 * rng,
+            "level_786": lo + 0.786 * rng, "level_1": hi,
+        })
+
+    # ── More candlestick patterns ──
+    def CDLMARUBOZU(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); body, lw, uw, rng = _wb(o, h, l, c)
+        out = pd.Series(0, index=c.index); strong = (lw < 0.05 * rng) & (uw < 0.05 * rng) & (body > 0.7 * rng)
+        out[strong & (c > o)] = 100; out[strong & (c < o)] = -100; return out
+
+    def CDLHARAMI(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c)
+        pbh = pd.concat([o.shift(1), c.shift(1)], axis=1).max(axis=1)
+        pbl = pd.concat([o.shift(1), c.shift(1)], axis=1).min(axis=1)
+        cbh = pd.concat([o, c], axis=1).max(axis=1); cbl = pd.concat([o, c], axis=1).min(axis=1)
+        inside = (cbh <= pbh) & (cbl >= pbl)
+        out = pd.Series(0, index=c.index)
+        out[inside & (c.shift(1) < o.shift(1)) & (c > o)] = 100
+        out[inside & (c.shift(1) > o.shift(1)) & (c < o)] = -100
+        return out
+
+    def CDLHANGINGMAN(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); body, lw, uw, rng = _wb(o, h, l, c)
+        out = pd.Series(0, index=c.index)
+        out[(lw >= 2 * body) & (uw <= body) & (body > 0) & (body / rng < 0.4)] = -100; return out
+
+    def CDLINVERTEDHAMMER(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); body, lw, uw, rng = _wb(o, h, l, c)
+        out = pd.Series(0, index=c.index)
+        out[(uw >= 2 * body) & (lw <= body) & (body > 0) & (body / rng < 0.4)] = 100; return out
+
+    def CDLSPINNINGTOP(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); body, lw, uw, rng = _wb(o, h, l, c)
+        out = pd.Series(0, index=c.index); out[(body < 0.3 * rng) & (lw > body) & (uw > body)] = 100; return out
+
+    def CDLGRAVESTONEDOJI(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); body, lw, uw, rng = _wb(o, h, l, c)
+        out = pd.Series(0, index=c.index); out[(body < 0.1 * rng) & (lw < 0.1 * rng) & (uw > 0.5 * rng)] = -100; return out
+
+    def CDLDRAGONFLYDOJI(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); body, lw, uw, rng = _wb(o, h, l, c)
+        out = pd.Series(0, index=c.index); out[(body < 0.1 * rng) & (uw < 0.1 * rng) & (lw > 0.5 * rng)] = 100; return out
+
+    def CDLPIERCING(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); mid = (o.shift(1) + c.shift(1)) / 2
+        out = pd.Series(0, index=c.index)
+        out[(c.shift(1) < o.shift(1)) & (c > o) & (o < c.shift(1)) & (c > mid) & (c < o.shift(1))] = 100; return out
+
+    def CDLDARKCLOUDCOVER(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); mid = (o.shift(1) + c.shift(1)) / 2
+        out = pd.Series(0, index=c.index)
+        out[(c.shift(1) > o.shift(1)) & (c < o) & (o > c.shift(1)) & (c < mid) & (c > o.shift(1))] = -100; return out
+
+    def CDLMORNINGSTAR(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); body = (c - o).abs()
+        small = body.shift(1) < body.shift(2) * 0.5
+        out = pd.Series(0, index=c.index)
+        out[(c.shift(2) < o.shift(2)) & small & (c > o) & (c > (o.shift(2) + c.shift(2)) / 2)] = 100; return out
+
+    def CDLEVENINGSTAR(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); body = (c - o).abs()
+        small = body.shift(1) < body.shift(2) * 0.5
+        out = pd.Series(0, index=c.index)
+        out[(c.shift(2) > o.shift(2)) & small & (c < o) & (c < (o.shift(2) + c.shift(2)) / 2)] = -100; return out
+
+    def CDL3WHITESOLDIERS(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c)
+        out = pd.Series(0, index=c.index)
+        out[(c > o) & (c.shift(1) > o.shift(1)) & (c.shift(2) > o.shift(2)) & (c > c.shift(1)) & (c.shift(1) > c.shift(2))] = 100
+        return out
+
+    def CDL3BLACKCROWS(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c)
+        out = pd.Series(0, index=c.index)
+        out[(c < o) & (c.shift(1) < o.shift(1)) & (c.shift(2) < o.shift(2)) & (c < c.shift(1)) & (c.shift(1) < c.shift(2))] = -100
+        return out
+
+    def CDLTRISTAR(o, h=None, l=None, c=None):
+        o, h, l, c = _ohlc(o, h, l, c); body = (c - o).abs(); rng = (h - l).replace(0, 1e-9)
+        d = (body / rng) < 0.1
+        out = pd.Series(0, index=c.index); out[d & d.shift(1) & d.shift(2)] = 100; return out
+
     for name, fn in dict(
         SMA=SMA, EMA=EMA, RSI=RSI, MACD=MACD, BBANDS=BBANDS,
         ATR=ATR, ADX=ADX, STOCH=STOCH, CCI=CCI, WT=WT, VWAP=VWAP,
@@ -450,6 +706,19 @@ def _build_talib_stub() -> types.ModuleType:
         WILLR=WILLR, MFI=MFI, OBV=OBV, STOCHRSI=STOCHRSI, TRIX=TRIX,
         NATR=NATR, TRANGE=TRANGE, STDDEV=STDDEV, PPO=PPO,
         KELTNER=KELTNER, DONCHIAN=DONCHIAN, SUPERTREND=SUPERTREND,
+        TRIMA=TRIMA, VWMA=VWMA, ZLEMA=ZLEMA, KAMA=KAMA, CMO=CMO, BOP=BOP,
+        APO=APO, ROCP=ROCP, ROCR=ROCR, DPO=DPO, TSI=TSI, AROON=AROON,
+        AROONOSC=AROONOSC, ULTOSC=ULTOSC, PLUS_DI=PLUS_DI, MINUS_DI=MINUS_DI,
+        VORTEX=VORTEX, PSAR=PSAR, AD=AD, ADOSC=ADOSC, CMF=CMF, PVT=PVT,
+        FORCE=FORCE, LINEARREG=LINEARREG, LINEARREG_SLOPE=LINEARREG_SLOPE,
+        MIDPOINT=MIDPOINT, MIDPRICE=MIDPRICE, FIB_RETRACEMENT=FIB_RETRACEMENT,
+        CDLMARUBOZU=CDLMARUBOZU, CDLHARAMI=CDLHARAMI, CDLHANGINGMAN=CDLHANGINGMAN,
+        CDLINVERTEDHAMMER=CDLINVERTEDHAMMER, CDLSPINNINGTOP=CDLSPINNINGTOP,
+        CDLGRAVESTONEDOJI=CDLGRAVESTONEDOJI, CDLDRAGONFLYDOJI=CDLDRAGONFLYDOJI,
+        CDLPIERCING=CDLPIERCING, CDLDARKCLOUDCOVER=CDLDARKCLOUDCOVER,
+        CDLMORNINGSTAR=CDLMORNINGSTAR, CDLEVENINGSTAR=CDLEVENINGSTAR,
+        CDL3WHITESOLDIERS=CDL3WHITESOLDIERS, CDL3BLACKCROWS=CDL3BLACKCROWS,
+        CDLTRISTAR=CDLTRISTAR,
     ).items():
         setattr(mod, name, fn)
     return mod
