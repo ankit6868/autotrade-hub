@@ -328,12 +328,128 @@ def _build_talib_stub() -> types.ModuleType:
         out[(h <= h.shift(1)) & (l >= l.shift(1))] = 100   # inside bar (compression)
         return out
 
+    # ── Extended indicator set (trend / momentum / volatility / volume) ──
+    # Harmless to add: a function is only executed when a strategy calls it.
+    def _wma_s(s, p):
+        w = np.arange(1, p + 1)
+        return s.rolling(p).apply(lambda x: np.dot(x, w) / w.sum(), raw=True)
+
+    def WMA(close, timeperiod=30):
+        return _wma_s(_to_series(close), int(timeperiod))
+
+    def DEMA(close, timeperiod=30):
+        s = _to_series(close); e1 = s.ewm(span=timeperiod, adjust=False).mean()
+        return 2 * e1 - e1.ewm(span=timeperiod, adjust=False).mean()
+
+    def TEMA(close, timeperiod=30):
+        s = _to_series(close); e1 = s.ewm(span=timeperiod, adjust=False).mean()
+        e2 = e1.ewm(span=timeperiod, adjust=False).mean(); e3 = e2.ewm(span=timeperiod, adjust=False).mean()
+        return 3 * e1 - 3 * e2 + e3
+
+    def HMA(close, timeperiod=16):
+        s = _to_series(close); n = int(timeperiod)
+        return _wma_s(2 * _wma_s(s, max(1, n // 2)) - _wma_s(s, n), max(1, int(np.sqrt(n))))
+
+    def ROC(close, timeperiod=10):
+        s = _to_series(close); return (s / s.shift(timeperiod) - 1) * 100
+
+    def MOM(close, timeperiod=10):
+        s = _to_series(close); return s - s.shift(timeperiod)
+
+    def WILLR(high, low=None, close=None, timeperiod=14):
+        h, l, c = _hlc(high, low, close)
+        hh = h.rolling(timeperiod).max(); ll = l.rolling(timeperiod).min()
+        return -100 * (hh - c) / (hh - ll).replace(0, 1e-9)
+
+    def MFI(high, low=None, close=None, volume=None, timeperiod=14):
+        if isinstance(high, pd.DataFrame) and low is None:
+            df = high; h, l, c, v = df["high"], df["low"], df["close"], df["volume"]
+        else:
+            h, l, c, v = _to_series(high), _to_series(low), _to_series(close), _to_series(volume)
+        tp = (h + l + c) / 3.0; mf = tp * v
+        pos = mf.where(tp > tp.shift(1), 0.0).rolling(timeperiod).sum()
+        neg = mf.where(tp < tp.shift(1), 0.0).rolling(timeperiod).sum()
+        return 100 - 100 / (1 + pos / neg.replace(0, 1e-9))
+
+    def OBV(close, volume=None):
+        if isinstance(close, pd.DataFrame) and volume is None:
+            df = close; c, v = df["close"], df["volume"]
+        else:
+            c, v = _to_series(close), _to_series(volume)
+        return (np.sign(c.diff().fillna(0)) * v).cumsum()
+
+    def STOCHRSI(close, timeperiod=14, fastk_period=5, fastd_period=3):
+        s = _to_series(close); d = s.diff()
+        g = d.clip(lower=0).rolling(timeperiod).mean(); ls = (-d.clip(upper=0)).rolling(timeperiod).mean()
+        rsi = 100 - 100 / (1 + g / ls.replace(0, 1e-9))
+        mn = rsi.rolling(timeperiod).min(); mx = rsi.rolling(timeperiod).max()
+        k = (100 * (rsi - mn) / (mx - mn).replace(0, 1e-9)).rolling(fastk_period).mean()
+        return k, k.rolling(fastd_period).mean()
+
+    def TRIX(close, timeperiod=15):
+        s = _to_series(close); e1 = s.ewm(span=timeperiod, adjust=False).mean()
+        e2 = e1.ewm(span=timeperiod, adjust=False).mean(); e3 = e2.ewm(span=timeperiod, adjust=False).mean()
+        return (e3 / e3.shift(1) - 1) * 100
+
+    def NATR(high, low=None, close=None, timeperiod=14):
+        h, l, c = _hlc(high, low, close)
+        tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+        return 100 * tr.rolling(timeperiod).mean() / c.replace(0, 1e-9)
+
+    def TRANGE(high, low=None, close=None):
+        h, l, c = _hlc(high, low, close)
+        return pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+
+    def STDDEV(close, timeperiod=5, nbdev=1.0):
+        return _to_series(close).rolling(timeperiod).std() * nbdev
+
+    def PPO(close, fastperiod=12, slowperiod=26):
+        s = _to_series(close); f = s.ewm(span=fastperiod, adjust=False).mean()
+        sl = s.ewm(span=slowperiod, adjust=False).mean()
+        return 100 * (f - sl) / sl.replace(0, 1e-9)
+
+    def KELTNER(high, low=None, close=None, timeperiod=20, mult=2.0):
+        h, l, c = _hlc(high, low, close)
+        mid = c.ewm(span=timeperiod, adjust=False).mean()
+        tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(timeperiod).mean()
+        return pd.DataFrame({"upperband": mid + mult * atr, "middleband": mid, "lowerband": mid - mult * atr})
+
+    def DONCHIAN(high, low=None, close=None, timeperiod=20):
+        h, l, c = _hlc(high, low, close)
+        up = h.rolling(timeperiod).max(); dn = l.rolling(timeperiod).min()
+        return pd.DataFrame({"upperband": up, "middleband": (up + dn) / 2, "lowerband": dn})
+
+    def SUPERTREND(high, low=None, close=None, timeperiod=10, multiplier=3.0):
+        """Returns (supertrend_line, trend) where trend = +1 up / -1 down."""
+        h, l, c = _hlc(high, low, close)
+        hl2 = (h + l) / 2.0
+        tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
+        atr = tr.rolling(timeperiod).mean()
+        ub = (hl2 + multiplier * atr).values; lb = (hl2 - multiplier * atr).values
+        cv = c.values; n = len(cv)
+        fub = ub.copy(); flb = lb.copy()
+        for i in range(1, n):
+            fub[i] = ub[i] if (ub[i] < fub[i - 1] or cv[i - 1] > fub[i - 1]) else fub[i - 1]
+            flb[i] = lb[i] if (lb[i] > flb[i - 1] or cv[i - 1] < flb[i - 1]) else flb[i - 1]
+        st = np.zeros(n); trend = np.ones(n); st[0] = fub[0]
+        for i in range(1, n):
+            if st[i - 1] == fub[i - 1]:
+                st[i], trend[i] = (fub[i], -1) if cv[i] <= fub[i] else (flb[i], 1)
+            else:
+                st[i], trend[i] = (flb[i], 1) if cv[i] >= flb[i] else (fub[i], -1)
+        return pd.Series(st, index=c.index), pd.Series(trend, index=c.index)
+
     for name, fn in dict(
         SMA=SMA, EMA=EMA, RSI=RSI, MACD=MACD, BBANDS=BBANDS,
         ATR=ATR, ADX=ADX, STOCH=STOCH, CCI=CCI, WT=WT, VWAP=VWAP,
         EMA_SPREAD=EMA_SPREAD,
         CDLENGULFING=CDLENGULFING, CDLHAMMER=CDLHAMMER,
         CDLSHOOTINGSTAR=CDLSHOOTINGSTAR, CDLDOJI=CDLDOJI, CDLINSIDE=CDLINSIDE,
+        WMA=WMA, DEMA=DEMA, TEMA=TEMA, HMA=HMA, ROC=ROC, MOM=MOM,
+        WILLR=WILLR, MFI=MFI, OBV=OBV, STOCHRSI=STOCHRSI, TRIX=TRIX,
+        NATR=NATR, TRANGE=TRANGE, STDDEV=STDDEV, PPO=PPO,
+        KELTNER=KELTNER, DONCHIAN=DONCHIAN, SUPERTREND=SUPERTREND,
     ).items():
         setattr(mod, name, fn)
     return mod
