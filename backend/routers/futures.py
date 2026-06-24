@@ -622,6 +622,93 @@ def _kucoin_deposit_margin(user_id: str, db: Session, pair: str,
         return False, f"KuCoin margin deposit failed: {exc}"
 
 
+# ── Live Verified Results Dashboard ──────────────────────────────────────────
+
+@router.get("/dashboard")
+def futures_dashboard(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Live results — REAL closed-trade P&L per bot (paper + live), NOT backtests.
+    Returns today's P&L, per-bot stats, recent history, and an equity curve.
+    This is the 'verifiable results' view: actual trading only."""
+    from datetime import datetime, timezone
+    from backend.models.trade import Trade
+    from backend.models.strategy import Strategy
+
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    rows = db.execute(
+        select(Trade.strategy_id, Trade.mode, Trade.pair, Trade.profit_abs,
+               Trade.profit_pct, Trade.exit_time, Trade.side, Trade.exit_reason)
+        .where(Trade.user_id == user_id, Trade.status == "closed",
+               Trade.market_type == "futures")
+        .order_by(Trade.exit_time.desc().nullslast(), Trade.id.desc())
+        .limit(2000)
+    ).all()
+
+    names: dict[int, str] = {}
+    sids = {r.strategy_id for r in rows if r.strategy_id}
+    if sids:
+        for sid, nm in db.execute(
+            select(Strategy.id, Strategy.name).where(Strategy.id.in_(sids))
+        ).all():
+            names[sid] = nm
+
+    def _is_today(et):
+        if not et:
+            return False
+        et = et if et.tzinfo else et.replace(tzinfo=timezone.utc)
+        return et >= today_start
+
+    per_bot: dict = {}
+    today_pnl = {"paper": 0.0, "live": 0.0}
+    total_pnl = {"paper": 0.0, "live": 0.0}
+    for r in rows:
+        mode = r.mode if r.mode in ("paper", "live") else "paper"
+        pnl = float(r.profit_abs or 0.0)
+        is_today = _is_today(r.exit_time)
+        total_pnl[mode] += pnl
+        if is_today:
+            today_pnl[mode] += pnl
+        b = per_bot.setdefault((r.strategy_id, mode), {
+            "strategy": names.get(r.strategy_id, "Manual / unknown"),
+            "mode": mode, "trades": 0, "wins": 0, "total_pnl": 0.0, "today_pnl": 0.0})
+        b["trades"] += 1
+        b["wins"] += 1 if pnl > 0 else 0
+        b["total_pnl"] += pnl
+        if is_today:
+            b["today_pnl"] += pnl
+
+    bots = []
+    for b in per_bot.values():
+        bots.append({**b,
+                     "win_rate": round(b["wins"] / b["trades"] * 100, 1) if b["trades"] else 0.0,
+                     "total_pnl": round(b["total_pnl"], 2),
+                     "today_pnl": round(b["today_pnl"], 2)})
+    bots.sort(key=lambda x: x["total_pnl"], reverse=True)
+
+    chrono = sorted([r for r in rows if r.exit_time], key=lambda r: r.exit_time)
+    eq = []
+    cum = 0.0
+    for r in chrono[-200:]:
+        cum += float(r.profit_abs or 0.0)
+        eq.append({"t": r.exit_time.isoformat(), "pnl": round(cum, 2)})
+
+    history = [{
+        "strategy": names.get(r.strategy_id, "—"), "mode": r.mode, "pair": r.pair,
+        "side": r.side, "profit_abs": round(float(r.profit_abs or 0), 2),
+        "profit_pct": round(float(r.profit_pct or 0), 2),
+        "exit_reason": r.exit_reason,
+        "exit_time": r.exit_time.isoformat() if r.exit_time else None,
+    } for r in rows[:50]]
+
+    return {
+        "today_pnl": {k: round(v, 2) for k, v in today_pnl.items()},
+        "total_pnl": {k: round(v, 2) for k, v in total_pnl.items()},
+        "bots": bots, "equity_curve": eq, "history": history, "trade_count": len(rows),
+    }
+
+
 # ── Futures Backtest ─────────────────────────────────────────────────────────
 
 @router.post("/backtest/run")

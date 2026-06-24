@@ -389,6 +389,15 @@ export const api = {
       history: (limit = 20) =>
         request<any>(`/api/futures/backtest/history?limit=${limit}`),
     },
+    // Live verified results — REAL closed-trade P&L per bot (not backtests).
+    dashboard: () => request<{
+      today_pnl: { paper: number; live: number };
+      total_pnl: { paper: number; live: number };
+      bots: { strategy: string; mode: string; trades: number; win_rate: number; total_pnl: number; today_pnl: number }[];
+      equity_curve: { t: string; pnl: number }[];
+      history: { strategy: string; mode: string; pair: string; side: string; profit_abs: number; profit_pct: number; exit_reason: string; exit_time: string | null }[];
+      trade_count: number;
+    }>('/api/futures/dashboard'),
     forceClose: (
       pair: string,
       mode?: 'paper' | 'live',
