@@ -152,6 +152,12 @@ class StrategyInstance(Base):
     # simulated KuCoin fees + slippage from paper P&L so paper ≈ live. Paper-
     # only; ignored in live (real fees). Persisted so auto-resume keeps it.
     paper_sim_costs    = Column(Boolean, default=False)
+    # ── Consecutive-loss adaptive cooldown (WolfBot-style risk guardrail) ──
+    # Pause new entries for `guard_cooldown_min` minutes after `guard_max_consec`
+    # losing trades in a row. _lightweight_migrate auto-adds these columns.
+    guard_enabled      = Column(Boolean, default=True)
+    guard_max_consec   = Column(Integer, default=5)
+    guard_cooldown_min = Column(Integer, default=60)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

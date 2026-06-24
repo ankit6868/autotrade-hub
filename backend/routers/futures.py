@@ -6224,6 +6224,9 @@ def list_futures_bots(
                 force_slider_sltp    = bool(getattr(i, "force_slider_sltp", False)),
                 # Restore paper-mode cost simulation across restarts.
                 paper_sim_costs      = bool(getattr(i, "paper_sim_costs", False)),
+                guard_enabled        = bool(getattr(i, "guard_enabled", True) if i.guard_enabled is not None else True),
+                guard_max_consec     = int(getattr(i, "guard_max_consec", 5) or 5),
+                guard_cooldown_min   = int(getattr(i, "guard_cooldown_min", 60) or 60),
             )
             log.info("Auto-resumed bot %s for user %s (ARM=%s)",
                      i.engine_key, user_id, getattr(i, "arm_enabled", False))
@@ -6348,6 +6351,12 @@ def list_futures_bots(
             "ticks": (engine_status or {}).get("ticks", 0),
             "signals": (engine_status or {}).get("signal_count", 0),
             "last_action": (engine_status or {}).get("last_action", ""),
+            # Risk guardrail state (consecutive-loss adaptive cooldown)
+            "guard_state": getattr(eng, "_guard_state", "active") if eng else "active",
+            "guard_cooldown_until": (
+                eng._guard_cooldown_until.isoformat()
+                if eng and getattr(eng, "_guard_cooldown_until", None) else None
+            ),
             "risk_pct": i.risk_pct,
             "stoploss": i.stoploss,
             "takeprofit": i.takeprofit,

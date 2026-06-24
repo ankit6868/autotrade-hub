@@ -573,6 +573,18 @@ class FuturesEngine(NativeTradingEngine):
         self.action_log: list[dict] = []
         self.signal_count: int = 0
         self._winding_down: bool = False
+        # ── Consecutive-loss adaptive cooldown (WolfBot-style) ──
+        # The engine already has daily-DD trip + max-trades/day + per-trade
+        # cooldown (Phase 8). The missing piece is an ADAPTIVE cooldown after a
+        # LOSING STREAK — pause new entries for a while when the market is
+        # clearly hostile, then resume. Enforced in the entry gate only
+        # (additive); reads realised outcomes from the Trade table so it needs
+        # no close-site hooks and survives restarts. Disabled-safe.
+        self._guard_enabled        = True
+        self._guard_max_consec     = 5        # this many losses in a row -> cooldown
+        self._guard_cooldown_min   = 60       # cooldown length (minutes)
+        self._guard_cooldown_until = None     # runtime: datetime
+        self._guard_state          = "active" # active | cooldown
         # ── Position mode (Phase 9 — hedge support for live/paper bots) ──
         # "single"  → stop-and-reverse: an opposite signal CLOSES the open
         #             position before opening the new one (TV default; the
@@ -862,6 +874,10 @@ class FuturesEngine(NativeTradingEngine):
         max_trades_per_day: int   = 8,
         cooldown_candles:   int   = 3,
         max_daily_dd_pct:   float = 25.0,
+        # Consecutive-loss adaptive cooldown (WolfBot-style)
+        guard_enabled:      bool  = True,
+        guard_max_consec:   int   = 5,
+        guard_cooldown_min: int   = 60,
         # Per-bot strategy overrides — surfaced into populate_indicators
         # via metadata['overrides'] so SMC-family strategies can read
         # session window + equal-price threshold without editing class
@@ -953,6 +969,12 @@ class FuturesEngine(NativeTradingEngine):
         self._day_trades         = 0
         self._day_start_balance  = float(wallet)
         self._day_dd_tripped     = False
+        # Consecutive-loss adaptive cooldown config (reset runtime state on start)
+        self._guard_enabled        = bool(guard_enabled)
+        self._guard_max_consec     = max(2, int(guard_max_consec))
+        self._guard_cooldown_min   = max(1, int(guard_cooldown_min))
+        self._guard_cooldown_until = None
+        self._guard_state          = "active"
         # ── Per-bot strategy overrides (session / equal-price) ──────
         # Stored here so they survive process restarts via DB persist.
         # Passed to evaluate_strategy via metadata['overrides'].
@@ -1226,6 +1248,50 @@ class FuturesEngine(NativeTradingEngine):
         log.info("[%s] Futures engine loop exited.", self.user_id)
 
     # ── Tick override — adds liquidation check ──────────────────────────
+
+    def _guard_check(self, now: datetime) -> tuple[bool, str]:
+        """Consecutive-loss adaptive cooldown gate. Returns (allowed, reason).
+        Fail-OPEN on any error so a guard hiccup can never block a healthy bot.
+        Reads the bot's recent closed trades from the DB (newest first) and, if
+        the trailing run of losses reaches the threshold, opens a cooldown."""
+        if not self._guard_enabled:
+            return True, ""
+        # already cooling down?
+        if self._guard_cooldown_until and now < self._guard_cooldown_until:
+            mins = int((self._guard_cooldown_until - now).total_seconds() // 60) + 1
+            self._guard_state = "cooldown"
+            return False, f"loss-streak cooldown — {mins}m left"
+        try:
+            from backend.models.database import SessionLocal
+            from backend.models.trade import Trade as _T
+            from sqlalchemy import select as _sel
+            with SessionLocal() as _db:
+                q = _sel(_T.profit_abs).where(
+                    _T.user_id == self.user_id,
+                    _T.status == "closed",
+                    _T.mode == self._mode,
+                )
+                if getattr(self, "strategy_id", None):
+                    q = q.where(_T.strategy_id == self.strategy_id)
+                q = q.order_by(_T.exit_time.desc().nullslast(), _T.id.desc()).limit(20)
+                pnls = [r[0] for r in _db.execute(q).all()]
+        except Exception:
+            return True, ""        # fail open
+        consec = 0
+        for p in pnls:             # newest first
+            if p is None:
+                continue
+            if float(p) < 0:
+                consec += 1
+            else:
+                break
+        if consec >= self._guard_max_consec:
+            from datetime import timedelta as _td
+            self._guard_cooldown_until = now + _td(minutes=self._guard_cooldown_min)
+            self._guard_state = "cooldown"
+            return False, f"{consec} losses in a row — {self._guard_cooldown_min}m cooldown"
+        self._guard_state = "active"
+        return True, ""
 
     def _tick_continuous(self, signal_fn, seen_signal: dict,
                          last_signal_ts: dict | None = None,
@@ -1901,6 +1967,14 @@ class FuturesEngine(NativeTradingEngine):
                 continue
 
             sl, tp = plan.sl, plan.tp
+
+            # ── Risk guardrail: consecutive-loss adaptive cooldown ───────
+            _g_ok, _g_reason = self._guard_check(now)
+            if not _g_ok:
+                self.last_action = f"GUARD cooldown {pair} {direction} — {_g_reason}"
+                self._log_action("guard_block", self.last_action,
+                                 pair=pair, direction=direction, state=self._guard_state)
+                continue
 
             # ── Op#10: live-only spread check ────────────────────────────
             # Reject entries when KuCoin's bid-ask spread eats > 25% of the
