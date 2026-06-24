@@ -346,6 +346,9 @@ def run_futures_backtest(
     take_profit_pct: float = 1.5,     # % e.g. 1.5 → +1.5%
     risk_per_trade: float = 0.05,     # fraction of balance used as margin per trade
     generated_code: str | None = None,  # user's IStrategy Python class (Freqtrade-style)
+    ml_filter_model: dict | None = None,  # optional ML loss-filter (deserialized
+                                        # {model, mu, sd, conf}); when present, signals
+                                        # the model scores below conf are SKIPPED.
     sl_structure_buffer_pct: float = 0.0,  # "stop beyond structure" (the book's #1 risk
                                         # rule): push a STRUCTURAL stop this % of entry
                                         # FURTHER from entry, so it sits past the swing
@@ -885,6 +888,15 @@ def run_futures_backtest(
         # see at a glance whether the slider is doing anything.
         sltp_from_signal    = 0
         sltp_from_slider    = 0
+        # ML loss-filter: precompute take/skip per bar (True = take). Fail-open.
+        ml_skipped = 0
+        ml_take = None
+        if ml_filter_model is not None:
+            try:
+                from backend.services.ml_filter import take_mask as _ml_take_mask
+                ml_take = _ml_take_mask(ml_filter_model, df)
+            except Exception:
+                ml_take = None
 
         n = len(df)
         for i in range(3, n):
@@ -1583,6 +1595,9 @@ def run_futures_backtest(
             # signals fired within the requested window.
             in_window = first_in_window_idx <= i <= last_in_window_idx
             sig = signal_fn(df, i) if (i >= 3 and in_window) else None
+            if sig is not None and ml_take is not None and i < len(ml_take) and not ml_take[i]:
+                sig = None          # ML loss-filter vetoed this signal
+                ml_skipped += 1
             if sig is not None:
                 # Accept either 4-tuple (entry, sl, tp, dir) or 5-tuple
                 # (entry, sl, tp1, tp2, dir). Multi-TP unlocks partial-close
@@ -1768,6 +1783,7 @@ def run_futures_backtest(
         data_diagnostics[pair]["trades_opened_long"]   = trades_opened_long
         data_diagnostics[pair]["trades_opened_short"]  = trades_opened_short
         data_diagnostics[pair]["signals_skipped_in_trade"] = skipped_in_trade
+        data_diagnostics[pair]["signals_skipped_ml_filter"] = ml_skipped
         data_diagnostics[pair]["signals_skipped_cooldown"] = skipped_cooldown
         data_diagnostics[pair]["cooldown_bars"]        = cooldown_bars
         # Pyramiding / position-model diagnostics

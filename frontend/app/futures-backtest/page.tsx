@@ -104,6 +104,7 @@ function FuturesBacktestInner() {
   // this fee". When ON, balance reflects what the strategy would deliver
   // on KuCoin after all execution costs.
   const [deductCosts,     setDeductCosts]     = useState(false);
+  const [useMlFilter,     setUseMlFilter]     = useState(false);
   // SL/TP source mode:
   //   'strategy' = use the SL/TP the signal function returns (e.g.
   //                SMCStrategyTV's structural swing-based stops + 2R TP)
@@ -947,6 +948,8 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
         // When false, backend zeros out fee/funding deductions so the
         // returned P&L reflects pure price action × leverage.
         deduct_real_costs: deductCosts,
+        // Apply the trained ML loss-filter (skip low-conviction signals).
+        use_ml_filter: useMlFilter,
         // ── Advanced Risk Management (ARM) — see state declarations ──
         arm_enabled:        armEnabled,
         arm_tp1_close_pct:  armTp1ClosePct,
@@ -1583,6 +1586,13 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
             >
               {deductCosts ? 'realistic mode' : 'TV-equivalent (0% fees, 0 slippage)'}
             </span>
+          </label>
+          <label className="label !mb-0 flex items-center gap-2 cursor-pointer"
+                 title="Apply the trained ML loss-filter — skip the signals it scores as low win-probability. Train it first with the '🧠 Train ML filter' button. NOTE: testing on the training period is IN-SAMPLE (optimistic) — the honest out-of-sample lift is the walk-forward report from training.">
+            <input type="checkbox" checked={useMlFilter}
+              onChange={e => setUseMlFilter(e.target.checked)} className="accent-fuchsia-500" />
+            <span>🧠 Use ML filter</span>
+            {useMlFilter && <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-fuchsia-500/20 text-fuchsia-300">in-sample if same period</span>}
           </label>
           <span className="text-[11px] text-slate-400 leading-snug max-w-lg">
             {deductCosts

@@ -43,6 +43,54 @@ def fetch_klines(pair: str, tf: str = "1h", bars: int = 4000) -> pd.DataFrame:
     return df.reset_index(drop=True)
 
 
+def deserialize(blob: bytes) -> dict:
+    """Load a stored model blob -> {model, features, mu, sd, conf}."""
+    import io, joblib
+    return joblib.load(io.BytesIO(blob))
+
+
+def take_mask(model_dict: dict, df: pd.DataFrame) -> np.ndarray:
+    """Boolean array (len = len(df)): True = TAKE the signal at that bar,
+    False = SKIP (model says low win-probability). Bars with NaN features
+    default to TAKE (the model has no opinion)."""
+    F = engineer_features(df)
+    mu = model_dict["mu"]; sd = model_dict["sd"]; conf = model_dict.get("conf", 0.55)
+    X = F.values.astype(float)
+    take = np.ones(len(df), dtype=bool)
+    valid = ~np.isnan(X).any(axis=1)
+    if valid.any():
+        p = model_dict["model"].predict_proba((X[valid] - mu) / sd)[:, 1]
+        take[np.where(valid)[0]] = p >= conf
+    return take
+
+
+def load_enabled_model(db, user_id: str, strategy_id, require_enabled: bool = True) -> dict | None:
+    """Return the deserialized PASSing model for (user, strategy), or None.
+    require_enabled=True (live engine) needs the user to have toggled it on;
+    False (backtest preview) loads the latest passing model regardless. Fail-safe."""
+    if not strategy_id:
+        return None
+    try:
+        from sqlalchemy import select
+        from backend.models.trade import MLFilterModel
+        q = select(MLFilterModel.model_blob, MLFilterModel.conf).where(
+            MLFilterModel.user_id == user_id,
+            MLFilterModel.strategy_id == strategy_id,
+            MLFilterModel.verdict == "PASS",
+        )
+        if require_enabled:
+            q = q.where(MLFilterModel.enabled == True)  # noqa: E712
+        row = db.execute(q.order_by(MLFilterModel.created_at.desc()).limit(1)).first()
+        if not row or not row[0]:
+            return None
+        md = deserialize(row[0])
+        if row[1]:
+            md["conf"] = float(row[1])
+        return md
+    except Exception:
+        return None
+
+
 def train_strategy_filter(generated_code: str, pairs: list[str], timeframe: str = "1h",
                           bars: int = 4000, conf: float = 0.55) -> dict:
     """Full pipeline: fetch each pair, run the strategy, pool its signals, train +

@@ -909,6 +909,13 @@ def run_futures_backtest(
             strategy_name  = strategy.name
             generated_code = strategy.generated_code
 
+    # Optional ML loss-filter: when requested, load the latest passing model for
+    # this strategy and skip the signals it scores below confidence.
+    ml_filter_model = None
+    if bool(req.get("use_ml_filter", False)) and strategy_id:
+        from backend.services.ml_filter import load_enabled_model as _load_ml
+        ml_filter_model = _load_ml(db, user_id, strategy_id, require_enabled=False)
+
     result = _run(
         strategy_name    = strategy_name,
         pairs            = pairs,
@@ -919,6 +926,7 @@ def run_futures_backtest(
         stoploss_pct     = stoploss_pct,
         take_profit_pct  = take_profit_pct,
         generated_code   = generated_code,
+        ml_filter_model  = ml_filter_model,
         max_concurrent_positions = max_concurrent,
         position_mode    = position_mode,
         risk_per_trade   = risk_per_trade,
