@@ -854,7 +854,7 @@ def backtest_walk_forward(
     stoploss_pct     = float(req.get("stoploss_pct", 2.0))
     take_profit_pct  = float(req.get("take_profit_pct", 4.0))
     risk_pct         = max(1, min(50, float(req.get("risk_per_trade_pct", 5))))
-    deduct_costs     = bool(req.get("deduct_real_costs", True))   # honest default ON
+    deduct_costs     = bool(req.get("deduct_real_costs", False))  # match the backtest UI: OFF unless you tick "Include real trading costs"
     force_slider     = bool(req.get("force_slider_sltp", False))
     maker_only_entry = bool(req.get("maker_only_entry", False))
     vip_tier         = max(0, min(12, int(req.get("vip_tier", 0))))
