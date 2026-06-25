@@ -713,6 +713,11 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
   const [guardEnabled,     setGuardEnabled]     = useState(true);
   const [guardMaxConsec,   setGuardMaxConsec]   = useState(5);
   const [guardCooldownMin, setGuardCooldownMin] = useState(60);
+  // ML loss-filter — only surfaces if the user trained a PASSing model for this
+  // strategy on the Backtest page. Toggling it flips MLFilterModel.enabled, which
+  // the engine reads on (re)start to skip the strategy's likely-losing signals.
+  const [mlModel, setMlModel] = useState<{ context: string; signals: number; enabled: boolean } | null>(null);
+  const [mlBusy,  setMlBusy]  = useState(false);
   // Region / session preset → maps to UTC hours sent as session_start_hr_utc /
   // session_end_hr_utc. Lets the user pick "NY", "London", "Tokyo", or "24/7"
   // instead of having to know the UTC hour ranges. PDF §6 lists NY as the
@@ -822,6 +827,33 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
       .catch(() => { if (!cancelled) setTfWarning(null); });
     return () => { cancelled = true; };
   }, [bot, executionTimeframe, strategies]);
+
+  // Load any trained ML loss-filter for this strategy so we can show its toggle.
+  useEffect(() => {
+    const sid = bot.id || strategies.find(s => s.name === bot.name)?.id;
+    if (!sid) { setMlModel(null); return; }
+    let cancelled = false;
+    api.futures.ml.models()
+      .then((d: any) => {
+        if (cancelled) return;
+        const m = (d?.models || []).find((x: any) => x.strategy_id === sid && x.verdict === 'PASS');
+        setMlModel(m ? { context: m.context, signals: m.signals, enabled: !!m.enabled } : null);
+      })
+      .catch(() => { if (!cancelled) setMlModel(null); });
+    return () => { cancelled = true; };
+  }, [bot, strategies]);
+
+  async function toggleMlFilter(enabled: boolean) {
+    const sid = bot.id || strategies.find(s => s.name === bot.name)?.id;
+    if (!sid) return;
+    setMlBusy(true);
+    try {
+      await api.futures.ml.toggle(sid, enabled);
+      setMlModel(m => (m ? { ...m, enabled } : m));
+    } catch { /* leave the toggle as-is on failure */ }
+    setMlBusy(false);
+  }
+
   const [backtestData, setBacktestData] = useState<number[]>([]);
   const [backtestError, setBacktestError] = useState('');
   const [currentPrice, setCurrentPrice] = useState(0);
@@ -1315,6 +1347,35 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
                 </div>
               )}
             </div>
+
+            {/* ML loss-filter — only shown when the user has trained a PASSing
+                model for this strategy on the Backtest page. When ON, the engine
+                scores every entry and skips the ones the model rates as likely
+                losers (meta-labeling). Fail-open: any model error takes the trade. */}
+            {mlModel && (
+              <div className="rounded-lg border border-[#2a3a52] p-2.5">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={mlModel.enabled}
+                    disabled={mlBusy}
+                    onChange={e => toggleMlFilter(e.target.checked)}
+                    className="accent-emerald-500 w-3.5 h-3.5"
+                  />
+                  <span className="text-xs font-bold text-white">🧠 ML loss-filter</span>
+                  <span className={`text-[8px] font-medium px-1.5 py-0.5 rounded-full ml-auto ${
+                    mlModel.enabled ? 'bg-emerald-500/20 text-emerald-300' : 'bg-slate-500/20 text-slate-400'
+                  }`}>
+                    {mlBusy ? '…' : mlModel.enabled ? 'on' : 'off'}
+                  </span>
+                </label>
+                <p className="text-[10px] text-slate-500 mt-1 leading-snug">
+                  Skips entries the model scores as likely losers — trained &amp; walk-forward
+                  verified on <b className="text-emerald-300">{mlModel.signals}</b> past signals
+                  {mlModel.context ? <> ({mlModel.context})</> : null}. Applies to every bot using this strategy.
+                </p>
+              </div>
+            )}
 
             {/* Advanced Risk Management — port of the futures-backtest ARM panel.
                 When OFF (default), strategy TP closes 100% of position.

@@ -585,6 +585,11 @@ class FuturesEngine(NativeTradingEngine):
         self._guard_cooldown_min   = 60       # cooldown length (minutes)
         self._guard_cooldown_until = None     # runtime: datetime
         self._guard_state          = "active" # active | cooldown
+        # ML loss-filter — deserialized model dict ({model, mu, sd, conf}) when
+        # the user has trained + enabled one for this bot's strategy; else None
+        # (no filtering). Loaded in start_futures. Applied in the entry gate.
+        self._ml_model             = None
+        self._ml_skipped           = 0
         # ── Position mode (Phase 9 — hedge support for live/paper bots) ──
         # "single"  → stop-and-reverse: an opposite signal CLOSES the open
         #             position before opening the new one (TV default; the
@@ -975,6 +980,19 @@ class FuturesEngine(NativeTradingEngine):
         self._guard_cooldown_min   = max(1, int(guard_cooldown_min))
         self._guard_cooldown_until = None
         self._guard_state          = "active"
+        # Load the ML loss-filter for this strategy IF the user enabled one.
+        self._ml_model = None
+        try:
+            if strategy_id:
+                from backend.models.database import SessionLocal as _SL
+                from backend.services.ml_filter import load_enabled_model as _load_ml
+                with _SL() as _mldb:
+                    self._ml_model = _load_ml(_mldb, self.user_id, strategy_id, require_enabled=True)
+                if self._ml_model:
+                    log.info("[%s] ML loss-filter ACTIVE for strategy %s", self.user_id, strategy_id)
+        except Exception as _mle:
+            log.warning("[%s] ML filter load failed (ignored): %s", self.user_id, _mle)
+            self._ml_model = None
         # ── Per-bot strategy overrides (session / equal-price) ──────
         # Stored here so they survive process restarts via DB persist.
         # Passed to evaluate_strategy via metadata['overrides'].
@@ -1975,6 +1993,22 @@ class FuturesEngine(NativeTradingEngine):
                 self._log_action("guard_block", self.last_action,
                                  pair=pair, direction=direction, state=self._guard_state)
                 continue
+
+            # ── ML loss-filter: skip signals the model scores as low-win ──
+            # Fail-OPEN: any error takes the trade (the filter can never freeze
+            # a healthy bot). Scores the latest closed bar of the signal df.
+            if self._ml_model is not None:
+                try:
+                    from backend.services.ml_filter import take_mask as _ml_tm
+                    _take = _ml_tm(self._ml_model, df)
+                    if len(_take) and not bool(_take[-1]):
+                        self._ml_skipped += 1
+                        self.last_action = f"ML FILTER skip {pair} {direction} (low win-prob)"
+                        self._log_action("ml_filter_skip", self.last_action,
+                                         pair=pair, direction=direction)
+                        continue
+                except Exception:
+                    pass   # fail-open
 
             # ── Op#10: live-only spread check ────────────────────────────
             # Reject entries when KuCoin's bid-ask spread eats > 25% of the

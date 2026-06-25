@@ -179,9 +179,14 @@ def train_and_gate(rows: list[tuple], n_windows: int = 4, conf: float = 0.55) ->
     (take all) vs FILTERED (take only P(win) > conf). Returns the verdict + the
     full-data model bytes IF it passes the gate (filtered beats unfiltered in a
     majority of windows AND on aggregate)."""
-    import lightgbm as lgb
+    try:
+        import lightgbm as lgb
+    except Exception as e:
+        return {"ok": False, "reason": f"ML engine not ready on the server ({e}). "
+                "A redeploy with libgomp1 installed is needed — try again after it deploys."}
     if len(rows) < 120:
-        return {"ok": False, "reason": f"too few signals to train ({len(rows)}); need ~120+"}
+        return {"ok": False, "reason": f"too few signals to train ({len(rows)}); need ~120+. "
+                "Use more pairs, a longer range, or a higher-frequency strategy."}
     X = np.array([r[1] for r in rows]); y = np.array([r[2] for r in rows]); ret = np.array([r[3] for r in rows])
     n = len(X)
     base_wr = y.mean()
@@ -208,8 +213,6 @@ def train_and_gate(rows: list[tuple], n_windows: int = 4, conf: float = 0.55) ->
                    "kept": int(keep.sum()), "unfiltered_net": round(unf, 2),
                    "filtered_net": round(fil, 2), "improvement": round(fil - unf, 2)})
         wins_unf += unf; wins_fil += fil
-        if fil > unf:
-            wins_fil_w = 1
     better = sum(1 for w in wf if w["improvement"] > 0)
     passed = bool(wf) and better >= max(1, round(len(wf) * 0.6)) and wins_fil > wins_unf
     out = {"ok": True, "signals": n, "base_win_rate": round(base_wr * 100, 1),

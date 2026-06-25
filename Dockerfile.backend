@@ -34,9 +34,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/opt/venv/bin:$PATH"
 
 # libpq for psycopg, curl for healthcheck, tini for PID1.
-# libta-lib0 provides the shared library freqtrade needs at runtime.
+# libgomp1 = OpenMP runtime required by LightGBM's native lib (ML loss-filter);
+# without it, importing/using lightgbm raises "libgomp.so.1: cannot open shared
+# object file".
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libpq5 \
+        libgomp1 \
         curl \
         tini \
     && rm -rf /var/lib/apt/lists/* \
