@@ -118,6 +118,14 @@ FEATURE_COLS = [
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """Stationary features at every bar (never raw price)."""
     ta = sr._build_talib_stub()
+    # The three call sites build `df` differently: training (fetch_klines) has a
+    # 'volume' column, but the live engine (_build_df) and the backtester
+    # (load_futures_ohlcv) name it 'vol'. Without this alias, df["volume"] /
+    # ta.MFI(df) would KeyError and the fail-open guards in the engine +
+    # backtester would silently turn the filter into a no-op. Normalise once.
+    if "volume" not in df.columns:
+        df = df.copy()
+        df["volume"] = df["vol"] if "vol" in df.columns else 0.0
     h, l, c, v = df["high"], df["low"], df["close"], df["volume"]
     f = pd.DataFrame(index=df.index)
     f["rsi"] = ta.RSI(c, 14); f["willr"] = ta.WILLR(h, l, c, 14); f["cmo"] = ta.CMO(c, 14)
