@@ -14,7 +14,12 @@ import numpy as np
 import pandas as pd
 from backend.services import strategy_runner as sr
 
-_GRAN = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
+# Minutes per timeframe — MUST cover every TF the app supports, else
+# fetch_klines computes start_ts with the wrong bar width and over-fetches by
+# orders of magnitude (e.g. tf="3m" falling back to 60 → 167 days of 3m candles).
+_GRAN = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60,
+         "2h": 120, "4h": 240, "6h": 360, "8h": 480, "12h": 720,
+         "1d": 1440, "1w": 10080}
 
 
 def fetch_klines(pair: str, tf: str = "1h", bars: int = 4000) -> pd.DataFrame:
@@ -213,6 +218,13 @@ def train_and_gate(rows: list[tuple], n_windows: int = 4, conf: float = 0.55) ->
                    "kept": int(keep.sum()), "unfiltered_net": round(unf, 2),
                    "filtered_net": round(fil, 2), "improvement": round(fil - unf, 2)})
         wins_unf += unf; wins_fil += fil
+    if not wf:
+        # Each test window is ~15% of the signals; below ~134 signals every
+        # window is < 20 rows and gets skipped, leaving nothing to judge. Say so
+        # instead of reporting a hollow "FAIL · 0/0 windows".
+        return {"ok": False, "reason": f"only {n} signals — too few for stable "
+                "walk-forward windows (need ~150+). Add pairs or a longer range / "
+                "higher-frequency strategy."}
     better = sum(1 for w in wf if w["improvement"] > 0)
     passed = bool(wf) and better >= max(1, round(len(wf) * 0.6)) and wins_fil > wins_unf
     out = {"ok": True, "signals": n, "base_win_rate": round(base_wr * 100, 1),
