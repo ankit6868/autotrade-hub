@@ -9,9 +9,7 @@ unfiltered out-of-sample) before it's used.
 Stateless functions here; storage + endpoints + engine wiring live elsewhere.
 """
 from __future__ import annotations
-import json
 import time
-import urllib.request
 import numpy as np
 import pandas as pd
 from backend.services import strategy_runner as sr
@@ -19,28 +17,22 @@ from backend.services import strategy_runner as sr
 _GRAN = {"1m": 1, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "4h": 240, "1d": 1440}
 
 
-def _kc_symbol(pair: str) -> str:
-    base = pair.split("/")[0].upper()
-    return ("XBT" if base == "BTC" else base) + "USDTM"
-
-
 def fetch_klines(pair: str, tf: str = "1h", bars: int = 4000) -> pd.DataFrame:
-    """Fetch ~`bars` KuCoin futures candles for training (paginated)."""
-    gran = _GRAN.get(tf, 60); sym = _kc_symbol(pair); out: list = []; cur = int(time.time() * 1000)
-    while len(out) < bars:
-        frm = cur - gran * 60_000 * 200
-        url = f"https://api-futures.kucoin.com/api/v1/kline/query?symbol={sym}&granularity={gran}&from={frm}&to={cur}"
-        d = json.load(urllib.request.urlopen(url, timeout=25)).get("data") or []
-        if not d:
-            break
-        out = d + out; cur = d[0][0] - 1; time.sleep(0.2)
-    rows = sorted(out, key=lambda r: r[0])[-bars:]
-    df = pd.DataFrame(rows, columns=["t", "open", "high", "low", "close", "vol", "turn"])
-    for c in ["open", "high", "low", "close", "vol"]:
-        df[c] = df[c].astype(float)
+    """Fetch ~`bars` recent KuCoin futures candles for training.
+
+    Delegates to the backtester's loader so we reuse the KuCoin PROXY POOL
+    (direct datacenter access to api-futures.kucoin.com is blocked on Railway —
+    the whole app routes through 100 rotating proxies), plus its parallel
+    pagination, 10-min cache and canonical symbol mapping (BTC→XBT, gold, …).
+    Returns columns [date, open, high, low, close, vol, volume].
+    """
+    from backend.services.native_backtester import load_futures_ohlcv
+    gran = _GRAN.get(tf, 60)
+    end_ts = int(time.time())
+    start_ts = end_ts - (bars + 5) * gran * 60
+    df = load_futures_ohlcv(pair, tf, start_ts, end_ts).tail(bars).reset_index(drop=True)
     df["volume"] = df["vol"]
-    df["date"] = pd.to_datetime(df["t"], unit="ms", utc=True)
-    return df.reset_index(drop=True)
+    return df
 
 
 def deserialize(blob: bytes) -> dict:
