@@ -4024,6 +4024,7 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
                     take_profit_pct=(i.takeprofit or 0.015) * 100,
                     max_position_pct=(i.risk_pct or 5.0),
                     strategy_id=i.strategy_id,
+                    instance_id=i.id,
                     kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
                     arm_enabled       = bool(getattr(i, "arm_enabled", False) or False),
                     arm_tp1_close_pct = float(getattr(i, "arm_tp1_close_pct", 50.0) or 50.0),

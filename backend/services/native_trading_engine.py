@@ -44,9 +44,41 @@ log = logging.getLogger("native_engine")
 
 # ─── DB persistence helpers (open + closed trades) ────────────────────────
 
+def _serialize_arm_state(pos: "Position") -> str | None:
+    """JSON snapshot of a position's mutable runtime state for rehydration after
+    a restart — the partially-closed size + booked P&L (which apply to ANY
+    position, ARM or not) plus the full ARM mid-flight state when ARM is on.
+    Returns None for a pristine, full, non-ARM position (nothing to restore)."""
+    arm       = bool(getattr(pos, "arm_active", False))
+    remaining = float(getattr(pos, "remaining_pct", 1.0) or 1.0)
+    partial   = float(getattr(pos, "partial_pnl_abs", 0.0) or 0.0)
+    contracts = int(getattr(pos, "contracts", 0) or 0)
+    if not arm and remaining >= 0.9999 and partial == 0.0 and contracts == 0:
+        return None
+    try:
+        return json.dumps({
+            "arm_active":        arm,
+            "remaining_pct":     remaining,
+            "partial_pnl_abs":   partial,
+            "contracts":         contracts,
+            # ARM-only fields (meaningful only when arm_active is True):
+            "tp1_price":         getattr(pos, "tp1_price", None),
+            "tp2_price":         getattr(pos, "tp2_price", None),
+            "tp1_close_pct":     getattr(pos, "tp1_close_pct", 1.0),
+            "arm_be_mode":       getattr(pos, "arm_be_mode", "leverage"),
+            "arm_be_buffer_pct": getattr(pos, "arm_be_buffer_pct", 1.0),
+            "arm_trail_to_tp1":  getattr(pos, "arm_trail_to_tp1", True),
+            "tp1_hit":           getattr(pos, "tp1_hit", False),
+            "trailed_to_tp1":    getattr(pos, "trailed_to_tp1", False),
+        })
+    except Exception:
+        return None
+
+
 def _persist_open_trade(user_id: str, pos: "Position", mode: str,
                         strategy_id: int | None = None,
-                        leverage: int = 1, market_type: str = "spot") -> int | None:
+                        leverage: int = 1, market_type: str = "spot",
+                        instance_id: int | None = None) -> int | None:
     """Insert an open Position into the DB Trade table. Returns the new trade DB id."""
     try:
         from backend.models.database import SessionLocal
@@ -64,9 +96,12 @@ def _persist_open_trade(user_id: str, pos: "Position", mode: str,
                 entry_price       = round(pos.entry, 8),
                 amount            = round(pos.size, 8),
                 stoploss_price    = round(pos.sl, 8) if pos.sl else None,
+                tp_price          = round(pos.tp, 8) if getattr(pos, "tp", None) else None,
+                arm_state         = _serialize_arm_state(pos),
                 entry_time        = pos.opened_at,
                 status            = "open",
                 strategy_id       = strategy_id,
+                instance_id       = instance_id,
             )
             db.add(trade)
             db.commit()
@@ -82,6 +117,33 @@ def _persist_open_trade(user_id: str, pos: "Position", mode: str,
     except Exception as e:
         log.error("DB persistence import error: %s", e)
         return None
+
+
+def _persist_position_update(pos: "Position") -> None:
+    """Sync the mutable fields of an OPEN position's Trade row (sl/tp + ARM
+    snapshot) so a restart rehydrates it with current state — e.g. after a TP1
+    partial close booked profit and moved SL to break-even. No-op without a
+    db_id (position was never persisted). Best-effort."""
+    db_id = getattr(pos, "db_id", None)
+    if not db_id:
+        return
+    try:
+        from backend.models.database import SessionLocal
+        from backend.models.trade import Trade as TradeModel
+        db = SessionLocal()
+        try:
+            t = db.get(TradeModel, db_id)
+            if t is not None and t.status == "open":
+                t.stoploss_price = round(pos.sl, 8) if pos.sl else None
+                t.tp_price       = round(pos.tp, 8) if getattr(pos, "tp", None) else None
+                t.arm_state      = _serialize_arm_state(pos)
+                db.commit()
+        except Exception:
+            db.rollback()
+        finally:
+            db.close()
+    except Exception:
+        pass
 
 
 def _persist_closed_trade(user_id: str, pos: "Position", mode: str,
@@ -552,6 +614,7 @@ class NativeTradingEngine:
         # config (set by start())
         self._strategy     = ""
         self._strategy_id: int | None = None   # DB id of the strategy record
+        self._instance_id: int | None = None   # DB id of the StrategyInstance (bot)
         self._pairs: list[str] = []
         self._timeframe    = "15m"
         self._mode         = "paper"    # "paper" | "live"

@@ -40,6 +40,14 @@ class Trade(Base):
     profit_pct = Column(Float)
     profit_abs = Column(Float)
     stoploss_price = Column(Float)
+    # Take-profit price + ARM runtime snapshot, persisted so a PAPER bot's open
+    # position can be rehydrated into its engine after a backend restart (live
+    # bots recover from KuCoin; paper had no source of truth and orphaned them).
+    tp_price = Column(Float, nullable=True)
+    arm_state = Column(Text, nullable=True)               # JSON ARM snapshot or null
+    # StrategyInstance.id that opened this trade — lets rehydration claim the
+    # exact bot's positions even when two bots run the same strategy template.
+    instance_id = Column(Integer, nullable=True, index=True)
     entry_time = Column(DateTime)
     exit_time = Column(DateTime)
     exit_reason = Column(Text)

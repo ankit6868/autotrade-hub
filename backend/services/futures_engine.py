@@ -26,7 +26,7 @@ from typing import Optional
 
 from .native_trading_engine import (
     NativeTradingEngine, Position,
-    _persist_open_trade, _persist_closed_trade,
+    _persist_open_trade, _persist_closed_trade, _persist_position_update,
     build_strategy_signal_fn, StrategyCompileError,
     _fetch_candles, _build_df, KUCOIN_BASE, TF_KUCOIN,
 )
@@ -866,6 +866,11 @@ class FuturesEngine(NativeTradingEngine):
         kucoin_secret: str = "",
         kucoin_passphrase: str = "",
         strategy_id: int | None = None,
+        # StrategyInstance.id of the owning bot (None for the manual engine).
+        # Stamped on every Trade row this engine opens so paper positions can be
+        # rehydrated back into THIS bot after a restart, unambiguously even when
+        # two bots run the same strategy template.
+        instance_id: int | None = None,
         # Phase 3 — Advanced Risk Management
         arm_enabled:        bool  = False,
         arm_tp1_close_pct:  float = 50.0,
@@ -928,6 +933,7 @@ class FuturesEngine(NativeTradingEngine):
         self._stop_evt.clear()
         self._strategy     = strategy_name
         self._strategy_id  = strategy_id
+        self._instance_id  = instance_id
         self._pairs        = pairs
         self._leverage     = max(1, min(20, int(leverage)))
         self._timeframe    = timeframe
@@ -1155,6 +1161,16 @@ class FuturesEngine(NativeTradingEngine):
         except Exception as _warm_exc:
             log.debug("[%s] MTF warm-up skipped: %s", self.user_id, _warm_exc)
 
+        # Rehydrate any PAPER positions this bot left open before a restart, so
+        # they re-attach to the bot card and keep being managed (live positions
+        # recover via _reconcile_live_positions against KuCoin instead). Done
+        # before the run loop starts so the very first tick already manages them.
+        try:
+            if mode == "paper":
+                self._rehydrate_paper_positions()
+        except Exception as _rhy:
+            log.warning("[%s] paper rehydrate skipped: %s", self.user_id, _rhy)
+
         import threading
         self._thread = threading.Thread(
             target=self._run_loop, daemon=True,
@@ -1167,6 +1183,96 @@ class FuturesEngine(NativeTradingEngine):
                  self.user_id, self._leverage, mode, strategy_name)
         return {"started": True, "mode": mode, "market_type": "futures",
                 "leverage": self._leverage, "strategy": strategy_name}
+
+    def _rehydrate_paper_positions(self) -> None:
+        """Re-attach this bot's OPEN paper positions after a backend restart.
+
+        Paper positions live only in memory, so a redeploy used to orphan them
+        (the DB row stayed 'open' forever, the bot card showed 0 open, and SL/TP
+        stopped firing). This rebuilds them from the DB into self.positions so
+        they re-attach to the bot and the run loop manages them again.
+
+        Ownership: rows tagged with this bot's instance_id (exact), PLUS legacy
+        rows (instance_id NULL) for this strategy opened on/after the instance
+        was created — those are CLAIMED on adoption (instance_id stamped) so a
+        second bot on the same template can't grab them too. No-op for the
+        manual engine (no instance_id).
+        """
+        if not self._instance_id:
+            return
+        import json as _json
+        from datetime import datetime, timezone
+        from sqlalchemy import select, or_, and_
+        from backend.models.database import SessionLocal
+        from backend.models.trade import Trade as _T, StrategyInstance as _SI
+
+        existing_db_ids = {getattr(p, "db_id", None) for p in self.positions.values()}
+        adopted = 0
+        with SessionLocal() as db:
+            inst = db.get(_SI, self._instance_id)
+            created = getattr(inst, "created_at", None)
+            cond = (_T.instance_id == self._instance_id)
+            if self._strategy_id and created is not None:
+                cond = or_(cond, and_(
+                    _T.instance_id.is_(None),
+                    _T.strategy_id == self._strategy_id,
+                    _T.entry_time >= created,
+                ))
+            rows = db.execute(
+                select(_T).where(
+                    _T.user_id == self.user_id,
+                    _T.market_type == "futures",
+                    _T.mode == "paper",
+                    _T.status == "open",
+                    cond,
+                )
+            ).scalars().all()
+
+            for t in rows:
+                if t.id in existing_db_ids or not t.entry_price or not t.amount:
+                    continue
+                pos = FuturesPosition(
+                    pair=t.pair, direction=(t.side or "long"),
+                    entry=float(t.entry_price), sl=float(t.stoploss_price or 0.0),
+                    tp=float(t.tp_price or 0.0), size=float(t.amount),
+                    leverage=int(t.leverage or 1),
+                    opened_at=t.entry_time or datetime.now(timezone.utc),
+                    trade_id=f"rehydrated#{t.id}",
+                )
+                pos.db_id = t.id
+                if t.liquidation_price:
+                    pos.liquidation_price = float(t.liquidation_price)
+                # Restore mutable runtime state: remaining size + booked P&L
+                # apply to ANY partially-closed position; ARM fields only when
+                # ARM was active.
+                if t.arm_state:
+                    try:
+                        a = _json.loads(t.arm_state)
+                        pos.remaining_pct   = float(a.get("remaining_pct", 1.0) or 1.0)
+                        pos.partial_pnl_abs = float(a.get("partial_pnl_abs", 0.0) or 0.0)
+                        pos.contracts       = int(a.get("contracts", 0) or 0)
+                        if a.get("arm_active"):
+                            pos.arm_active        = True
+                            pos.tp1_price         = a.get("tp1_price")
+                            pos.tp2_price         = a.get("tp2_price")
+                            pos.tp1_close_pct     = a.get("tp1_close_pct", 1.0)
+                            pos.arm_be_mode       = a.get("arm_be_mode", "leverage")
+                            pos.arm_be_buffer_pct = a.get("arm_be_buffer_pct", 1.0)
+                            pos.arm_trail_to_tp1  = a.get("arm_trail_to_tp1", True)
+                            pos.tp1_hit           = a.get("tp1_hit", False)
+                            pos.trailed_to_tp1    = a.get("trailed_to_tp1", False)
+                    except Exception:
+                        pass
+                self.positions[pos.trade_id] = pos
+                # Claim legacy untagged rows so no other bot adopts them too.
+                if t.instance_id is None:
+                    t.instance_id = self._instance_id
+                adopted += 1
+            if adopted:
+                db.commit()
+        if adopted:
+            log.info("[%s] Rehydrated %d open paper position(s) for instance %s",
+                     self.user_id, adopted, self._instance_id)
 
     # ── Run loop (lives on FuturesEngine after the spot purge) ──────────
     #
@@ -1447,6 +1553,10 @@ class FuturesEngine(NativeTradingEngine):
                             # to KuCoin so the real position is also reduced.
                             if self._mode == "live":
                                 self._place_live_partial_close(pair, pos, pos.tp1_close_pct, pos.tp1_price)
+                            # Persist the post-partial state (remaining size,
+                            # booked P&L, SL→BE, TP→TP2) so a restart rehydrates
+                            # the position correctly instead of as a full one.
+                            _persist_position_update(pos)
                             # Don't fall through to check_exit on this tick —
                             # the position state has just changed; let the
                             # next tick re-evaluate against the new SL/TP.
@@ -2068,6 +2178,7 @@ class FuturesEngine(NativeTradingEngine):
                 pos.db_id = _persist_open_trade(
                     self.user_id, pos, self._mode, self._strategy_id,
                     leverage=self._leverage, market_type="futures",
+                    instance_id=self._instance_id,
                 )
                 self.positions[trade_key] = pos
                 # Realized-P&L wallet model (matches the manual paper path):
@@ -3223,6 +3334,7 @@ class FuturesEngine(NativeTradingEngine):
                 pos.db_id = _persist_open_trade(
                     self.user_id, pos, self._mode, self._strategy_id,
                     leverage=lev, market_type="futures",
+                    instance_id=self._instance_id,
                 )
                 trade_key = f"{pair}#filled#{oid}"
                 self.positions[trade_key] = pos

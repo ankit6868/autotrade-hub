@@ -4276,6 +4276,15 @@ def partial_close_futures_position(
         log.warning("[%s] Failed to persist partial-close history row: %s",
                     user_id, persist_exc)
 
+    # Sync the OPEN row's reduced size / booked P&L so a restart rehydrates the
+    # shrunken position correctly (skipped when it's about to fully close below).
+    if pos.remaining_pct > 0.01:
+        try:
+            from backend.services.native_trading_engine import _persist_position_update
+            _persist_position_update(pos)
+        except Exception:
+            pass
+
     # If close_pct = ~100, the position is effectively flat — auto-close it.
     if pos.remaining_pct <= 0.01:
         pos.close(fill_price, "manual_full_close", now)
@@ -6362,6 +6371,7 @@ def list_futures_bots(
                 take_profit_pct=(i.takeprofit or 0.015) * 100,
                 max_position_pct=(i.risk_pct or 5.0),
                 strategy_id=i.strategy_id,
+                instance_id=i.id,
                 kucoin_key=_kk, kucoin_secret=_ks, kucoin_passphrase=_kp,
                 # Phase 3 — restore ARM config from the persisted instance row
                 arm_enabled       = bool(getattr(i, "arm_enabled", False) or False),
@@ -6871,6 +6881,7 @@ def create_futures_bot(
         wallet=wallet, take_profit_pct=takeprofit * 100,
         max_position_pct=max_position_pct,
         strategy_id=strategy_id,
+        instance_id=instance.id,
         kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
         arm_enabled        = arm_enabled,
         arm_tp1_close_pct  = arm_tp1_close_pct,
