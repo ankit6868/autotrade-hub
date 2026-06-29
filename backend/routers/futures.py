@@ -6475,6 +6475,18 @@ def list_futures_bots(
         db_count = db_trade_counts.get(i.id, 0)
         eng_total = (engine_status or {}).get("total_trades", 0) + (engine_status or {}).get("open_trades", 0)
         winding = (engine_status or {}).get("winding_down", False)
+        # P&L split: realized = DB sum (authoritative across restarts — engine
+        # realized resets to 0 on each redeploy); unrealized = live mark-to-
+        # market from the running engine (0 when it isn't in memory). The card's
+        # headline total = realized + unrealized so a bot sitting in an open
+        # position shows its live P&L instead of a stale "0 until it closes".
+        _realized = round(
+            db_pnl_sums.get(i.id, 0.0)
+            or (engine_status or {}).get("realized_pnl", 0.0)
+            or float(i.total_pnl or 0.0),
+            4,
+        )
+        _unrealized = round((engine_status or {}).get("unrealized_pnl", 0.0) or 0.0, 4)
         bots.append({
             "id": i.id,
             "strategy_name": i.strategy_name,
@@ -6490,15 +6502,12 @@ def list_futures_bots(
             "engine_running": engine_running,
             "total_trades": eng_total or db_count or i.total_trades or 0,
             "closed_trades": (engine_status or {}).get("total_trades", i.total_trades or 0),
-            # Prefer DB-summed P&L (always authoritative across restarts)
-            # over engine_status.realized_pnl which is 0 after each Railway
-            # redeploy. Engine value is used only as a sanity check.
-            "total_pnl": round(
-                db_pnl_sums.get(i.id, 0.0)
-                or (engine_status or {}).get("realized_pnl", 0.0)
-                or float(i.total_pnl or 0.0),
-                4,
-            ),
+            # Realized (closed trades), unrealized (open mark-to-market), and
+            # their sum. Frontend shows total as the headline P&L and can break
+            # it down on hover / in the detail view.
+            "realized_pnl":   _realized,
+            "unrealized_pnl": _unrealized,
+            "total_pnl":      round(_realized + _unrealized, 4),
             # Engine-reported count is freshest, but falls back to the
             # DB count (just bulk-loaded above) when the engine isn't in
             # memory yet — e.g. right after a Railway restart, or while
@@ -7088,18 +7097,25 @@ def futures_bot_performance(
                 "ticks": s.get("ticks", 0),
                 "signal_count": s.get("signal_count", 0),
                 "last_action": s.get("last_action", ""),
+                # Only the LIVE unrealized comes from the engine. Realized is
+                # taken from the DB sum below (authoritative across restarts —
+                # the engine's realized resets to 0 on each redeploy), so the
+                # detail panel agrees with the bot card.
                 "unrealized_pnl": s.get("unrealized_pnl", 0),
-                "realized_pnl": s.get("realized_pnl", 0),
             }
 
     # Extract signal criteria from strategy description/docstring
     signal_criteria = _extract_signal_criteria(instance.strategy_name, instance.strategy_id, db, user_id)
 
+    # Realized = DB all-time sum (authoritative). Unrealized = live engine
+    # mark-to-market (0 when not running). total = both, matching the bot card.
+    _unreal = float(engine_data.get("unrealized_pnl", 0.0) or 0.0)
     return {
         "bot_id": bot_id,
         "strategy_name": instance.strategy_name,
         "total_trades": total_trade_count,
-        "total_pnl": round(total_pnl, 4),
+        "realized_pnl": round(total_pnl, 4),
+        "total_pnl": round(total_pnl + _unreal, 4),
         "win_rate": win_rate,
         "is_running": instance.is_running,
         "winding_down": winding_down,

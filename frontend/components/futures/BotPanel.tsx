@@ -350,11 +350,17 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
                   <p className="text-slate-500">Open</p>
                   <p className={`font-medium ${(mainEngine.open_trades || 0) > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{mainEngine.open_trades || 0}</p>
                 </div>
-                <div className="text-center p-1.5 rounded bg-[#131722]">
+                <div className="text-center p-1.5 rounded bg-[#131722]"
+                     title="Total P&L = realized (closed) + unrealized (open positions, live)">
                   <p className="text-slate-500">P&L</p>
-                  <p className={`font-bold ${(mainEngine.realized_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {(mainEngine.realized_pnl || 0) >= 0 ? '+' : ''}{(mainEngine.realized_pnl || 0).toFixed(2)}
+                  <p className={`font-bold ${(mainEngine.total_pnl ?? mainEngine.realized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(mainEngine.total_pnl ?? mainEngine.realized_pnl ?? 0) >= 0 ? '+' : ''}{(mainEngine.total_pnl ?? mainEngine.realized_pnl ?? 0).toFixed(2)}
                   </p>
+                  {!!mainEngine.unrealized_pnl && (
+                    <p className={`text-[8px] ${mainEngine.unrealized_pnl >= 0 ? 'text-emerald-500/70' : 'text-red-500/70'}`}>
+                      {mainEngine.unrealized_pnl >= 0 ? '+' : ''}{mainEngine.unrealized_pnl.toFixed(2)} open
+                    </p>
+                  )}
                 </div>
               </div>
               {mainEngine.last_action && (
@@ -456,11 +462,17 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
                   <p className="text-slate-500">Open</p>
                   <p className={`font-medium ${bot.open_positions > 0 ? 'text-emerald-400' : 'text-slate-400'}`}>{bot.open_positions || 0}</p>
                 </div>
-                <div className="text-center p-1.5 rounded bg-[#131722]">
+                <div className="text-center p-1.5 rounded bg-[#131722]"
+                     title="Total P&L = realized (closed) + unrealized (open positions, live)">
                   <p className="text-slate-500">P&L</p>
                   <p className={`font-bold ${(bot.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                     {(bot.total_pnl || 0) >= 0 ? '+' : ''}{(bot.total_pnl || 0).toFixed(2)}
                   </p>
+                  {!!bot.unrealized_pnl && (
+                    <p className={`text-[8px] ${bot.unrealized_pnl >= 0 ? 'text-emerald-500/70' : 'text-red-500/70'}`}>
+                      {bot.unrealized_pnl >= 0 ? '+' : ''}{bot.unrealized_pnl.toFixed(2)} open
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -2112,11 +2124,17 @@ function BotDetailView({ botId, onBack, onStop }: { botId: number; onBack: () =>
 
       {/* Summary stats */}
       <div className="grid grid-cols-5 gap-1.5 px-3 py-2 border-b border-white/[0.06]">
-        <div className="text-center p-1.5 rounded bg-[#131722]">
+        <div className="text-center p-1.5 rounded bg-[#131722]"
+             title="Total P&L = realized (closed trades) + unrealized (open positions, live).">
           <p className="text-[9px] text-slate-500">P&L</p>
-          <p className={`text-[11px] font-bold ${(data.realized_pnl || data.total_pnl || 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-            {(data.realized_pnl || data.total_pnl || 0) >= 0 ? '+' : ''}{(data.realized_pnl || data.total_pnl || 0).toFixed(2)}
+          <p className={`text-[11px] font-bold ${(data.total_pnl ?? data.realized_pnl ?? 0) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+            {(data.total_pnl ?? data.realized_pnl ?? 0) >= 0 ? '+' : ''}{(data.total_pnl ?? data.realized_pnl ?? 0).toFixed(2)}
           </p>
+          {!!data.unrealized_pnl && (
+            <p className={`text-[8px] ${data.unrealized_pnl >= 0 ? 'text-emerald-500/70' : 'text-red-500/70'}`}>
+              {data.unrealized_pnl >= 0 ? '+' : ''}{data.unrealized_pnl.toFixed(2)} open
+            </p>
+          )}
         </div>
         <div className="text-center p-1.5 rounded bg-[#131722]">
           <p className="text-[9px] text-slate-500">Win Rate</p>

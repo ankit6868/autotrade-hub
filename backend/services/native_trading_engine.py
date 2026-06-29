@@ -591,6 +591,27 @@ class NativeTradingEngine:
     @property
     def status(self) -> dict:
         with self._lock:
+            # ── P&L breakdown (all leveraged, on margin) ─────────────────
+            # realized   = fully-closed round trips ONLY (these match the DB
+            #              `Trade` rows the bot card sums, so the two never
+            #              double-count nor disagree).
+            # unrealized = everything still riding in OPEN positions = live
+            #              mark-to-market of the remaining exposure (after any
+            #              partial close) PLUS profit already BOOKED on a TP1
+            #              partial of that still-open position. Falls back to
+            #              entry (→ 0 P&L) when no fresh price is known yet.
+            # total      = realized + unrealized, so the UI shows the live P&L
+            #              of a bot sitting in an open position instead of a
+            #              stale "0 until it closes".
+            realized = sum(t.pnl_abs for t in self.closed_trades)
+            unrealized = 0.0
+            for p in self.positions.values():
+                mark = self._last_prices.get(p.pair, p.entry) or p.entry
+                move = ((mark - p.entry) / p.entry) if p.direction == "long" \
+                       else ((p.entry - mark) / p.entry)
+                remaining = float(getattr(p, "remaining_pct", 1.0) or 1.0)
+                unrealized += (p.size * remaining * move * getattr(p, "leverage", 1)
+                               + getattr(p, "partial_pnl_abs", 0.0))
             return {
                 "running":      self.is_running,
                 "mode":         self._mode,
@@ -605,17 +626,9 @@ class NativeTradingEngine:
                 "last_action":  self.last_action,
                 "started_at":   str(self.started_at) if self.started_at else None,
                 "user_id":      self.user_id,
-                "realized_pnl": round(sum(t.pnl_abs for t in self.closed_trades), 4),
-                "unrealized_pnl": round(
-                    sum(
-                        p.size * (
-                            (self._last_prices.get(p.pair, p.entry) - p.entry) / p.entry
-                            if p.direction == "long" else
-                            (p.entry - self._last_prices.get(p.pair, p.entry)) / p.entry
-                        ) * getattr(p, "leverage", 1)
-                        for p in self.positions.values()
-                    ), 4
-                ),
+                "realized_pnl":   round(realized, 4),
+                "unrealized_pnl": round(unrealized, 4),
+                "total_pnl":      round(realized + unrealized, 4),
                 "win_rate": round(
                     sum(1 for t in self.closed_trades if t.pnl_abs > 0)
                     / max(1, len(self.closed_trades)) * 100, 1
