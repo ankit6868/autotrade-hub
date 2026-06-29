@@ -4272,6 +4272,9 @@ def partial_close_futures_position(
                 strategy_id = eng._strategy_id,
             ))
             _db.commit()
+        # This leg's P&L is now in the DB (realized). Mark it persisted so the
+        # unrealized aggregate doesn't also count it via partial_pnl_abs.
+        pos.partial_pnl_persisted = getattr(pos, "partial_pnl_persisted", 0.0) + leg_pnl
     except Exception as persist_exc:
         log.warning("[%s] Failed to persist partial-close history row: %s",
                     user_id, persist_exc)

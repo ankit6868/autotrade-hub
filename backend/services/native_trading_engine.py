@@ -52,15 +52,17 @@ def _serialize_arm_state(pos: "Position") -> str | None:
     arm       = bool(getattr(pos, "arm_active", False))
     remaining = float(getattr(pos, "remaining_pct", 1.0) or 1.0)
     partial   = float(getattr(pos, "partial_pnl_abs", 0.0) or 0.0)
+    persisted = float(getattr(pos, "partial_pnl_persisted", 0.0) or 0.0)
     contracts = int(getattr(pos, "contracts", 0) or 0)
     if not arm and remaining >= 0.9999 and partial == 0.0 and contracts == 0:
         return None
     try:
         return json.dumps({
-            "arm_active":        arm,
-            "remaining_pct":     remaining,
-            "partial_pnl_abs":   partial,
-            "contracts":         contracts,
+            "arm_active":            arm,
+            "remaining_pct":         remaining,
+            "partial_pnl_abs":       partial,
+            "partial_pnl_persisted": persisted,
+            "contracts":             contracts,
             # ARM-only fields (meaningful only when arm_active is True):
             "tp1_price":         getattr(pos, "tp1_price", None),
             "tp2_price":         getattr(pos, "tp2_price", None),
@@ -673,8 +675,16 @@ class NativeTradingEngine:
                 move = ((mark - p.entry) / p.entry) if p.direction == "long" \
                        else ((p.entry - mark) / p.entry)
                 remaining = float(getattr(p, "remaining_pct", 1.0) or 1.0)
+                # Booked partials NOT yet written to the DB as closed leg rows.
+                # Manual partial-closes persist a leg row immediately (so it's
+                # already in `realized` via the DB sum) and stamp
+                # partial_pnl_persisted; engine TP1 partials don't persist until
+                # full close, so they remain here. Subtracting avoids counting a
+                # manual partial in both realized and unrealized.
+                booked_unpersisted = (float(getattr(p, "partial_pnl_abs", 0.0) or 0.0)
+                                      - float(getattr(p, "partial_pnl_persisted", 0.0) or 0.0))
                 unrealized += (p.size * remaining * move * getattr(p, "leverage", 1)
-                               + getattr(p, "partial_pnl_abs", 0.0))
+                               + booked_unpersisted)
             return {
                 "running":      self.is_running,
                 "mode":         self._mode,

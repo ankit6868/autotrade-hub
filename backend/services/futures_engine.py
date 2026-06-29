@@ -329,6 +329,12 @@ class FuturesPosition(Position):
         self.trailed_to_tp1:    bool  = False
         self.remaining_pct:     float = 1.0
         self.partial_pnl_abs:   float = 0.0
+        # Of `partial_pnl_abs`, how much has ALREADY been written to the DB as a
+        # closed "leg" Trade row (manual partial-closes do this; the engine TP1
+        # partial does not until the full close). The unrealized-P&L aggregate
+        # subtracts this so a manual partial isn't counted in BOTH realized (DB)
+        # and unrealized.
+        self.partial_pnl_persisted: float = 0.0
         # Audit log of partial fills — read by /api/futures/bots performance.
         self.partial_exits:     list  = []                # list[dict(price, reason, close_pct, pnl_abs, ts)]
 
@@ -1248,9 +1254,10 @@ class FuturesEngine(NativeTradingEngine):
                 if t.arm_state:
                     try:
                         a = _json.loads(t.arm_state)
-                        pos.remaining_pct   = float(a.get("remaining_pct", 1.0) or 1.0)
-                        pos.partial_pnl_abs = float(a.get("partial_pnl_abs", 0.0) or 0.0)
-                        pos.contracts       = int(a.get("contracts", 0) or 0)
+                        pos.remaining_pct       = float(a.get("remaining_pct", 1.0) or 1.0)
+                        pos.partial_pnl_abs     = float(a.get("partial_pnl_abs", 0.0) or 0.0)
+                        pos.partial_pnl_persisted = float(a.get("partial_pnl_persisted", 0.0) or 0.0)
+                        pos.contracts           = int(a.get("contracts", 0) or 0)
                         if a.get("arm_active"):
                             pos.arm_active        = True
                             pos.tp1_price         = a.get("tp1_price")
@@ -3372,7 +3379,8 @@ class FuturesEngine(NativeTradingEngine):
                 "liquidation_price": getattr(p, "liquidation_price", None),
                 "opened_at": str(p.opened_at) if p.opened_at else None,
                 "unrealized_pnl": round(
-                    p.size * ((self._last_prices.get(p.pair, p.entry) - p.entry) / p.entry
+                    p.size * float(getattr(p, "remaining_pct", 1.0) or 1.0)
+                    * ((self._last_prices.get(p.pair, p.entry) - p.entry) / p.entry
                     if p.direction == "long" else
                     (p.entry - self._last_prices.get(p.pair, p.entry)) / p.entry)
                     * getattr(p, "leverage", 1), 4
