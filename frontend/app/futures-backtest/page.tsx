@@ -2597,7 +2597,7 @@ plot(range_mid, "Range Mid", color = color.gray, style = plot.style_linebr)
                                   {' '}· skipped:
                                   {d.signals_skipped_in_trade ? ` ${d.signals_skipped_in_trade} in-trade` : ''}
                                   {d.signals_skipped_cooldown ? `, ${d.signals_skipped_cooldown} cooldown` : ''}
-                                  {d.signals_skipped_no_margin ? `, ${d.signals_skipped_no_margin} no-free-margin` : ''}
+                                  {d.signals_skipped_no_margin ? `, ${d.signals_skipped_no_margin} insufficient-margin` : ''}
                                 </span>
                               ) : null}
                             </div>

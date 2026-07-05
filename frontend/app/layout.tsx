@@ -6,7 +6,7 @@ import AuthBridge from '@/components/AuthBridge';
 
 export const metadata: Metadata = {
   title: 'AutoTrade Hub',
-  description: 'AI-powered crypto trading platform — 100% free',
+  description: 'AI-powered crypto futures trading platform',
   applicationName: 'AutoTrade Hub',
   appleWebApp: {
     capable: true,

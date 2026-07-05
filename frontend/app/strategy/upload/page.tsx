@@ -178,7 +178,7 @@ export default function StrategyUploadPage() {
       {loading && (
         <div className="card mb-8">
           <LoadingSpinner text={loadingStep} />
-          <p className="text-center text-xs text-slate-500 mt-2">Free models can take 30-60 seconds. Please wait...</p>
+          <p className="text-center text-xs text-slate-500 mt-2">Some models can take 30-60 seconds. Please wait...</p>
         </div>
       )}
 

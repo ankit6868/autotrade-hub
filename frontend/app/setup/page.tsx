@@ -126,7 +126,7 @@ export default function SetupPage() {
         <div className="card">
           <h2 className="text-xl font-semibold mb-1">KuCoin API Keys</h2>
           <p className="text-slate-400 text-sm mb-6">
-            Free to generate at{' '}
+            Generate an API key at{' '}
             <a href="https://www.kucoin.com/account/api" target="_blank" className="text-brand-400 hover:underline">
               kucoin.com/account/api
             </a>
@@ -213,8 +213,8 @@ export default function SetupPage() {
               <label className="label">Preferred Model</label>
               <select className="input" value={preferredModel} onChange={(e) => setPreferredModel(e.target.value)}>
                 <option value="nvidia/nemotron-3-super-120b-a12b:free">Nemotron 3 Super 120B ⭐ (Recommended)</option>
-                <option value="openai/gpt-oss-120b:free">GPT-OSS 120B (OpenAI free, fast)</option>
-                <option value="openai/gpt-oss-20b:free">GPT-OSS 20B (OpenAI free, fastest)</option>
+                <option value="openai/gpt-oss-120b:free">GPT-OSS 120B (OpenAI, fast)</option>
+                <option value="openai/gpt-oss-20b:free">GPT-OSS 20B (OpenAI, fastest)</option>
                 <option value="google/gemma-4-31b-it:free">Gemma 4 31B (Google)</option>
                 <option value="qwen/qwen3-coder:free">Qwen3 Coder (Best for code, may queue)</option>
                 <option value="meta-llama/llama-3.3-70b-instruct:free">Llama 3.3 70B</option>
@@ -242,7 +242,7 @@ export default function SetupPage() {
             {testResult && (
               <div className={`p-4 rounded-lg text-sm ${testResult.connected ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/10 text-red-400 border border-red-500/30'}`}>
                 {testResult.connected
-                  ? `Connected! ${testResult.free_models} free models available`
+                  ? `Connected! ${testResult.free_models} models available`
                   : `Failed: ${testResult.error}`}
               </div>
             )}

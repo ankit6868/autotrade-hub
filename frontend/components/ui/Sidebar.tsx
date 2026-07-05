@@ -181,7 +181,7 @@ export default function Sidebar() {
             </span>
             <div>
               <h1 className="text-base font-semibold text-white leading-tight">AutoTrade Hub</h1>
-              <p className="text-[11px] text-slate-400 leading-tight">Free AI Trading</p>
+              <p className="text-[11px] text-slate-400 leading-tight">AI Automate Trading</p>
             </div>
           </Link>
           {/* Internal close button removed — the floating hamburger at the
