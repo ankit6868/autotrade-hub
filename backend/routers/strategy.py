@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from backend.models import get_db, Config, Strategy
 from backend.utils.encryption import decrypt, DecryptError
-from backend.utils.clerk_auth import get_user_id
+from backend.utils.clerk_auth import get_user_id, get_user_email
 from backend.utils.validators import validate_strategy_code
 from backend.utils.rate_limit import limiter, AI_LIMIT
 from backend.services.strategy_parser import parse_with_retry, ai_assist, DEFAULT_MODEL
@@ -705,10 +705,39 @@ def list_strategies(
     }
 
 
+# Templates restricted to specific accounts (plus admin). Filename → the extra
+# emails allowed to see it. Anyone not listed (and not admin) never gets these
+# in the /templates response, so they can't view, save or run them.
+_RESTRICTED_TEMPLATES: dict[str, set[str]] = {
+    "ema5_gap_sweep.py": {
+        "sahilpathan73786@gmail.com",
+        "aknayak24@gmail.com",
+    },
+}
+
+
+def _can_see_template(filename: str, email: str) -> bool:
+    """Unrestricted templates are visible to everyone. Restricted ones only to
+    admin or the filename's allowlist. Extra emails can be added per file via an
+    env CSV named after the file, e.g. TEMPLATE_EMA5_GAP_SWEEP_EMAILS."""
+    allowed = _RESTRICTED_TEMPLATES.get(filename)
+    if allowed is None:
+        return True
+    from backend.services import access_control as AC
+    e = (email or "").strip().lower()
+    if AC.is_admin(e):
+        return True
+    env_key = "TEMPLATE_" + filename[:-3].upper() + "_EMAILS"
+    extra = {x.strip().lower() for x in (os.getenv(env_key, "") or "").split(",") if x.strip()}
+    return e in allowed or e in extra
+
+
 @router.get("/templates")
-async def get_templates():
+async def get_templates(email: str = Depends(get_user_email)):
     templates = []
     for f in TEMPLATES_DIR.glob("*.py"):
+        if not _can_see_template(f.name, email):
+            continue
         content = f.read_text()
         # Extract class name
         name = f.stem
