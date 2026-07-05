@@ -259,6 +259,52 @@ async def _call_openrouter(messages: list, api_key: str, model: str) -> dict:
     return response.json()
 
 
+# ── Pine Script support ──────────────────────────────────────────────────
+# TradingView Pine can't run here (different engine); we translate the LOGIC.
+# The hard part is that most Pine scripts are 80% chart-drawing + stats
+# bookkeeping, which drowns a small model. This guide tells the model to throw
+# all of that away and extract only the entry/exit/SL/TP rules.
+def _is_pinescript(text: str) -> bool:
+    """Heuristic: does the pasted text look like TradingView Pine Script?"""
+    t = (text or "").lower()
+    markers = (
+        "//@version", "indicator(", "strategy(", "ta.ema", "ta.sma", "ta.rsi",
+        "ta.crossover", "request.security", "plotshape", "strategy.entry",
+        "box.new", "line.new", "label.new", "syminfo.", "barstate.", "input.",
+    )
+    return sum(1 for m in markers if m in t) >= 2
+
+
+PINE_GUIDE = """The input below is TradingView **Pine Script**. Translate ONLY its
+TRADING LOGIC into the Freqtrade IStrategy. This is the whole job:
+
+DELETE (never translate — pure chart drawing / bookkeeping, NOT logic):
+  • box.*, line.*, label.*, table.*, plot, plotshape, plotchar, bgcolor, fill,
+    color.*  → gone.
+  • win/loss/streak counters and stat tables  → gone.
+  • Manual trade arrays (array.new_*, array.push/get/set that track open trades)
+    → gone. The engine manages open positions itself. From that bookkeeping
+    extract ONLY: the entry condition, the stop-loss rule, the take-profit /
+    risk:reward rule, and any break-even rule.
+
+TRANSLATE these constructs:
+  • ta.ema(close, N) → ta.EMA(dataframe, timeperiod=N)  (same for sma/rsi/atr/...)
+  • prior-bar refs close[1]/high[1]/low[1] → dataframe['close'].shift(1) etc.
+  • crossover(a,b)/crossunder → qtpylib.crossed_above/below(a, b)
+  • request.security(sym, "60", ta.ema(close,N)[1]) (higher-TF value) →
+    approximate with an EMA on the current timeframe: ta.EMA(dataframe, N)
+    and add a comment noting it was HTF. NEVER call request.security in Python.
+  • session / time-of-day filters → a pandas mask on dataframe['date'].dt.hour
+    ONLY if central to the edge; otherwise you may drop them.
+  • structural SL + R:R TP → keep the DIRECTIONAL entry exact; set `stoploss`
+    (class attr) from the typical risk and `minimal_roi` from the R:R.
+
+Output a COMPLETE, compiling IStrategy with real populate_* bodies. Extract the
+core signal even though the script is long and mostly visual.
+
+"""
+
+
 async def parse_strategy_with_openrouter(
     strategy_text: str,
     api_key: str,
@@ -268,10 +314,16 @@ async def parse_strategy_with_openrouter(
     REPAIR_PROMPT to the same model with the broken output attached and
     ask for the missing pieces. Up to one repair pass per model."""
 
+    if _is_pinescript(strategy_text):
+        user_content = f"{PINE_GUIDE}PINE SCRIPT:\n\n{strategy_text}"
+    else:
+        user_content = (
+            f"Convert this trading strategy to a complete Freqtrade IStrategy:"
+            f"\n\n{strategy_text}"
+        )
     initial_messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user",
-         "content": f"Convert this trading strategy to a complete Freqtrade IStrategy:\n\n{strategy_text}"},
+        {"role": "user", "content": user_content},
     ]
     data = await _call_openrouter(initial_messages, api_key, model)
 

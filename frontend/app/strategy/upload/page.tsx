@@ -8,7 +8,7 @@ import LoadingSpinner from '@/components/ui/LoadingSpinner';
 export default function StrategyUploadPage() {
   const router = useRouter();
   const fileRef = useRef<HTMLInputElement>(null);
-  const [mode, setMode] = useState<'upload' | 'type' | 'template'>('upload');
+  const [mode, setMode] = useState<'upload' | 'type' | 'template' | 'pine'>('upload');
   const [file, setFile] = useState<File | null>(null);
   const [text, setText] = useState('');
   const [name, setName] = useState('My Strategy');
@@ -43,7 +43,7 @@ export default function StrategyUploadPage() {
           setLoadingStep('Validating...');
           setResult(data);
         }
-      } else if (mode === 'type' && text) {
+      } else if ((mode === 'type' || mode === 'pine') && text) {
         const formData = new FormData();
         formData.append('text', text);
         formData.append('name', name);
@@ -91,10 +91,11 @@ export default function StrategyUploadPage() {
       <p className="text-slate-400 mb-6 sm:mb-8 text-sm sm:text-base">Upload your trading strategy and let AI convert it to code</p>
 
       {/* Mode selector */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 mb-6 sm:mb-8">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mb-6 sm:mb-8">
         {[
           { key: 'upload', label: 'Upload Document', desc: 'PDF, DOCX, TXT, MD', icon: '📄' },
           { key: 'type', label: 'Type It Out', desc: 'Write your rules directly', icon: '✍️' },
+          { key: 'pine', label: 'Pine Script', desc: 'Paste TradingView Pine', icon: '📈' },
           { key: 'template', label: 'Use a Template', desc: '4 pre-built strategies', icon: '📋' },
         ].map((m) => (
           <button
@@ -153,6 +154,24 @@ export default function StrategyUploadPage() {
         </div>
       )}
 
+      {/* Pine Script mode */}
+      {mode === 'pine' && (
+        <div className="mb-6">
+          <label className="label">Paste your TradingView Pine Script</label>
+          <textarea
+            className="input min-h-[240px] font-mono text-sm"
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            placeholder={`//@version=5\nindicator("My Strategy", overlay=true)\n\n// Paste your FULL Pine Script here.\n// The AI extracts the trading logic (entries, exits, SL/TP, R:R)\n// and automatically ignores all chart drawing — boxes, lines,\n// tables, labels, plotshape, stats — so complex visual scripts work.`}
+          />
+          <p className="text-xs text-slate-500 mt-2">
+            Pine can&apos;t run natively (it&apos;s TradingView&apos;s engine) — the AI translates its
+            logic into a runnable strategy. Visual/drawing code is ignored. Long or complex
+            scripts convert most reliably with the Nemotron / GPT-OSS model selected in Setup.
+          </p>
+        </div>
+      )}
+
       {/* Template mode */}
       {mode === 'template' && (
         <div className="mb-6">
@@ -167,7 +186,7 @@ export default function StrategyUploadPage() {
       {mode !== 'template' && (
         <button
           onClick={handleParse}
-          disabled={loading || (mode === 'upload' && !file) || (mode === 'type' && !text)}
+          disabled={loading || (mode === 'upload' && !file) || ((mode === 'type' || mode === 'pine') && !text)}
           className="btn-primary mb-8"
         >
           {loading ? 'Parsing...' : 'Parse Strategy with AI'}
