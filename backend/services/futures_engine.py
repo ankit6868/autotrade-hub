@@ -3458,5 +3458,25 @@ class FuturesEngineRegistry:
             running += [(k, e) for k, e in self._bot_engines.items() if e.is_running]
             return running
 
+    def stats(self) -> dict:
+        """Snapshot of engine counts for capacity telemetry (read-only)."""
+        with self._lock:
+            manual = list(self._engines.values())
+            bots = list(self._bot_engines.values())
+        users = {e.user_id for e in manual + bots}
+        open_positions = 0
+        for e in bots + manual:
+            try:
+                open_positions += len(e.positions)
+            except Exception:
+                pass
+        return {
+            "distinct_users": len(users),
+            "manual_engines": len(manual),
+            "bot_engines": len(bots),
+            "running": sum(1 for e in manual + bots if e.is_running),
+            "open_positions": open_positions,
+        }
+
 
 futures_engine_registry = FuturesEngineRegistry()

@@ -4310,6 +4310,73 @@ async def health():
     }
 
 
+@app.get("/api/health/capacity")
+async def health_capacity():
+    """Live scaling telemetry: process memory, thread count, active engines and
+    DB-pool utilisation. Read-only — poll this while load-testing to see the REAL
+    headroom instead of estimates. The DB pool is the first ceiling to watch."""
+    import os as _os
+    import threading as _threading
+
+    # ── Process resident memory (Railway = Linux → /proc; fallback resource) ──
+    rss_mb = None
+    try:
+        with open("/proc/self/status") as _f:
+            for _line in _f:
+                if _line.startswith("VmRSS:"):
+                    rss_mb = round(int(_line.split()[1]) / 1024, 1)  # kB → MB
+                    break
+    except Exception:
+        try:
+            import resource as _res
+            rss_mb = round(_res.getrusage(_res.RUSAGE_SELF).ru_maxrss / 1024, 1)
+        except Exception:
+            rss_mb = None
+
+    # ── Engine counts ──
+    try:
+        from backend.services.futures_engine import futures_engine_registry
+        engines = futures_engine_registry.stats()
+    except Exception as _e:
+        engines = {"error": str(_e)}
+
+    # ── DB pool (the first hard ceiling — Supabase session pooler caps ~15) ──
+    pool: dict = {}
+    try:
+        from backend.models.database import engine as _dbeng
+        _p = _dbeng.pool
+        _size = int(_os.getenv("DB_POOL_SIZE", "8"))
+        _overflow = int(_os.getenv("DB_MAX_OVERFLOW", "4"))
+        _max = _size + _overflow
+        _checked_out = _p.checkedout()
+        pool = {
+            "configured_size": _size,
+            "max_overflow": _overflow,
+            "max_connections": _max,
+            "checked_out": _checked_out,
+            "checked_in": _p.checkedin(),
+            "utilization_pct": round(_checked_out / max(1, _max) * 100, 1),
+        }
+    except Exception as _e:
+        pool = {"error": str(_e)}
+
+    # Cheap health verdict.
+    warnings = []
+    if isinstance(pool.get("utilization_pct"), (int, float)) and pool["utilization_pct"] >= 80:
+        warnings.append("DB pool >80% used — raise DB_POOL_SIZE (needs Supabase transaction pooler on port 6543).")
+    if rss_mb and rss_mb > 3500:
+        warnings.append("Process RSS >3.5 GB — bump the Railway container or trim per-engine candle history.")
+
+    return {
+        "status": "ok",
+        "process": {"rss_mb": rss_mb, "threads": _threading.active_count()},
+        "engines": engines,
+        "db_pool": pool,
+        "warnings": warnings,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
 # --- Live trade websocket --------------------------------------------------
 class ConnectionManager:
     """Per-user fan-out: each user has their own list of open sockets so a
