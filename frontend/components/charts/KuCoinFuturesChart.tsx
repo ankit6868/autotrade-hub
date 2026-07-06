@@ -4,10 +4,11 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   createChart, ColorType, CrosshairMode,
   CandlestickData, Time, IChartApi, ISeriesApi,
-  HistogramData, LineStyle, IPriceLine, SeriesMarker,
+  HistogramData, SeriesMarker,
 } from 'lightweight-charts';
 import { api } from '@/lib/api';
 import { useVisibleInterval } from '@/lib/useVisibleInterval';
+import { TradeBoxPrimitive, TradeBox } from '@/lib/tradeBoxPrimitive';
 
 interface Props {
   pair: string;
@@ -205,7 +206,8 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
   const [showEMA, setShowEMA]   = useState(false);
   // Formations overlay — taken trades (bot + manual) + the strategy's live setup.
   const [showForms, setShowForms] = useState(false);
-  const formLinesRef = useRef<IPriceLine[]>([]);
+  const boxPrimRef = useRef<TradeBoxPrimitive | null>(null);
+  const lastBarTimeRef = useRef<number>(0);   // latest candle time (extends open boxes)
   const [overlayStrats, setOverlayStrats] = useState<{ id: number; name: string }[]>([]);
   const [pickStrat, setPickStrat] = useState<number | undefined>(undefined);
   // The most recent PENDING setup (drives the "Take trade" banner).
@@ -246,6 +248,11 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
       borderUpColor: '#26a69a', borderDownColor: '#ef5350',
       wickUpColor: '#26a69a', wickDownColor: '#ef5350',
     });
+
+    // Attach the TradingView-style trade-box overlay (cosmetic; populated by
+    // loadForms when the "Trades" toggle is on).
+    boxPrimRef.current = new TradeBoxPrimitive();
+    serCandle.current.attachPrimitive(boxPrimRef.current);
 
     serVol.current = mc.addHistogramSeries({
       priceFormat: { type: 'volume' },
@@ -325,6 +332,7 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
       const data   = await api.market.ohlcv(pair, tf, candleCount);
       const raw    = (data.candles ?? []).sort((a: {time:number}, b: {time:number}) => a.time - b.time);
       if (!raw.length) { setError('No data'); setLoading(false); return; }
+      lastBarTimeRef.current = raw[raw.length - 1].time;   // extend open/pending boxes to here
 
       const times  = raw.map((c: {time:number}) => c.time as Time);
       const opens  = raw.map((c: {open:number}) => c.open);
@@ -420,29 +428,30 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
   // Visibility-aware: stop refetching candles when the tab is hidden.
   useVisibleInterval(loadData, 30_000);
 
-  // ── Formations overlay: taken trades + the strategy's live setup ──────────
+  // ── Formations overlay: taken-trade boxes + the strategy's live setup ─────
   const loadForms = useCallback(async () => {
     const cs = serCandle.current;
+    const prim = boxPrimRef.current;
     if (!cs) return;
-    // Clear the previous overlay's price lines.
-    formLinesRef.current.forEach(l => { try { cs.removePriceLine(l); } catch { /* gone */ } });
-    formLinesRef.current = [];
-    if (!showForms) { try { cs.setMarkers([]); } catch { /* noop */ } setLatestForm(null); return; }
-
-    const addLine = (price: number | null | undefined, color: string, title: string, dashed: boolean) => {
-      if (!price) return;
-      formLinesRef.current.push(cs.createPriceLine({
-        price, color, lineWidth: 1,
-        lineStyle: dashed ? LineStyle.Dashed : LineStyle.Solid,
-        axisLabelVisible: true, title,
-      }));
-    };
+    if (!showForms) {
+      try { cs.setMarkers([]); } catch { /* noop */ }
+      prim?.setBoxes([]);
+      setLatestForm(null);
+      return;
+    }
 
     try {
       const d = await api.futures.formations({ pair, timeframe: tf, strategy_id: effStrat });
       const markers: SeriesMarker<Time>[] = [];
+      const boxes: TradeBox[] = [];
+      const lastT = lastBarTimeRef.current;
+      const style: Record<string, { fill: string; border: string }> = {
+        won:  { fill: 'rgba(52,211,153,0.12)', border: 'rgba(52,211,153,0.75)' },
+        lost: { fill: 'rgba(248,113,113,0.12)', border: 'rgba(248,113,113,0.75)' },
+        open: { fill: 'rgba(96,165,250,0.10)',  border: 'rgba(96,165,250,0.75)' },
+      };
 
-      // Taken trades → entry arrow, outcome marker, and live SL/TP lines if open.
+      // Taken trades → entry/outcome markers + a box (SL↔TP × entry→exit).
       (d.trades || []).forEach((t: any) => {
         if (t.entry_time) markers.push({
           time: t.entry_time as Time,
@@ -458,14 +467,19 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
           shape: 'circle',
           text: t.state === 'won' ? 'WIN' : 'LOSS',
         });
-        if (t.state === 'open') {
-          addLine(t.entry, '#60a5fa', 'Entry', false);
-          addLine(t.sl, '#f87171', 'SL', false);
-          addLine(t.tp, '#34d399', 'TP', false);
+        if (t.entry_time && t.sl && t.tp) {
+          const st = style[t.state as string] || style.open;
+          boxes.push({
+            t1: t.entry_time as Time,
+            t2: (t.exit_time || lastT || t.entry_time) as Time,
+            entry: t.entry, top: Math.max(t.sl, t.tp), bottom: Math.min(t.sl, t.tp),
+            fill: st.fill, border: st.border,
+            label: `${t.direction === 'long' ? 'LONG' : 'SHORT'}${t.state === 'won' ? ' ✓' : t.state === 'lost' ? ' ✗' : ''}`,
+          });
         }
       });
 
-      // Strategy formations (pending setups) → faint arrows; latest → dashed lines.
+      // Strategy formations → faint arrows; latest → dashed forward box.
       const forms = d.formations || [];
       forms.forEach((f: any) => {
         if (f.time) markers.push({
@@ -476,18 +490,21 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
         });
       });
       const latest = [...forms].reverse().find((f: any) => f.is_latest);
-      if (latest) {
-        addLine(latest.entry, '#93c5fd', 'Setup', true);
-        addLine(latest.sl, '#fca5a5', 'Setup SL', true);
-        addLine(latest.tp, '#86efac', 'Setup TP', true);
-        setLatestForm({ direction: latest.direction, entry: latest.entry, sl: latest.sl ?? null, tp: latest.tp ?? null });
-      } else {
-        setLatestForm(null);
+      if (latest && latest.sl && latest.tp) {
+        boxes.push({
+          t1: latest.time as Time,
+          t2: (lastT || latest.time) as Time,
+          entry: latest.entry, top: Math.max(latest.sl, latest.tp), bottom: Math.min(latest.sl, latest.tp),
+          fill: latest.direction === 'long' ? 'rgba(52,211,153,0.07)' : 'rgba(248,113,113,0.07)',
+          border: latest.direction === 'long' ? 'rgba(52,211,153,0.6)' : 'rgba(248,113,113,0.6)',
+          dashed: true, label: `SETUP ${latest.direction === 'long' ? 'LONG' : 'SHORT'}`,
+        });
       }
+      setLatestForm(latest ? { direction: latest.direction, entry: latest.entry, sl: latest.sl ?? null, tp: latest.tp ?? null } : null);
 
-      // lightweight-charts requires markers sorted ascending by time.
       markers.sort((a, b) => (a.time as number) - (b.time as number));
       cs.setMarkers(markers);
+      prim?.setBoxes(boxes);
     } catch { /* overlay is best-effort */ }
   }, [pair, tf, effStrat, showForms]);
 
