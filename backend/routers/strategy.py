@@ -657,9 +657,11 @@ async def strategy_ai_assist(
 def list_strategies(
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
+    email: str = Depends(get_user_email),
 ):
     from sqlalchemy import or_
     from backend.services.strategy_runner import detect_strategy_indicators
+    from backend.services import access_control as AC
     try:
         result = db.execute(
             select(Strategy)
@@ -667,6 +669,10 @@ def list_strategies(
             .order_by(Strategy.is_template.desc(), Strategy.created_at.desc())
         )
         strategies = result.scalars().all()
+        # Hide account-restricted strategies (e.g. Ema5GapSweep) from everyone
+        # not on their allowlist — they never appear in the list / backtest
+        # dropdown / terminal for other users.
+        strategies = [s for s in strategies if AC.strategy_visible(s.name, email)]
     except Exception:
         # Fallback: skip template filter if new columns haven't migrated yet
         db.rollback()
@@ -705,39 +711,10 @@ def list_strategies(
     }
 
 
-# Templates restricted to specific accounts (plus admin). Filename → the extra
-# emails allowed to see it. Anyone not listed (and not admin) never gets these
-# in the /templates response, so they can't view, save or run them.
-_RESTRICTED_TEMPLATES: dict[str, set[str]] = {
-    "ema5_gap_sweep.py": {
-        "sahilpathan73786@gmail.com",
-        "aknayak24@gmail.com",
-    },
-}
-
-
-def _can_see_template(filename: str, email: str) -> bool:
-    """Unrestricted templates are visible to everyone. Restricted ones only to
-    admin or the filename's allowlist. Extra emails can be added per file via an
-    env CSV named after the file, e.g. TEMPLATE_EMA5_GAP_SWEEP_EMAILS."""
-    allowed = _RESTRICTED_TEMPLATES.get(filename)
-    if allowed is None:
-        return True
-    from backend.services import access_control as AC
-    e = (email or "").strip().lower()
-    if AC.is_admin(e):
-        return True
-    env_key = "TEMPLATE_" + filename[:-3].upper() + "_EMAILS"
-    extra = {x.strip().lower() for x in (os.getenv(env_key, "") or "").split(",") if x.strip()}
-    return e in allowed or e in extra
-
-
 @router.get("/templates")
-async def get_templates(email: str = Depends(get_user_email)):
+async def get_templates():
     templates = []
     for f in TEMPLATES_DIR.glob("*.py"):
-        if not _can_see_template(f.name, email):
-            continue
         content = f.read_text()
         # Extract class name
         name = f.stem

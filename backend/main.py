@@ -3577,6 +3577,90 @@ class EmaGate(IStrategy):
 '''
 
 
+_EMA5_GAP_SWEEP_CODE = '''
+from freqtrade.strategy import IStrategy
+from pandas import DataFrame
+import numpy as np
+import talib.abstract as ta
+
+
+class Ema5GapSweep(IStrategy):
+    """EMA5 Gap + Sweep — translated from a TradingView Pine indicator.
+    The prior candle gaps entirely clear of the 5-EMA, the current bar sweeps
+    the prior extreme, and a 50-EMA trend filter aligns. Structural stop, 6R
+    target via per-trade entry_price / sl_price / tp_price."""
+
+    can_short = True
+    timeframe = "5m"
+    stoploss = -0.05
+    minimal_roi = {"0": 0.30}
+    process_only_new_candles = True
+    startup_candle_count = 60
+
+    ema5_len = 5
+    lt_ema_len = 50
+    rr_target = 6.0
+    sl_buffer = 0.0001
+
+    def populate_indicators(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["ema5"] = ta.EMA(dataframe, timeperiod=self.ema5_len)
+        dataframe["ltema"] = ta.EMA(dataframe, timeperiod=self.lt_ema_len)
+        return dataframe
+
+    def populate_entry_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        df = dataframe
+        df["enter_long"] = 0
+        df["enter_short"] = 0
+        df["entry_price"] = np.nan
+        df["sl_price"] = np.nan
+        df["tp_price"] = np.nan
+
+        c1 = df["close"].shift(1)
+        h1 = df["high"].shift(1)
+        l1 = df["low"].shift(1)
+        h2 = df["high"].shift(2)
+        l2 = df["low"].shift(2)
+        e1 = df["ema5"].shift(1)
+        lt = df["ltema"]
+        high = df["high"]
+        low = df["low"]
+
+        gap_up = (c1 > e1) & (l1 > e1)
+        gap_down = (c1 < e1) & (h1 < e1)
+        sweep_bull = gap_down & (high >= h1)
+        sweep_bear = gap_up & (low <= l1)
+
+        long_entry = h1
+        long_sl = np.minimum(np.minimum(l2, l1), low) * (1.0 - self.sl_buffer)
+        long_risk = long_entry - long_sl
+        long_tp = long_entry + long_risk * self.rr_target
+
+        short_entry = l1
+        short_sl = np.maximum(np.maximum(h2, h1), high) * (1.0 + self.sl_buffer)
+        short_risk = short_sl - short_entry
+        short_tp = short_entry - short_risk * self.rr_target
+
+        long_cond = sweep_bull & (h1 >= lt) & (long_risk > 0)
+        short_cond = sweep_bear & (l1 <= lt) & (short_risk > 0)
+
+        df.loc[long_cond, "enter_long"] = 1
+        df.loc[long_cond, "entry_price"] = long_entry[long_cond]
+        df.loc[long_cond, "sl_price"] = long_sl[long_cond]
+        df.loc[long_cond, "tp_price"] = long_tp[long_cond]
+
+        df.loc[short_cond, "enter_short"] = 1
+        df.loc[short_cond, "entry_price"] = short_entry[short_cond]
+        df.loc[short_cond, "sl_price"] = short_sl[short_cond]
+        df.loc[short_cond, "tp_price"] = short_tp[short_cond]
+        return df
+
+    def populate_exit_trend(self, dataframe: DataFrame, metadata: dict) -> DataFrame:
+        dataframe["exit_long"] = 0
+        dataframe["exit_short"] = 0
+        return dataframe
+'''
+
+
 def _seed_builtin_strategies(db):
     """Ensure template strategies exist with correct trading configs."""
     from backend.models.strategy import Strategy
@@ -3649,6 +3733,20 @@ def _seed_builtin_strategies(db):
             "take_profit": 0.06,
             "leverage": 5,
             "timeframe": "1h",
+        },
+        {
+            "name": "Ema5GapSweep",
+            "description": "EMA5 Gap + Sweep (from a TradingView Pine indicator) — the "
+                           "prior candle gaps entirely clear of the 5-EMA, the current bar "
+                           "sweeps its extreme, and a 50-EMA trend filter aligns. Enters at "
+                           "the prior extreme with a structural stop and a 6R target "
+                           "(per-trade sl_price/tp_price). Restricted strategy. Best on "
+                           "1m-5m; backtest with real costs + walk-forward before sizing.",
+            "code": _EMA5_GAP_SWEEP_CODE,
+            "stoploss": -0.05,
+            "take_profit": 0.30,
+            "leverage": 5,
+            "timeframe": "5m",
         },
         {
             "name": "LorentzianClassifier",

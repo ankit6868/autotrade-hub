@@ -17,7 +17,7 @@ from sqlalchemy import select, desc, func
 from backend.models import get_db
 from backend.models.trade import Trade, StrategyInstance, FuturesOrder
 from backend.models.config import Config
-from backend.utils.clerk_auth import get_user_id
+from backend.utils.clerk_auth import get_user_id, get_user_email
 from backend.services.futures_engine import futures_engine_registry
 from backend.utils.audit import log_event
 
@@ -784,6 +784,7 @@ def run_futures_backtest(
     req: dict,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
+    email: str = Depends(get_user_email),
 ):
     """Run a leveraged futures backtest using historical KuCoin candle data."""
     from sqlalchemy import or_
@@ -906,6 +907,11 @@ def run_futures_backtest(
             )
         ).scalar_one_or_none()
         if strategy:
+            # Enforce the per-strategy account allowlist (e.g. Ema5GapSweep) so a
+            # restricted strategy can't be run by direct API even if its id leaks.
+            from backend.services import access_control as _AC
+            if not _AC.strategy_visible(strategy.name, email):
+                raise HTTPException(status_code=403, detail="Strategy not available for this account")
             strategy_name  = strategy.name
             generated_code = strategy.generated_code
 

@@ -60,6 +60,30 @@ def is_unlimited_allowlisted(email: str) -> bool:
     return bool(email) and email.strip().lower() in unlimited_emails()
 
 
+# ── Per-strategy visibility allowlist ─────────────────────────────────────
+# Strategies (by name, lower-cased) restricted to specific accounts + admin.
+# Everyone else never sees them in the strategy list / backtest dropdown and
+# cannot run them. Extra emails can be added per strategy via an env CSV named
+# TEMPLATE_<NAME>_EMAILS (e.g. TEMPLATE_EMA5GAPSWEEP_EMAILS) without a redeploy.
+_RESTRICTED_STRATEGIES: dict[str, set[str]] = {
+    "ema5gapsweep": {"sahilpathan73786@gmail.com", "aknayak24@gmail.com"},
+}
+
+
+def strategy_visible(name: str, email: str) -> bool:
+    """True when `email` may see/use the strategy `name`. Unrestricted names are
+    visible to everyone; restricted ones only to admin or their allowlist."""
+    key = (name or "").strip().lower()
+    allowed = _RESTRICTED_STRATEGIES.get(key)
+    if allowed is None:
+        return True
+    e = (email or "").strip().lower()
+    if is_admin(e):
+        return True
+    env_extra = _csv_env("TEMPLATE_" + key.upper() + "_EMAILS")
+    return e in allowed or e in env_extra
+
+
 # ── code generation ──────────────────────────────────────────────────────
 def _random_code() -> str:
     blk = lambda n: "".join(secrets.choice(_ALPHABET) for _ in range(n))
