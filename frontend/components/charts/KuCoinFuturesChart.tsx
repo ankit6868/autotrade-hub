@@ -19,6 +19,9 @@ interface Props {
   // When set, the chart overlays THIS strategy's live signals (entry/SL/TP) as
   // "formations" — for manual trading, the setup is shown but no order is placed.
   strategyId?: number;
+  // Phase 3 — when provided, a "Take trade" button appears on the latest setup;
+  // the parent pre-fills the manual order form (the USER still confirms).
+  onTakeFormation?: (f: { direction: string; entry: number; sl: number | null; tp: number | null }) => void;
 }
 
 const TIMEFRAMES = [
@@ -167,7 +170,7 @@ function chartOpts(bg = '#0d1117') {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', strategyIndicators, strategyId }: Props) {
+export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', strategyIndicators, strategyId, onTakeFormation }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const mainRef    = useRef<HTMLDivElement>(null);
   const rsiRef     = useRef<HTMLDivElement>(null);
@@ -203,6 +206,11 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
   // Formations overlay — taken trades (bot + manual) + the strategy's live setup.
   const [showForms, setShowForms] = useState(false);
   const formLinesRef = useRef<IPriceLine[]>([]);
+  const [overlayStrats, setOverlayStrats] = useState<{ id: number; name: string }[]>([]);
+  const [pickStrat, setPickStrat] = useState<number | undefined>(undefined);
+  // The most recent PENDING setup (drives the "Take trade" banner).
+  const [latestForm, setLatestForm] = useState<{ direction: string; entry: number; sl: number | null; tp: number | null } | null>(null);
+  const effStrat = strategyId ?? pickStrat;
   const [error, setError]       = useState('');
   const [isMobile, setIsMobile] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -419,7 +427,7 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
     // Clear the previous overlay's price lines.
     formLinesRef.current.forEach(l => { try { cs.removePriceLine(l); } catch { /* gone */ } });
     formLinesRef.current = [];
-    if (!showForms) { try { cs.setMarkers([]); } catch { /* noop */ } return; }
+    if (!showForms) { try { cs.setMarkers([]); } catch { /* noop */ } setLatestForm(null); return; }
 
     const addLine = (price: number | null | undefined, color: string, title: string, dashed: boolean) => {
       if (!price) return;
@@ -431,7 +439,7 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
     };
 
     try {
-      const d = await api.futures.formations({ pair, timeframe: tf, strategy_id: strategyId });
+      const d = await api.futures.formations({ pair, timeframe: tf, strategy_id: effStrat });
       const markers: SeriesMarker<Time>[] = [];
 
       // Taken trades → entry arrow, outcome marker, and live SL/TP lines if open.
@@ -472,13 +480,24 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
         addLine(latest.entry, '#93c5fd', 'Setup', true);
         addLine(latest.sl, '#fca5a5', 'Setup SL', true);
         addLine(latest.tp, '#86efac', 'Setup TP', true);
+        setLatestForm({ direction: latest.direction, entry: latest.entry, sl: latest.sl ?? null, tp: latest.tp ?? null });
+      } else {
+        setLatestForm(null);
       }
 
       // lightweight-charts requires markers sorted ascending by time.
       markers.sort((a, b) => (a.time as number) - (b.time as number));
       cs.setMarkers(markers);
     } catch { /* overlay is best-effort */ }
-  }, [pair, tf, strategyId, showForms]);
+  }, [pair, tf, effStrat, showForms]);
+
+  // Load the user's strategies for the overlay picker (once, when first opened).
+  useEffect(() => {
+    if (!showForms || overlayStrats.length || strategyId) return;
+    api.strategy.list()
+      .then((d: any) => setOverlayStrats((d.strategies ?? []).map((s: any) => ({ id: s.id, name: s.name }))))
+      .catch(() => {});
+  }, [showForms, overlayStrats.length, strategyId]);
 
   useEffect(() => { loadForms(); }, [loadForms]);
   useVisibleInterval(loadForms, 15_000);
@@ -654,6 +673,46 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
           </button>
         </div>
       </div>
+
+      {/* Formations bar — pick a strategy to overlay its live setups; take manually. */}
+      {showForms && (
+        <div className="flex flex-wrap items-center gap-2 px-2 py-1.5 border-b border-white/[0.06] bg-white/[0.02] text-[11px]">
+          <span className="text-slate-400">Setups from</span>
+          <select
+            value={effStrat ?? ''}
+            onChange={e => setPickStrat(e.target.value ? Number(e.target.value) : undefined)}
+            disabled={!!strategyId}
+            className="rounded bg-[#0f1729] border border-white/10 px-2 py-1 text-slate-200 text-[11px] max-w-[180px]"
+          >
+            <option value="">— pick a strategy —</option>
+            {overlayStrats.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+          </select>
+          {latestForm ? (
+            <div className="flex flex-wrap items-center gap-2 ml-auto">
+              <span className={`font-bold ${latestForm.direction === 'long' ? 'text-emerald-400' : 'text-red-400'}`}>
+                {latestForm.direction === 'long' ? '▲ LONG' : '▼ SHORT'} setup
+              </span>
+              <span className="text-slate-400 tabular">
+                entry {latestForm.entry} · SL {latestForm.sl ?? '—'} · TP {latestForm.tp ?? '—'}
+              </span>
+              {onTakeFormation && (
+                <button
+                  onClick={() => onTakeFormation(latestForm)}
+                  className={`rounded px-2.5 py-1 text-[11px] font-bold ${
+                    latestForm.direction === 'long'
+                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/40'
+                      : 'bg-red-500/20 text-red-300 border border-red-400/40'
+                  }`}
+                >
+                  Take {latestForm.direction === 'long' ? 'Long' : 'Short'} →
+                </button>
+              )}
+            </div>
+          ) : (
+            effStrat ? <span className="text-slate-500 ml-auto">no active setup on the latest bar</span> : null
+          )}
+        </div>
+      )}
 
       {/* Error bar */}
       {error && (

@@ -17,6 +17,9 @@ interface Props {
   // optimistic UI updates (e.g. prepend the new position immediately).
   onOrderPlaced: (result?: any) => void;
   onPriceSet?: (price: string) => void;
+  // Phase 3 — pre-fill from a strategy "formation" the user chose to take
+  // (limit @ entry, SL + TP set). The user still reviews and confirms Buy/Sell.
+  prefill?: { direction: string; entry: number; sl: number | null; tp: number | null } | null;
 }
 
 // Unified order type — covers both basic tabs and advanced dropdown items
@@ -40,7 +43,7 @@ const ALL_TYPES = [...BASIC_TABS, ...ADVANCED_ITEMS];
 
 export default function ManualOrderPanel({
   symbol, pair, mode, leverage, marginMode, availableBalance, lastPrice,
-  onLeverageChange, onMarginModeChange, onOrderPlaced,
+  onLeverageChange, onMarginModeChange, onOrderPlaced, prefill,
 }: Props) {
   const [leadStatus, setLeadStatus] = useState<{ connected: boolean; account_type?: string; balance?: number; equity?: number } | null>(null);
 
@@ -79,6 +82,16 @@ export default function ManualOrderPanel({
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const [sliderValue, setSliderValue] = useState(0);
+
+  // Apply a taken formation: limit order @ entry with SL + TP pre-set. The user
+  // still picks size and clicks Buy/Sell — they take the trade.
+  useEffect(() => {
+    if (!prefill) return;
+    setOrderType('limit');
+    if (prefill.entry) setPrice(String(prefill.entry));
+    if (prefill.sl) { setSlEnabled(true); setSlPrice(String(prefill.sl)); }
+    if (prefill.tp) { setTpEnabled(true); setTpPrice(String(prefill.tp)); }
+  }, [prefill]);
 
   // Advanced Limit fields
   const [timeInForce, setTimeInForce] = useState<'GTC' | 'IOC' | 'FOK'>('GTC');

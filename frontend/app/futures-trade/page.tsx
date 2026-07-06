@@ -37,6 +37,14 @@ export default function FuturesTerminal() {
   // Asset Overview can be collapsed to reclaim vertical space in the bottom
   // row — useful when the user wants more room for Positions / Open Orders.
   const [assetCollapsed, setAssetCollapsed] = useState(false);
+  // Phase 3 — a strategy "formation" the user chose to take; pre-fills the
+  // manual order form (they still confirm Buy/Sell). Cleared after apply.
+  const [orderPrefill, setOrderPrefill] = useState<{ direction: string; entry: number; sl: number | null; tp: number | null } | null>(null);
+  const takeFormation = useCallback((f: { direction: string; entry: number; sl: number | null; tp: number | null }) => {
+    setOrderPrefill({ ...f });
+    setRightPanel('manual');
+    setMobileView('trade');
+  }, []);
 
   const tvSymbol = `KUCOIN:${pair.replace('/', '')}`;
   const futSymbol = pair.replace('/', '').replace('USDT', 'USDTM');
@@ -183,7 +191,7 @@ export default function FuturesTerminal() {
               won't shrink the Positions panel here. */}
           <div className="flex-1 min-w-0 flex flex-col overflow-hidden border-r border-white/[0.06]">
             <div className="flex-1 min-h-0 overflow-hidden">
-              <KuCoinFuturesChart pair={pair} defaultInterval="15m" />
+              <KuCoinFuturesChart pair={pair} defaultInterval="15m" onTakeFormation={takeFormation} />
             </div>
             <div className="h-[260px] shrink-0 border-t border-white/[0.06] overflow-hidden">
               <PositionsPanel
@@ -254,6 +262,7 @@ export default function FuturesTerminal() {
                   marginMode={marginMode}
                   availableBalance={account?.available_balance ?? account?.balance ?? 1000}
                   lastPrice={lastPrice}
+                  prefill={orderPrefill}
                   onLeverageChange={handleLeverageChange}
                   onMarginModeChange={handleMarginModeChange}
                   onOrderPlaced={(result?: any) => {
@@ -299,7 +308,7 @@ export default function FuturesTerminal() {
         <div className="lg:hidden flex-1 min-h-0 overflow-hidden flex flex-col">
           {mobileView === 'chart' && (
             <div className="flex-1 min-h-0 overflow-hidden">
-              <KuCoinFuturesChart pair={pair} defaultInterval="15m" />
+              <KuCoinFuturesChart pair={pair} defaultInterval="15m" onTakeFormation={takeFormation} />
             </div>
           )}
           {mobileView === 'orderbook' && (
@@ -343,6 +352,7 @@ export default function FuturesTerminal() {
                     marginMode={marginMode}
                     availableBalance={account?.available_balance ?? account?.balance ?? 1000}
                     lastPrice={lastPrice}
+                    prefill={orderPrefill}
                     onLeverageChange={handleLeverageChange}
                     onMarginModeChange={handleMarginModeChange}
                     onOrderPlaced={(result?: any) => {
