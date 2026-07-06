@@ -1590,6 +1590,133 @@ def futures_status(
     return eng.status   # status is a @property, NOT a method — no () needed
 
 
+# ── Strategy formations (chart overlay) ───────────────────────────────────────
+
+_FORM_TF_MIN = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60,
+                "2h": 120, "4h": 240, "6h": 360, "12h": 720, "1d": 1440}
+
+
+def _epoch_utc(dt) -> int | None:
+    """Epoch seconds for lightweight-charts. DB datetimes are naive-UTC; tz-aware
+    ones (candle 'date') carry their own offset. Never let a naive value be read
+    as local time."""
+    if dt is None:
+        return None
+    import calendar
+    try:
+        if getattr(dt, "tzinfo", None) is not None:
+            return int(dt.timestamp())
+        return int(calendar.timegm(dt.timetuple()))
+    except Exception:
+        return None
+
+
+@router.get("/formations")
+def futures_formations(
+    pair: str,
+    timeframe: str = "5m",
+    strategy_id: int | None = None,
+    bars: int = 400,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+    email: str = Depends(get_user_email),
+):
+    """Chart overlay data for a pair, read-only:
+      • formations[] — the selected strategy's LIVE signals (entry/SL/TP) computed
+        on recent candles, for the manual 'signals only' overlay. No orders placed.
+      • trades[]     — the user's TAKEN trades on this pair (bot + manual) with
+        outcomes, so the chart shows what actually happened.
+    """
+    from sqlalchemy import or_
+    from backend.models.strategy import Strategy
+    from backend.models.trade import Trade
+    from backend.services import access_control as AC
+
+    out: dict = {"pair": pair, "timeframe": timeframe, "formations": [], "trades": []}
+
+    # ── 1. Strategy formations from live candles (manual / advisor overlay) ──
+    if strategy_id:
+        strat = db.execute(
+            select(Strategy).where(
+                Strategy.id == strategy_id,
+                or_(Strategy.user_id == user_id, Strategy.is_template == True),  # noqa: E712
+            )
+        ).scalar_one_or_none()
+        if strat and strat.generated_code and AC.strategy_visible(strat.name, email):
+            try:
+                import time as _t, pandas as _pd
+                from backend.services.native_backtester import load_futures_ohlcv
+                from backend.services.strategy_runner import evaluate_strategy
+                gran = _FORM_TF_MIN.get(timeframe, 5)
+                end_ts = int(_t.time())
+                df = load_futures_ohlcv(pair, timeframe, end_ts - (bars + 5) * gran * 60, end_ts)
+                sig = evaluate_strategy(strat.generated_code, df, pair=pair, execution_tf=timeframe)
+                el = sig["enter_long"] if "enter_long" in sig else None
+                es = sig["enter_short"] if "enter_short" in sig else None
+                ep = sig["entry_price"] if "entry_price" in sig else None
+                slp = sig["sl_price"] if "sl_price" in sig else None
+                tpp = sig["tp_price"] if "tp_price" in sig else None
+                n = len(sig)
+
+                def _val(col, i):
+                    if col is None:
+                        return None
+                    v = col.iloc[i]
+                    return None if _pd.isna(v) else float(v)
+
+                forms = []
+                for i in range(1, n):
+                    long_new = el is not None and bool(el.iloc[i]) and not bool(el.iloc[i - 1])
+                    short_new = es is not None and bool(es.iloc[i]) and not bool(es.iloc[i - 1])
+                    if not (long_new or short_new):
+                        continue
+                    row = sig.iloc[i]
+                    entry = _val(ep, i)
+                    if entry is None:
+                        entry = float(row["close"])
+                    forms.append({
+                        "time": _epoch_utc(row["date"]),
+                        "direction": "long" if long_new else "short",
+                        "entry": round(entry, 6),
+                        "sl": None if _val(slp, i) is None else round(_val(slp, i), 6),
+                        "tp": None if _val(tpp, i) is None else round(_val(tpp, i), 6),
+                        "state": "pending",
+                        "is_latest": i >= n - 2,   # signal on the most recent closed bar
+                    })
+                out["formations"] = forms[-40:]
+                out["strategy"] = strat.name
+            except Exception as e:
+                out["formations_error"] = str(e)
+
+    # ── 2. Taken trades (bot + manual) from the DB ──
+    rows = db.execute(
+        select(Trade).where(
+            Trade.user_id == user_id,
+            Trade.market_type == "futures",
+            Trade.pair == pair,
+        ).order_by(desc(Trade.entry_time)).limit(60)
+    ).scalars().all()
+    for t in rows:
+        if t.status == "open":
+            state = "open"
+        else:
+            state = "won" if float(t.profit_abs or 0) > 0 else "lost"
+        out["trades"].append({
+            "id": t.id,
+            "direction": t.side or "long",
+            "entry": round(float(t.entry_price or 0), 6),
+            "exit": round(float(t.exit_price), 6) if t.exit_price else None,
+            "sl": round(float(t.stoploss_price), 6) if t.stoploss_price else None,
+            "tp": round(float(t.tp_price), 6) if getattr(t, "tp_price", None) else None,
+            "entry_time": _epoch_utc(t.entry_time),
+            "exit_time": _epoch_utc(t.exit_time),
+            "state": state,
+            "profit_pct": round(float(t.profit_pct or 0), 2),
+            "mode": t.mode,
+        })
+    return out
+
+
 # ── Open Positions ────────────────────────────────────────────────────────────
 
 @router.get("/open")

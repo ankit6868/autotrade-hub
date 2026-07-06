@@ -407,6 +407,15 @@ export const api = {
       history: { strategy: string; mode: string; pair: string; side: string; profit_abs: number; profit_pct: number; exit_reason: string; exit_time: string | null }[];
       trade_count: number;
     }>('/api/futures/dashboard'),
+    // Chart overlay: a strategy's live signals (entry/SL/TP) + the user's taken
+    // trades on a pair, for the formations overlay on the futures chart.
+    formations: (p: { pair: string; timeframe?: string; strategy_id?: number; bars?: number }) => {
+      const q = new URLSearchParams({ pair: p.pair });
+      if (p.timeframe) q.set('timeframe', p.timeframe);
+      if (p.strategy_id != null) q.set('strategy_id', String(p.strategy_id));
+      if (p.bars) q.set('bars', String(p.bars));
+      return request<any>(`/api/futures/formations?${q.toString()}`);
+    },
     forceClose: (
       pair: string,
       mode?: 'paper' | 'live',

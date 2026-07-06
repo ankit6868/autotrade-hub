@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import {
   createChart, ColorType, CrosshairMode,
   CandlestickData, Time, IChartApi, ISeriesApi,
-  HistogramData,
+  HistogramData, LineStyle, IPriceLine, SeriesMarker,
 } from 'lightweight-charts';
 import { api } from '@/lib/api';
 import { useVisibleInterval } from '@/lib/useVisibleInterval';
@@ -16,6 +16,9 @@ interface Props {
   // the matching overlays — e.g. ['vwap','ema'] turns those on. Users can
   // still toggle any indicator on/off manually afterwards.
   strategyIndicators?: string[];
+  // When set, the chart overlays THIS strategy's live signals (entry/SL/TP) as
+  // "formations" — for manual trading, the setup is shown but no order is placed.
+  strategyId?: number;
 }
 
 const TIMEFRAMES = [
@@ -164,7 +167,7 @@ function chartOpts(bg = '#0d1117') {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', strategyIndicators }: Props) {
+export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', strategyIndicators, strategyId }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const mainRef    = useRef<HTMLDivElement>(null);
   const rsiRef     = useRef<HTMLDivElement>(null);
@@ -197,6 +200,9 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
   // when a running strategy follows them via the strategyIndicators prop).
   const [showVWAP, setShowVWAP] = useState(false);
   const [showEMA, setShowEMA]   = useState(false);
+  // Formations overlay — taken trades (bot + manual) + the strategy's live setup.
+  const [showForms, setShowForms] = useState(false);
+  const formLinesRef = useRef<IPriceLine[]>([]);
   const [error, setError]       = useState('');
   const [isMobile, setIsMobile] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -406,6 +412,77 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
   // Visibility-aware: stop refetching candles when the tab is hidden.
   useVisibleInterval(loadData, 30_000);
 
+  // ── Formations overlay: taken trades + the strategy's live setup ──────────
+  const loadForms = useCallback(async () => {
+    const cs = serCandle.current;
+    if (!cs) return;
+    // Clear the previous overlay's price lines.
+    formLinesRef.current.forEach(l => { try { cs.removePriceLine(l); } catch { /* gone */ } });
+    formLinesRef.current = [];
+    if (!showForms) { try { cs.setMarkers([]); } catch { /* noop */ } return; }
+
+    const addLine = (price: number | null | undefined, color: string, title: string, dashed: boolean) => {
+      if (!price) return;
+      formLinesRef.current.push(cs.createPriceLine({
+        price, color, lineWidth: 1,
+        lineStyle: dashed ? LineStyle.Dashed : LineStyle.Solid,
+        axisLabelVisible: true, title,
+      }));
+    };
+
+    try {
+      const d = await api.futures.formations({ pair, timeframe: tf, strategy_id: strategyId });
+      const markers: SeriesMarker<Time>[] = [];
+
+      // Taken trades → entry arrow, outcome marker, and live SL/TP lines if open.
+      (d.trades || []).forEach((t: any) => {
+        if (t.entry_time) markers.push({
+          time: t.entry_time as Time,
+          position: t.direction === 'long' ? 'belowBar' : 'aboveBar',
+          color: t.direction === 'long' ? '#34d399' : '#f87171',
+          shape: t.direction === 'long' ? 'arrowUp' : 'arrowDown',
+          text: t.direction === 'long' ? 'LONG' : 'SHORT',
+        });
+        if (t.exit_time && t.state !== 'open') markers.push({
+          time: t.exit_time as Time,
+          position: t.direction === 'long' ? 'aboveBar' : 'belowBar',
+          color: t.state === 'won' ? '#34d399' : '#f87171',
+          shape: 'circle',
+          text: t.state === 'won' ? 'WIN' : 'LOSS',
+        });
+        if (t.state === 'open') {
+          addLine(t.entry, '#60a5fa', 'Entry', false);
+          addLine(t.sl, '#f87171', 'SL', false);
+          addLine(t.tp, '#34d399', 'TP', false);
+        }
+      });
+
+      // Strategy formations (pending setups) → faint arrows; latest → dashed lines.
+      const forms = d.formations || [];
+      forms.forEach((f: any) => {
+        if (f.time) markers.push({
+          time: f.time as Time,
+          position: f.direction === 'long' ? 'belowBar' : 'aboveBar',
+          color: f.direction === 'long' ? 'rgba(52,211,153,0.45)' : 'rgba(248,113,113,0.45)',
+          shape: f.direction === 'long' ? 'arrowUp' : 'arrowDown',
+        });
+      });
+      const latest = [...forms].reverse().find((f: any) => f.is_latest);
+      if (latest) {
+        addLine(latest.entry, '#93c5fd', 'Setup', true);
+        addLine(latest.sl, '#fca5a5', 'Setup SL', true);
+        addLine(latest.tp, '#86efac', 'Setup TP', true);
+      }
+
+      // lightweight-charts requires markers sorted ascending by time.
+      markers.sort((a, b) => (a.time as number) - (b.time as number));
+      cs.setMarkers(markers);
+    } catch { /* overlay is best-effort */ }
+  }, [pair, tf, strategyId, showForms]);
+
+  useEffect(() => { loadForms(); }, [loadForms]);
+  useVisibleInterval(loadForms, 15_000);
+
   // ── Zoom controls ──────────────────────────────────────────────────────────
   const zoomIn = () => {
     const ts = chartMain.current?.timeScale();
@@ -544,6 +621,7 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
             { k: 'BB',   on: showBB,   set: setShowBB,   cls: 'text-orange-400 border-orange-400/50 bg-orange-400/10' },
             { k: 'RSI',  on: showRSI,  set: setShowRSI,  cls: 'text-purple-400 border-purple-400/50 bg-purple-400/10' },
             { k: 'MACD', on: showMACD, set: setShowMACD, cls: 'text-blue-400   border-blue-400/50   bg-blue-400/10'   },
+            { k: 'Trades', on: showForms, set: setShowForms, cls: 'text-emerald-300 border-emerald-300/50 bg-emerald-300/10' },
           ].map(ind => (
             <button
               key={ind.k}
