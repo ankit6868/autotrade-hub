@@ -1331,6 +1331,17 @@ function TradeHistoryTab({ trades, mode, onRefresh }: { trades: any[]; mode?: 'p
   ).length;
   const showCleanupBanner = brokenCount > 0;
 
+  // ── Trade-history stats (excludes broken entry==exit artifacts) ──────────
+  const _valid = trades.filter(t =>
+    !(Number(t.entry_price ?? 0) === Number(t.exit_price ?? 0) && Math.abs(Number(t.profit_abs ?? 0)) < 0.0001));
+  const _n = _valid.length;
+  const _wins = _valid.filter(t => Number(t.profit_abs ?? 0) > 0).length;
+  const _losses = _valid.filter(t => Number(t.profit_abs ?? 0) < 0).length;
+  const _pnl = _valid.reduce((s, t) => s + Number(t.profit_abs ?? 0), 0);
+  const _stake = _valid.reduce((s, t) => s + Number(t.amount ?? 0), 0);
+  const _winRate = _n ? (_wins / _n * 100) : 0;
+  const _plPct = _stake ? (_pnl / _stake * 100) : 0;
+
   async function runCleanup() {
     if (!confirm(`Delete ${brokenCount} broken trades (entry == exit, PNL = 0)?\n\nThese are artifacts of an old bug, not real trade results. Cleanup is paper/live-scoped.`)) return;
     setCleaning(true);
@@ -1350,6 +1361,29 @@ function TradeHistoryTab({ trades, mode, onRefresh }: { trades: any[]; mode?: 'p
   }
   return (
     <div>
+      {/* Manual trade-history stats: count · win rate/accuracy · win/loss · net P/L · P/L% */}
+      <div className="mx-2 mb-2 grid grid-cols-3 sm:grid-cols-5 gap-1.5 text-center">
+        <div className="rounded-lg bg-white/[0.03] border border-white/[0.06] px-2 py-1.5">
+          <div className="text-[9px] text-slate-500 uppercase tracking-wide">Trades</div>
+          <div className="text-sm font-bold text-white tabular-nums">{_n}</div>
+        </div>
+        <div className="rounded-lg bg-white/[0.03] border border-white/[0.06] px-2 py-1.5">
+          <div className="text-[9px] text-slate-500 uppercase tracking-wide">Win Rate</div>
+          <div className={`text-sm font-bold tabular-nums ${_winRate >= 50 ? 'text-emerald-400' : 'text-slate-300'}`}>{_winRate.toFixed(1)}%</div>
+        </div>
+        <div className="rounded-lg bg-white/[0.03] border border-white/[0.06] px-2 py-1.5">
+          <div className="text-[9px] text-slate-500 uppercase tracking-wide">Win / Loss</div>
+          <div className="text-sm font-bold tabular-nums"><span className="text-emerald-400">{_wins}</span> <span className="text-slate-600">/</span> <span className="text-red-400">{_losses}</span></div>
+        </div>
+        <div className="rounded-lg bg-white/[0.03] border border-white/[0.06] px-2 py-1.5">
+          <div className="text-[9px] text-slate-500 uppercase tracking-wide">Net P/L</div>
+          <div className={`text-sm font-bold tabular-nums ${_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{_pnl >= 0 ? '+' : ''}{_pnl.toFixed(2)}</div>
+        </div>
+        <div className="rounded-lg bg-white/[0.03] border border-white/[0.06] px-2 py-1.5">
+          <div className="text-[9px] text-slate-500 uppercase tracking-wide">P/L %</div>
+          <div className={`text-sm font-bold tabular-nums ${_plPct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{_plPct >= 0 ? '+' : ''}{_plPct.toFixed(2)}%</div>
+        </div>
+      </div>
       {showCleanupBanner && (
         <div className="mb-2 mx-2 p-2.5 rounded-lg bg-amber-500/8 border border-amber-500/30 flex items-start gap-3">
           <span className="text-amber-400 text-base leading-none mt-0.5">⚠</span>

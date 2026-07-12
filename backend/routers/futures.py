@@ -473,6 +473,79 @@ def _api_mode_from(request) -> str:
         return "lead"
 
 
+def _daily_risk_block(user_id: str, db: Session) -> str | None:
+    """If a daily risk limit is hit for MANUAL LIVE futures trading, return a
+    user-facing message (the panel shows it as a notification); else None.
+
+    Applies to BOTH terminals (per-user limit). Counts reset at 00:00 UTC —
+    which is exactly 5:30 AM IST — so no scheduler is needed. The user disables
+    it in Setup → Risk Management to resume before the daily reset.
+    """
+    cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
+    if not cfg or not getattr(cfg, "risk_daily_enabled", False):
+        return None
+    max_t = int(getattr(cfg, "risk_max_trades_per_day", 0) or 0)
+    max_l = int(getattr(cfg, "risk_max_losses_per_day", 0) or 0)
+    if max_t <= 0 and max_l <= 0:
+        return None
+    day_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+    if max_t > 0:
+        n = db.execute(
+            select(func.count()).select_from(Trade).where(
+                Trade.user_id == user_id, Trade.mode == "live",
+                Trade.market_type == "futures", Trade.entry_time >= day_start,
+            )
+        ).scalar() or 0
+        if n >= max_t:
+            return (f"Daily trade limit reached ({n}/{max_t}). Live trading is paused. "
+                    "Turn it off in Setup → Risk Management to continue. Resets 5:30 AM IST.")
+    if max_l > 0:
+        losses = db.execute(
+            select(func.count()).select_from(Trade).where(
+                Trade.user_id == user_id, Trade.mode == "live",
+                Trade.market_type == "futures", Trade.status == "closed",
+                Trade.profit_abs < 0, Trade.exit_time >= day_start,
+            )
+        ).scalar() or 0
+        if losses >= max_l:
+            return (f"Daily loss limit reached ({losses}/{max_l}). Live trading is paused. "
+                    "Turn it off in Setup → Risk Management to continue. Resets 5:30 AM IST.")
+    return None
+
+
+@router.get("/trade-stats")
+def futures_trade_stats(
+    mode: str = None,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Aggregate stats over the user's CLOSED futures trades for the Trade
+    History tab: number of trades, win rate/accuracy, winners/losers, net P/L
+    and P/L %. Filtered by mode (paper|live) when provided."""
+    where = [
+        Trade.user_id == user_id,
+        Trade.market_type == "futures",
+        Trade.status == "closed",
+    ]
+    if mode in ("paper", "live"):
+        where.append(Trade.mode == mode)
+    rows = db.execute(select(Trade).where(*where)).scalars().all()
+    n = len(rows)
+    wins = sum(1 for r in rows if (r.profit_abs or 0) > 0)
+    losses = sum(1 for r in rows if (r.profit_abs or 0) < 0)
+    total_pnl = sum((r.profit_abs or 0) for r in rows)
+    total_stake = sum((r.amount or 0) for r in rows)
+    return {
+        "count": n,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round((wins / n * 100), 2) if n else 0.0,      # accuracy %
+        "total_pnl": round(total_pnl, 4),                          # net USDT
+        "pl_pct": round((total_pnl / total_stake * 100), 2) if total_stake else 0.0,  # return on stake
+        "mode": mode or "all",
+    }
+
+
 def _ensure_live_credentials(eng, user_id: str, db: Session, api_mode: str = "lead") -> tuple[bool, str | None]:
     """
     Make sure the futures engine has the user's KuCoin credentials for `api_mode`
@@ -2525,6 +2598,9 @@ def futures_manual_entry(
     real_notional = real_margin = None
     contracts = None   # KuCoin contract count — set by live sizing OR paper parity below
     if mode == "live":
+        _rm = _daily_risk_block(user_id, db)
+        if _rm:
+            return {"error": _rm, "risk_limit": True}
         ok, err = _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))
         if not ok:
             return {"error": err}
@@ -3352,6 +3428,10 @@ def place_futures_order(
     # ── Live mode: send to Lead Trading API ──────────────────────────────
     exchange_order_id = None
     if mode == "live":
+        if not reduce_only:
+            _rm = _daily_risk_block(user_id, db)
+            if _rm:
+                return {"error": _rm, "risk_limit": True}
         ok, err = _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))
         if not ok:
             return {"error": err}

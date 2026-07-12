@@ -43,6 +43,10 @@ class UpdateConfigRequest(BaseModel):
     default_stoploss_pct: float | None = None
     telegram_token: str | None = None
     telegram_chat_id: str | None = None
+    # Daily risk management (manual live futures)
+    risk_daily_enabled: bool | None = None
+    risk_max_trades_per_day: int | None = None
+    risk_max_losses_per_day: int | None = None
 
 
 def _config_for(db: Session, user_id: str) -> Config | None:
@@ -179,6 +183,9 @@ def get_status(
         "max_daily_drawdown_pct": config.max_daily_drawdown_pct,
         "default_stoploss_pct": config.default_stoploss_pct,
         "has_telegram": bool(config.telegram_token),
+        "risk_daily_enabled": bool(getattr(config, "risk_daily_enabled", False)),
+        "risk_max_trades_per_day": getattr(config, "risk_max_trades_per_day", 0) or 0,
+        "risk_max_losses_per_day": getattr(config, "risk_max_losses_per_day", 0) or 0,
     }
 
 
@@ -232,6 +239,19 @@ async def test_kucoin(
         )
         if str(data.get("code")) == "200000":
             acct = data.get("data", {}) or {}
+            # Auto-detect Lead vs Regular: probe a Lead-only copy-trade endpoint.
+            # Success → the key is a Lead Trading key (use the Futures Terminal);
+            # error → it's a normal Regular Futures key (use Regular Futures).
+            detected_mode = "regular"
+            try:
+                probe = _kucoin_get_signed(
+                    "/api/v1/copy-trade/futures/orders", kk, ks, kp,
+                    params={"status": "active"}, base_url=KUCOIN_FUTURES_BASE,
+                )
+                if str(probe.get("code")) == "200000":
+                    detected_mode = "lead"
+            except Exception:
+                detected_mode = "regular"
             # Response shape MUST match what setup/page.tsx reads —
             # previous version returned `balance`/`equity`/`source`
             # but the UI reads `account_type`/`usdt_balance`/
@@ -241,6 +261,7 @@ async def test_kucoin(
             # UI's account_type check fell to the spot-branch fallback.
             return {
                 "connected":         True,
+                "detected_mode":     detected_mode,
                 "account_type":      "futures",
                 "currency":          "USDT",
                 "usdt_balance":      float(acct.get("accountEquity",   0) or 0),

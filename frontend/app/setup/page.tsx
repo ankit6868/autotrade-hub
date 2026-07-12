@@ -5,6 +5,7 @@ import { api } from '@/lib/api';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import RiskConfigPanel from '@/components/futures/RiskConfigPanel';
 import RegularFuturesKeys from '@/components/setup/RegularFuturesKeys';
+import DailyRiskManagement from '@/components/setup/DailyRiskManagement';
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -164,7 +165,12 @@ export default function SetupPage() {
                        so the user can confirm it's the right account. */
                     <div className="space-y-1.5">
                       <div className="font-semibold flex items-center gap-2">
-                        <span>✓ Connected — Lead Trading Futures Account</span>
+                        <span>✓ Connected — {testResult.detected_mode === 'regular' ? 'Regular Futures API' : 'Lead Copy-Trading API'}</span>
+                      </div>
+                      <div className="text-xs text-slate-200 bg-white/[0.05] rounded px-2 py-1.5 mt-1">
+                        {testResult.detected_mode === 'regular'
+                          ? '➜ Auto-detected a Regular Futures key. Trade on the Regular Futures terminal. (This key can\'t place Lead copy-trade orders.)'
+                          : '➜ Auto-detected a Lead copy-trading key. Trade on the Futures Terminal.'}
                       </div>
                       <div className="grid grid-cols-2 gap-x-6 gap-y-0.5 text-xs opacity-90 mt-1">
                         <div>Account Equity</div>
@@ -322,6 +328,7 @@ export default function SetupPage() {
       </div>
 
       <RegularFuturesKeys />
+      <DailyRiskManagement />
     </div>
   );
 }

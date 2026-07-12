@@ -387,6 +387,9 @@ export const api = {
     balance: () => request<any>('/api/futures/balance'),
     account: (mode?: 'paper' | 'live') =>
       request<any>(`/api/futures/account${mode ? `?mode=${mode}` : ''}`),
+    tradeStats: (mode?: 'paper' | 'live') =>
+      request<{ count: number; wins: number; losses: number; win_rate: number; total_pnl: number; pl_pct: number }>(
+        `/api/futures/trade-stats${mode ? `?mode=${mode}` : ''}`),
     backtest: {
       // run + autoTune go through the long-running path: direct to Railway
       // (5min proxy timeout) instead of through Vercel's edge proxy (60s).

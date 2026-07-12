@@ -61,6 +61,13 @@ class Config(Base):
     # When null the engine uses the defaults. Stored as TEXT (sqlite + pg
     # compatible) — risk_engine.load_user_risk_config parses + caches.
     risk_config_json = Column(Text, nullable=True)
+    # --- Daily risk management for MANUAL LIVE futures trading (both terminals) ---
+    # Resets every day at 00:00 UTC (= 5:30 AM IST). 0 = that limit is off.
+    # When the limit is hit, new live entries are blocked and the panel shows a
+    # notification; the user turns it off in Setup to resume before the reset.
+    risk_daily_enabled = Column(Boolean, default=False)        # master on/off
+    risk_max_trades_per_day = Column(Integer, default=0)       # max live entries/day
+    risk_max_losses_per_day = Column(Integer, default=0)       # max losing closes/day
     created_at = Column(DateTime, server_default=func.now())
 
 

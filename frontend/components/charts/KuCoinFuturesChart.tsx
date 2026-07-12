@@ -230,6 +230,7 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
   const boxPrimRef = useRef<TradeBoxPrimitive | null>(null);
   const lastBarTimeRef = useRef<number>(0);   // latest candle time (extends open boxes)
   const fitPendingRef = useRef(true);         // fit view once per pair/timeframe, not every refetch
+  const liveBarRef = useRef<{ time: number; o: number; h: number; l: number; c: number } | null>(null);
   const [overlayStrats, setOverlayStrats] = useState<{ id: number; name: string }[]>([]);
   const [pickStrat, setPickStrat] = useState<number | undefined>(undefined);
   // The most recent PENDING setup (drives the "Take trade" banner).
@@ -438,6 +439,9 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
           pct: (last.close - prev.close) / prev.close * 100,
         });
       }
+      // Seed the live-tick bar so the last candle can move in real time between
+      // full refetches (updated from the price feed every ~2.5s below).
+      if (last) liveBarRef.current = { time: last.time, o: last.open, h: last.high, l: last.low, c: last.close };
 
       // Hide attribution after data load
       setTimeout(hideAllAttribution, 50);
@@ -456,9 +460,26 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
   useEffect(() => { fitPendingRef.current = true; }, [pair, tf]);
 
   useEffect(() => { loadData(); }, [loadData]);
-  // Visibility-aware: refetch candles every 8s (was 30s) for a live, responsive
-  // chart. Stops when the tab is hidden.
+  // Visibility-aware: full refetch every 8s (was 30s) keeps history accurate.
   useVisibleInterval(loadData, 8_000);
+
+  // Live tick: between full refetches, move the LAST candle in real time from
+  // the price feed (~2.5s) via .update() — so the chart ticks like KuCoin's.
+  const liveTick = useCallback(async () => {
+    const cs = serCandle.current;
+    const b = liveBarRef.current;
+    if (!cs || !b) return;
+    try {
+      const d = await api.market.price(pair);
+      const px = parseFloat(d.price);
+      if (!px || Number.isNaN(px)) return;
+      b.h = Math.max(b.h, px);
+      b.l = Math.min(b.l, px);
+      b.c = px;
+      cs.update({ time: b.time as Time, open: b.o, high: b.h, low: b.l, close: px } as CandlestickData);
+    } catch { /* ignore transient price errors */ }
+  }, [pair]);
+  useVisibleInterval(liveTick, 2_500);
 
   // ── Formations overlay: taken-trade boxes + the strategy's live setup ─────
   const loadForms = useCallback(async () => {

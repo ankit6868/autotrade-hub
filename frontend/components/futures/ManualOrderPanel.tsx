@@ -977,12 +977,18 @@ export default function ManualOrderPanel({
             <p className="text-emerald-400 text-xs flex-1">{success}</p>
           </div>
         )}
-        {error && (
-          <div className="flex items-center gap-2 px-2 py-1.5 rounded bg-red-500/10 border border-red-500/20">
-            <span className="text-red-400 text-xs">&#10007;</span>
-            <p className="text-red-400 text-xs flex-1">{error}</p>
-          </div>
-        )}
+        {error && (() => {
+          const paused = /limit reached|trading is paused|Resets 5:30/i.test(error);
+          return (
+            <div className={`flex items-start gap-2 px-2 py-1.5 rounded border ${paused ? 'bg-amber-500/10 border-amber-500/30' : 'bg-red-500/10 border-red-500/20'}`}>
+              <span className={`text-xs mt-0.5 ${paused ? 'text-amber-400' : 'text-red-400'}`}>{paused ? '⏸' : '✗'}</span>
+              <p className={`text-xs flex-1 ${paused ? 'text-amber-300' : 'text-red-400'}`}>
+                {paused && <span className="font-semibold block">Trading paused — daily risk limit hit</span>}
+                {error}
+              </p>
+            </div>
+          );
+        })()}
       </div>
 
       {/* Buy/Long + Sell/Short buttons. The "≈ X USDT" subtitle mirrors
