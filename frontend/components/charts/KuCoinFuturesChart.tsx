@@ -134,8 +134,27 @@ function hideAttribution(container: HTMLElement) {
   els.forEach(el => (el as HTMLElement).style.display = 'none');
 }
 
+// Render the time axis + crosshair in the VIEWER'S LOCAL timezone. Candle data
+// stays in UTC seconds (so markers/boxes line up); only the labels are localised.
+// Without this, lightweight-charts shows UTC — which for e.g. IST readers looks
+// ~5.5h behind and can read as "yesterday" near the day boundary.
+const _fmtTime = (t: number) =>
+  new Date(t * 1000).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hour12: false });
+const _fmtDate = (t: number) =>
+  new Date(t * 1000).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+const _fmtFull = (t: number) =>
+  new Date(t * 1000).toLocaleString(undefined, { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hour12: false });
+const _timeToSecs = (time: unknown): number => {
+  if (typeof time === 'number') return time;
+  const b = time as { year: number; month: number; day: number };
+  return b && b.year ? Date.UTC(b.year, b.month - 1, b.day) / 1000 : 0;
+};
+
 function chartOpts(bg = '#0d1117') {
   return {
+    localization: {
+      timeFormatter: (time: unknown) => _fmtFull(_timeToSecs(time)),
+    },
     layout: {
       background: { type: ColorType.Solid as const, color: bg },
       textColor: '#64748b',
@@ -166,6 +185,8 @@ function chartOpts(bg = '#0d1117') {
       rightOffset: 8,
       barSpacing: 8,
       minBarSpacing: 2,
+      tickMarkFormatter: (time: unknown, tickType: number) =>
+        tickType <= 2 ? _fmtDate(_timeToSecs(time)) : _fmtTime(_timeToSecs(time)),
     },
   };
 }
@@ -208,6 +229,7 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
   const [showForms, setShowForms] = useState(false);
   const boxPrimRef = useRef<TradeBoxPrimitive | null>(null);
   const lastBarTimeRef = useRef<number>(0);   // latest candle time (extends open boxes)
+  const fitPendingRef = useRef(true);         // fit view once per pair/timeframe, not every refetch
   const [overlayStrats, setOverlayStrats] = useState<{ id: number; name: string }[]>([]);
   const [pickStrat, setPickStrat] = useState<number | undefined>(undefined);
   // The most recent PENDING setup (drives the "Take trade" banner).
@@ -399,7 +421,13 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
         [serMACDL, serMACDS, serMACDH].forEach(s => s.current?.setData([]));
       }
 
-      chartMain.current?.timeScale().fitContent();
+      // Only fit the view on the first load / after a pair-or-timeframe change.
+      // On the periodic refetch we keep the user's zoom/scroll — otherwise the
+      // chart "jumps" every few seconds and feels laggy.
+      if (fitPendingRef.current) {
+        chartMain.current?.timeScale().fitContent();
+        fitPendingRef.current = false;
+      }
 
       const last = raw[raw.length - 1];
       const prev = raw[raw.length - 2];
@@ -424,9 +452,13 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
     if (strategyIndicators.includes('ema'))  setShowEMA(true);
   }, [strategyIndicators]);
 
+  // Re-fit the view when the pair or timeframe changes (a genuinely new dataset).
+  useEffect(() => { fitPendingRef.current = true; }, [pair, tf]);
+
   useEffect(() => { loadData(); }, [loadData]);
-  // Visibility-aware: stop refetching candles when the tab is hidden.
-  useVisibleInterval(loadData, 30_000);
+  // Visibility-aware: refetch candles every 8s (was 30s) for a live, responsive
+  // chart. Stops when the tab is hidden.
+  useVisibleInterval(loadData, 8_000);
 
   // ── Formations overlay: taken-trade boxes + the strategy's live setup ─────
   const loadForms = useCallback(async () => {

@@ -366,8 +366,10 @@ export const api = {
     pairs: () => request<{ pairs: string[] }>('/api/market/pairs'),
     price: (pair: string) => request<any>(`/api/market/price/${pair}`),
     ohlcv: (pair: string, timeframe?: string, limit?: number) =>
+      // `_t` cache-buster guarantees the browser/CDN never serves a stale
+      // candle set — the chart must always reflect the latest bar.
       request<{ pair: string; candles: Array<{time:number;open:number;high:number;low:number;close:number;volume:number}> }>(
-        `/api/market/ohlcv/${pair}?timeframe=${timeframe || '15m'}&limit=${limit || 120}`
+        `/api/market/ohlcv/${pair}?timeframe=${timeframe || '15m'}&limit=${limit || 120}&_t=${Date.now()}`
       ),
   },
 
