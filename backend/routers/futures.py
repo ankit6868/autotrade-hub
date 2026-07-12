@@ -4170,7 +4170,7 @@ def partial_close_futures_position(
             # KuCoin for close_pct of the live position's contracts.
             if mode == "live":
                 kc_eng = futures_engine_registry.for_user(user_id)
-                ok_creds, _cerr = _ensure_live_credentials(kc_eng, user_id, db)
+                ok_creds, _cerr = _ensure_live_credentials(kc_eng, user_id, db, _api_mode_from(request))
                 if ok_creds:
                     kc_pos = _fetch_kucoin_live_position(kc_eng, pair, direction_req)
                     if kc_pos is not None:
@@ -4235,7 +4235,7 @@ def partial_close_futures_position(
         if mode == "live":
             try:
                 main_eng = futures_engine_registry.for_user(user_id)
-                ok_creds, err_creds = _ensure_live_credentials(main_eng, user_id, db)
+                ok_creds, err_creds = _ensure_live_credentials(main_eng, user_id, db, _api_mode_from(request))
                 if not ok_creds:
                     return {
                         "error": (f"Cannot partial-close live orphan: {err_creds}. "
@@ -5439,7 +5439,7 @@ def position_add_margin(
             # deposit-margin endpoint directly using the live position.
             if mode == "live":
                 kc_eng = futures_engine_registry.for_user(user_id)
-                ok_creds, _cerr = _ensure_live_credentials(kc_eng, user_id, db)
+                ok_creds, _cerr = _ensure_live_credentials(kc_eng, user_id, db, _api_mode_from(request))
                 if ok_creds:
                     kc_pos = _fetch_kucoin_live_position(kc_eng, pair, direction_req)
                     if kc_pos is not None:
