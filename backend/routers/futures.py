@@ -493,7 +493,8 @@ def _daily_risk_block(user_id: str, db: Session) -> str | None:
         n = db.execute(
             select(func.count()).select_from(Trade).where(
                 Trade.user_id == user_id, Trade.mode == "live",
-                Trade.market_type == "futures", Trade.entry_time >= day_start,
+                Trade.market_type == "futures", Trade.instance_id.is_(None),
+                Trade.entry_time >= day_start,
             )
         ).scalar() or 0
         if n >= max_t:
@@ -503,7 +504,8 @@ def _daily_risk_block(user_id: str, db: Session) -> str | None:
         losses = db.execute(
             select(func.count()).select_from(Trade).where(
                 Trade.user_id == user_id, Trade.mode == "live",
-                Trade.market_type == "futures", Trade.status == "closed",
+                Trade.market_type == "futures", Trade.instance_id.is_(None),
+                Trade.status == "closed",
                 Trade.profit_abs < 0, Trade.exit_time >= day_start,
             )
         ).scalar() or 0
