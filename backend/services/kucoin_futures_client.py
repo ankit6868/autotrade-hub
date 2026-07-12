@@ -1,13 +1,15 @@
 """
-KuCoin Futures Lead Trading API client — async, HMAC-signed.
+KuCoin Futures API client — async, HMAC-signed.
 
-All order operations use the Lead Trading endpoints
-(/api/v1/copy-trade/futures/*) so that trades appear in the user's
-KuCoin Lead Trading account and are visible to followers.
+Mode-aware (backend.services.futures_mode): with mode="lead" (default) order
+operations use the Lead Trading endpoints (/api/v1/copy-trade/futures/*) so
+trades are visible to followers; with mode="regular" they use the normal
+futures order endpoints (/api/v1/orders, /api/v1/st-orders) on the user's own
+account. Only the order-endpoint paths differ.
 
 Public/read endpoints (orderbook, trades, contracts) use the standard
 futures API. Auth read endpoints (positions, account) also use standard
-futures paths (Lead Trading shares the same account view).
+futures paths — identical for both modes.
 """
 from __future__ import annotations
 
@@ -53,10 +55,16 @@ def _sign_request(
 
 
 class KuCoinFuturesClient:
-    def __init__(self, api_key: str = "", api_secret: str = "", passphrase: str = ""):
+    def __init__(self, api_key: str = "", api_secret: str = "", passphrase: str = "", mode: str = "lead"):
         self.api_key = api_key
         self.api_secret = api_secret
         self.passphrase = passphrase
+        # 'lead' (copy-trading, default) or 'regular' (normal futures). Only the
+        # order-endpoint paths differ — see backend.services.futures_mode.
+        from backend.services.futures_mode import normalize_mode, orders_path, st_orders_path
+        self.mode = normalize_mode(mode)
+        self._orders_path = orders_path(self.mode)
+        self._st_orders_path = st_orders_path(self.mode)
 
     def _headers(self, method: str, endpoint: str, body: str = "") -> dict[str, str]:
         ts = str(int(time.time() * 1000))
@@ -185,7 +193,7 @@ class KuCoinFuturesClient:
             body["timeInForce"] = time_in_force
         if remark:
             body["remark"] = remark
-        data = await self._request("POST", "/api/v1/copy-trade/futures/orders", body=body)
+        data = await self._request("POST", self._orders_path, body=body)
         return data.get("data", {})
 
     async def place_tp_sl_order(
@@ -228,30 +236,32 @@ class KuCoinFuturesClient:
         elif trigger_stop_down_price is not None:
             body["stop"] = "down"
             body["stopPrice"] = str(trigger_stop_down_price)
-        data = await self._request("POST", "/api/v1/copy-trade/futures/orders", body=body)
+        data = await self._request("POST", self._st_orders_path, body=body)
         return data.get("data", {})
 
     async def cancel_order(self, order_id: str) -> dict:
-        data = await self._request("DELETE", f"/api/v1/copy-trade/futures/orders/{order_id}")
+        data = await self._request("DELETE", f"{self._orders_path}/{order_id}")
         return data.get("data", {})
 
     async def cancel_order_by_client_oid(self, symbol: str, client_oid: str) -> dict:
-        data = await self._request(
-            "DELETE", "/api/v1/copy-trade/futures/orders/client-order",
-            params={"symbol": symbol, "clientOid": client_oid},
-        )
+        from backend.services.futures_mode import cancel_by_client_oid_path, is_regular
+        path = cancel_by_client_oid_path(self.mode, client_oid)
+        if is_regular(self.mode):
+            data = await self._request("DELETE", path)
+        else:
+            data = await self._request("DELETE", path, params={"symbol": symbol, "clientOid": client_oid})
         return data.get("data", {})
 
     async def cancel_all_orders(self, symbol: str | None = None) -> dict:
         params = {"symbol": symbol} if symbol else None
-        data = await self._request("DELETE", "/api/v1/copy-trade/futures/orders", params=params)
+        data = await self._request("DELETE", self._orders_path, params=params)
         return data.get("data", {})
 
     async def get_open_orders(self, symbol: str | None = None) -> list[dict]:
         params: dict = {"status": "active"}
         if symbol:
             params["symbol"] = symbol
-        data = await self._request("GET", "/api/v1/copy-trade/futures/orders", params)
+        data = await self._request("GET", self._orders_path, params)
         items = data.get("data", {})
         if isinstance(items, dict):
             return items.get("items", [])
@@ -261,7 +271,7 @@ class KuCoinFuturesClient:
         params: dict = {"status": "done", "pageSize": limit}
         if symbol:
             params["symbol"] = symbol
-        data = await self._request("GET", "/api/v1/copy-trade/futures/orders", params)
+        data = await self._request("GET", self._orders_path, params)
         items = data.get("data", {})
         if isinstance(items, dict):
             return items.get("items", [])

@@ -99,6 +99,7 @@ class StrategyInstance(Base):
     strategy_name = Column(Text, nullable=False)
     market_type = Column(Text, default="spot")    # spot | futures
     mode = Column(Text, default="paper")          # paper | live
+    api_mode = Column(Text, default="lead")       # lead | regular (KuCoin futures API)
     pairs = Column(Text, default="BTC/USDT")      # CSV
     leverage = Column(Integer, default=1)
     timeframe = Column(Text, default="15m")

@@ -28,6 +28,13 @@ class SetupRequest(BaseModel):
     telegram_chat_id: str = ""
 
 
+class RegularKeysRequest(BaseModel):
+    """Normal (non-lead) KuCoin Futures API keys for the /regular-futures-trade terminal."""
+    kucoin_reg_key: str = ""
+    kucoin_reg_secret: str = ""
+    kucoin_reg_passphrase: str = ""
+
+
 class UpdateConfigRequest(BaseModel):
     preferred_model: str | None = None
     max_position_pct: float | None = None
@@ -83,6 +90,74 @@ def setup(
     return {"status": "ok", "message": "Configuration saved"}
 
 
+@router.post("/setup-regular")
+def setup_regular(
+    req: RegularKeysRequest,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Save the normal KuCoin Futures API keys (separate from the Lead keys).
+
+    Only overwrites the three regular-key columns, so it never disturbs the
+    Lead credentials or any other config. Requires the base config to exist
+    (Lead setup runs first) — but creates a row if somehow missing.
+    """
+    fields = dict(
+        kucoin_reg_key_enc=encrypt(req.kucoin_reg_key, user_id),
+        kucoin_reg_secret_enc=encrypt(req.kucoin_reg_secret, user_id),
+        kucoin_reg_passphrase_enc=encrypt(req.kucoin_reg_passphrase, user_id),
+    )
+    config = _config_for(db, user_id)
+    if config:
+        for k, v in fields.items():
+            setattr(config, k, v)
+    else:
+        db.add(Config(user_id=user_id, **fields))
+    db.commit()
+    return {"status": "ok", "message": "Regular futures keys saved"}
+
+
+@router.post("/test-kucoin-regular")
+def test_kucoin_regular(
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Test the normal KuCoin Futures keys. Reads /account-overview (identical
+    endpoint for both modes) so a pass guarantees the regular terminal can read
+    balance + place orders on the private account."""
+    config = _config_for(db, user_id)
+    if not config or not config.kucoin_reg_key_enc:
+        return {"connected": False, "error": "Regular futures keys not configured"}
+    try:
+        from backend.services.futures_mode import load_kucoin_creds
+        kk, ks, kp = load_kucoin_creds(config, user_id, "regular")
+    except DecryptError as e:
+        return {"connected": False, "error": str(e)}
+    try:
+        from backend.services.native_trading_engine import _kucoin_get_signed
+        from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+        data = _kucoin_get_signed(
+            "/api/v1/account-overview", kk, ks, kp,
+            params={"currency": "USDT"}, base_url=KUCOIN_FUTURES_BASE,
+        )
+        if str(data.get("code")) == "200000":
+            acct = data.get("data", {}) or {}
+            return {
+                "connected": True,
+                "account_type": "futures",
+                "currency": "USDT",
+                "usdt_balance": float(acct.get("accountEquity", 0) or 0),
+                "available_balance": float(acct.get("availableBalance", 0) or 0),
+                "position_margin": float(acct.get("positionMargin", 0) or 0),
+                "order_margin": float(acct.get("orderMargin", 0) or 0),
+                "unrealised_pnl": float(acct.get("unrealisedPNL", 0) or 0),
+                "frozen_funds": float(acct.get("frozenFunds", 0) or 0),
+            }
+        return {"connected": False, "error": data.get("msg") or "KuCoin rejected the keys"}
+    except Exception as e:
+        return {"connected": False, "error": str(e)}
+
+
 @router.get("/status")
 def get_status(
     db: Session = Depends(get_db),
@@ -96,6 +171,7 @@ def get_status(
         "configured": True,
         "user_id": user_id,
         "has_kucoin": bool(config.kucoin_key_enc),
+        "has_kucoin_regular": bool(config.kucoin_reg_key_enc),
         "has_openrouter": bool(config.openrouter_key_enc),
         "preferred_model": config.preferred_model,
         "max_position_pct": config.max_position_pct,

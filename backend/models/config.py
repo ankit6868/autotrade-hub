@@ -12,6 +12,12 @@ class Config(Base):
     kucoin_key_enc = Column(Text)
     kucoin_secret_enc = Column(Text)
     kucoin_passphrase_enc = Column(Text)
+    # Regular (normal) KuCoin Futures API keys — used by the /regular-futures-trade
+    # terminal. Separate from the Lead copy-trading keys above so a user can
+    # connect a normal futures key independently. Null when not configured.
+    kucoin_reg_key_enc = Column(Text)
+    kucoin_reg_secret_enc = Column(Text)
+    kucoin_reg_passphrase_enc = Column(Text)
     openrouter_key_enc = Column(Text)
     preferred_model = Column(Text, default="nvidia/nemotron-3-super-120b-a12b:free")
     max_position_pct = Column(Float, default=5.0)
@@ -37,6 +43,7 @@ class Config(Base):
     # --- Paper/Live bot persistence (24/7 auto-resume after container restart) ---
     bot_running = Column(Boolean, default=False)              # True if paper/live bot was running
     bot_mode = Column(Text, default="paper")                  # 'paper' or 'live'
+    bot_api_mode = Column(Text, default="lead")               # 'lead' or 'regular' KuCoin futures API
     bot_strategy_name = Column(Text, nullable=True)           # e.g. 'MacdCrossoverStrategy'
     bot_pairs = Column(Text, nullable=True)                   # CSV e.g. 'BTC/USDT,ETH/USDT'
     bot_timeframe = Column(Text, default="15m")
