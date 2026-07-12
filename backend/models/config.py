@@ -43,6 +43,7 @@ class Config(Base):
     # --- Paper/Live bot persistence (24/7 auto-resume after container restart) ---
     bot_running = Column(Boolean, default=False)              # True if paper/live bot was running
     bot_mode = Column(Text, default="paper")                  # 'paper' or 'live'
+    bot_api_mode = Column(Text, default="lead")               # 'lead' or 'regular' KuCoin futures API
     bot_strategy_name = Column(Text, nullable=True)           # e.g. 'MacdCrossoverStrategy'
     bot_pairs = Column(Text, nullable=True)                   # CSV e.g. 'BTC/USDT,ETH/USDT'
     bot_timeframe = Column(Text, default="15m")

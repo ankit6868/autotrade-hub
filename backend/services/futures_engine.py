@@ -876,6 +876,7 @@ class FuturesEngine(NativeTradingEngine):
         kucoin_secret: str = "",
         kucoin_passphrase: str = "",
         strategy_id: int | None = None,
+        api_mode: str = "lead",
         # StrategyInstance.id of the owning bot (None for the manual engine).
         # Stamped on every Trade row this engine opens so paper positions can be
         # rehydrated back into THIS bot after a restart, unambiguously even when
@@ -951,6 +952,8 @@ class FuturesEngine(NativeTradingEngine):
         self._take_profit  = take_profit_pct / 100.0
         self._wallet       = wallet
         self._mode         = mode
+        from backend.services.futures_mode import normalize_mode as _nm
+        self._api_mode     = _nm(api_mode)   # 'lead' (default) or 'regular'
         self._market_type  = "futures"
         self._max_open     = max_open_trades
         self._max_per_pair = 1   # ← STRICT: only 1 open position per pair at a time

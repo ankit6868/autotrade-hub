@@ -4083,22 +4083,23 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
             eng = futures_engine_registry.for_bot(i.user_id, i.engine_key)
             if eng.is_running:
                 continue
-            # Decrypt KuCoin creds once per user — live bots need them,
-            # paper bots ignore them (empty strings are fine).
-            if i.user_id not in creds_cache:
+            # Decrypt KuCoin creds once per (user, api_mode) — live bots need
+            # them, paper bots ignore them. Regular bots use the regular keys.
+            _bot_api_mode = getattr(i, "api_mode", "lead") or "lead"
+            _ck = (i.user_id, _bot_api_mode)
+            if _ck not in creds_cache:
                 cfg = db.execute(
                     select(Config).where(Config.user_id == i.user_id).limit(1)
                 ).scalar_one_or_none()
                 kk = ks = kp = ""
                 if cfg:
                     try:
-                        kk = decrypt(cfg.kucoin_key_enc or "", i.user_id)
-                        ks = decrypt(cfg.kucoin_secret_enc or "", i.user_id)
-                        kp = decrypt(cfg.kucoin_passphrase_enc or "", i.user_id)
+                        from backend.services.futures_mode import load_kucoin_creds
+                        kk, ks, kp = load_kucoin_creds(cfg, i.user_id, _bot_api_mode)
                     except Exception:
                         pass
-                creds_cache[i.user_id] = (kk, ks, kp)
-            kk, ks, kp = creds_cache[i.user_id]
+                creds_cache[_ck] = (kk, ks, kp)
+            kk, ks, kp = creds_cache[_ck]
             pairs = [p.strip() for p in (i.pairs or "BTC/USDT").split(",")]
             # Decode the persisted strategy flag toggles (JSON) so the bot
             # resumes with the same options the user picked.
@@ -4123,6 +4124,7 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
                     max_position_pct=(i.risk_pct or 5.0),
                     strategy_id=i.strategy_id,
                     instance_id=i.id,
+                    api_mode=_bot_api_mode,
                     kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
                     arm_enabled       = bool(getattr(i, "arm_enabled", False) or False),
                     arm_tp1_close_pct = float(getattr(i, "arm_tp1_close_pct", 50.0) or 50.0),

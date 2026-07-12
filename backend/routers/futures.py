@@ -618,7 +618,7 @@ def _fetch_kucoin_live_position(eng, pair: str, direction: str | None = None) ->
 
 
 def _kucoin_deposit_margin(user_id: str, db: Session, pair: str,
-                           amount: float) -> tuple[bool, object]:
+                           amount: float, api_mode: str = "lead") -> tuple[bool, object]:
     """POST KuCoin Futures deposit-margin for `amount` USDT on `pair`.
 
     Single source of truth for the deposit-margin REST call, shared by the
@@ -629,15 +629,13 @@ def _kucoin_deposit_margin(user_id: str, db: Session, pair: str,
         from backend.services.native_trading_engine import _kucoin_post_signed
         from backend.services.futures_engine import KUCOIN_FUTURES_BASE
         from backend.services.kucoin_futures_client import normalize_futures_symbol
-        from backend.utils.encryption import decrypt
+        from backend.services.futures_mode import load_kucoin_creds, has_creds
         cfg = db.execute(
             select(Config).where(Config.user_id == user_id).limit(1)
         ).scalar_one_or_none()
-        if not cfg:
+        if not has_creds(cfg, api_mode):
             return False, "No KuCoin credentials configured"
-        kk = decrypt(cfg.kucoin_key_enc or "", user_id)
-        ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
-        kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+        kk, ks, kp = load_kucoin_creds(cfg, user_id, api_mode)
         if not (kk and ks and kp):
             return False, "KuCoin credentials missing"
         # `pair` is "BASE/USDT" — full futures-symbol transform (XBT remap).
@@ -1554,16 +1552,15 @@ def start_futures(
 
     eng = futures_engine_registry.for_user(user_id)
 
+    api_mode = _api_mode_from(request)
     kk = ks = kp = ""
     if mode == "live":
-        from backend.utils.encryption import decrypt, DecryptError
+        from backend.services.futures_mode import load_kucoin_creds, has_creds
         cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
-        if not cfg:
+        if not has_creds(cfg, api_mode):
             return {"error": "No config found. Complete Setup first."}
         try:
-            kk = decrypt(cfg.kucoin_key_enc or "", user_id)
-            ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
-            kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+            kk, ks, kp = load_kucoin_creds(cfg, user_id, api_mode)
         except Exception:
             return {"error": "Could not decrypt KuCoin credentials. Re-enter in Setup."}
 
@@ -1581,6 +1578,7 @@ def start_futures(
         kucoin_secret    = ks,
         kucoin_passphrase= kp,
         strategy_id      = strategy_id,
+        api_mode         = api_mode,
     )
 
     if result.get("started"):
@@ -1589,6 +1587,7 @@ def start_futures(
         if cfg:
             cfg.bot_running       = True
             cfg.bot_mode          = f"futures-{mode}"
+            cfg.bot_api_mode      = api_mode
             cfg.bot_strategy_name = strategy_name
             cfg.bot_pairs         = ",".join(pairs)
             cfg.bot_timeframe     = timeframe
@@ -5368,6 +5367,7 @@ def _recompute_liq_price(pos, prev_margin: float, new_margin: float):
 @router.post("/position/add-margin")
 def position_add_margin(
     req: dict,
+    request: Request,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
@@ -5443,7 +5443,7 @@ def position_add_margin(
                 if ok_creds:
                     kc_pos = _fetch_kucoin_live_position(kc_eng, pair, direction_req)
                     if kc_pos is not None:
-                        ok_dep, dep = _kucoin_deposit_margin(user_id, db, pair, amount)
+                        ok_dep, dep = _kucoin_deposit_margin(user_id, db, pair, amount, _api_mode_from(request))
                         if not ok_dep:
                             return {"error": dep}
                         prev_margin = float(kc_pos.get("margin") or 0)
@@ -5565,7 +5565,7 @@ def position_add_margin(
 
     # LIVE: deposit margin on KuCoin via the shared helper (canonical
     # /api/v1/position/margin/deposit-margin path).
-    ok_dep, dep = _kucoin_deposit_margin(user_id, db, pair, amount)
+    ok_dep, dep = _kucoin_deposit_margin(user_id, db, pair, amount, _api_mode_from(request))
     if not ok_dep:
         return {"error": dep}
     result_data = dep
@@ -6517,18 +6517,18 @@ def list_futures_bots(
             # the DB row; engine_running will read false, which is
             # accurate ("DB says yes, engine actually dead, watchdog en route").
             continue
-        # Engine is dead — resume it
-        if not _creds_loaded:
-            from backend.utils.encryption import decrypt, DecryptError
+        # Engine is dead — resume it. Load creds per-bot using its stored
+        # api_mode ('lead' default / 'regular') so a regular bot survives restart.
+        _bot_api_mode = getattr(i, "api_mode", "lead") or "lead"
+        _kk = _ks = _kp = ""
+        if (i.mode or "paper") == "live":
+            from backend.services.futures_mode import load_kucoin_creds
             cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
             if cfg:
                 try:
-                    _kk = decrypt(cfg.kucoin_key_enc or "", user_id)
-                    _ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
-                    _kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+                    _kk, _ks, _kp = load_kucoin_creds(cfg, user_id, _bot_api_mode)
                 except Exception:
                     pass
-            _creds_loaded = True
         pairs = [p.strip() for p in (i.pairs or "BTC/USDT").split(",")]
         eng = futures_engine_registry.for_bot(user_id, i.engine_key)
         try:
@@ -6540,6 +6540,7 @@ def list_futures_bots(
                 max_position_pct=(i.risk_pct or 5.0),
                 strategy_id=i.strategy_id,
                 instance_id=i.id,
+                api_mode=_bot_api_mode,
                 kucoin_key=_kk, kucoin_secret=_ks, kucoin_passphrase=_kp,
                 # Phase 3 — restore ARM config from the persisted instance row
                 arm_enabled       = bool(getattr(i, "arm_enabled", False) or False),
@@ -7025,16 +7026,17 @@ def create_futures_bot(
     db.commit()
     db.refresh(instance)
 
-    # Resolve KuCoin credentials for live mode
+    # Resolve KuCoin credentials for live mode (lead or regular per terminal).
+    api_mode = _api_mode_from(request)
+    instance.api_mode = api_mode
+    db.commit()
     kk = ks = kp = ""
     if mode == "live":
-        from backend.utils.encryption import decrypt, DecryptError
+        from backend.services.futures_mode import load_kucoin_creds
         cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
         if cfg:
             try:
-                kk = decrypt(cfg.kucoin_key_enc or "", user_id)
-                ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
-                kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+                kk, ks, kp = load_kucoin_creds(cfg, user_id, api_mode)
             except Exception:
                 pass
 
@@ -7050,6 +7052,7 @@ def create_futures_bot(
         max_position_pct=max_position_pct,
         strategy_id=strategy_id,
         instance_id=instance.id,
+        api_mode=api_mode,
         kucoin_key=kk, kucoin_secret=ks, kucoin_passphrase=kp,
         arm_enabled        = arm_enabled,
         arm_tp1_close_pct  = arm_tp1_close_pct,
