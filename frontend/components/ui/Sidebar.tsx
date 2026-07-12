@@ -19,8 +19,9 @@ const nav = [
   // ── Futures Trading ───────────────────────────────────────────────
   // Futures Paper / Futures Live were collapsed into Futures Terminal
   // (which has the Paper/Live toggle in its top-right corner).
-  { href: '/futures-trade',      label: 'Futures Terminal',   icon: '💹',  section: 'FUTURES' },
-  { href: '/futures-backtest',   label: 'Futures Backtest',   icon: '🔬',  section: null },
+  { href: '/futures-trade',          label: 'Futures Terminal',   icon: '💹',  section: 'FUTURES' },
+  { href: '/regular-futures-trade',  label: 'Regular Futures',    icon: '🟠',  section: null },
+  { href: '/futures-backtest',       label: 'Futures Backtest',   icon: '🔬',  section: null },
 ];
 
 // Persist desktop sidebar state across page navigations so the user's
