@@ -1,6 +1,19 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
-import { api } from '@/lib/api';
+import { api, getFuturesApiMode } from '@/lib/api';
+
+// Connection check that respects the terminal's API mode: Regular terminal
+// checks the normal-futures keys; Lead terminal checks Lead-Trading status.
+const _connStatus = () =>
+  getFuturesApiMode() === 'regular'
+    ? api.config.testKucoinRegular().then((d: { connected?: boolean; available_balance?: number }) =>
+        ({ connected: !!d?.connected, balance: d?.available_balance }))
+    : api.futures.leadTradingStatus();
+// Label for the live connection badge, mode-aware.
+const _connLabel = (connected: boolean, suffix = '') =>
+  getFuturesApiMode() === 'regular'
+    ? (connected ? `Regular Futures Connected${suffix}` : 'Regular Futures: Not Connected')
+    : (connected ? `Lead Trading Connected${suffix}` : 'Lead Trading: Not Connected');
 import { useVisibleInterval } from '@/lib/useVisibleInterval';
 import StrategyPreview from './StrategyPreview';
 import { STRATEGY_FLAGS, type StratFlag } from '@/lib/strategyFlags';
@@ -126,7 +139,7 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
 
   useEffect(() => {
     api.strategy.list().then(d => setStrategies(d.strategies || [])).catch(() => {});
-    api.futures.leadTradingStatus().then(d => setLeadStatus(d)).catch(() => {});
+    _connStatus().then(d => setLeadStatus(d)).catch(() => {});
     refreshBots();
   }, [refreshBots]);
   // Visibility-aware: 5s refresh only while the tab is on screen.
@@ -219,9 +232,7 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
           }>
             {mode === 'paper'
               ? `Paper Trading Account`
-              : leadStatus?.connected
-                ? `Lead Trading Connected • ${(leadStatus.balance ?? 0).toFixed(2)} USDT`
-                : 'Lead Trading: Not Connected'}
+              : _connLabel(!!leadStatus?.connected, ` • ${(leadStatus?.balance ?? 0).toFixed(2)} USDT`)}
           </span>
         </div>
         {mode === 'paper' ? (
@@ -882,7 +893,7 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
       setLiveBalance(null);
       return;
     }
-    api.futures.leadTradingStatus().then(d => {
+    _connStatus().then(d => {
       setLeadConnected(d.connected);
       if (d.connected && d.balance) setLiveBalance(d.balance);
     }).catch(() => setLeadConnected(false));
@@ -1070,7 +1081,7 @@ function BotCreateFlow({ bot, pair, mode, paperBalance, strategies, onBack, onCr
         }>
           {mode === 'paper'
             ? `Paper Mode — Simulated (${(paperBalance ?? 1000).toFixed(2)} USDT virtual)`
-            : (leadConnected ? 'Lead Trading Connected' : 'Lead Trading: Not Connected')}
+            : _connLabel(!!leadConnected)}
         </span>
         <span className="text-slate-500 ml-auto">
           {mode === 'live'

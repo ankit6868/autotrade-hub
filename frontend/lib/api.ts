@@ -66,6 +66,9 @@ let _futuresApiMode: 'lead' | 'regular' = 'lead';
 export function setFuturesApiMode(mode: 'lead' | 'regular') {
   _futuresApiMode = mode;
 }
+export function getFuturesApiMode(): 'lead' | 'regular' {
+  return _futuresApiMode;
+}
 
 // Retry policy. Mobile-data clients often abort TCP after ~15s, but Railway's
 // first response after the container scales from zero takes 10-30s. The retry

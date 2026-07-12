@@ -1,6 +1,6 @@
 'use client';
 import { useState, useRef, useEffect } from 'react';
-import { api } from '@/lib/api';
+import { api, getFuturesApiMode } from '@/lib/api';
 import LeverageModal from './LeverageModal';
 
 interface Props {
@@ -45,13 +45,23 @@ export default function ManualOrderPanel({
   symbol, pair, mode, leverage, marginMode, availableBalance, lastPrice,
   onLeverageChange, onMarginModeChange, onOrderPlaced, prefill,
 }: Props) {
+  const isRegular = getFuturesApiMode() === 'regular';
   const [leadStatus, setLeadStatus] = useState<{ connected: boolean; account_type?: string; balance?: number; equity?: number } | null>(null);
 
   useEffect(() => {
-    api.futures.leadTradingStatus()
-      .then(d => setLeadStatus(d))
-      .catch(() => setLeadStatus(null));
-  }, []);
+    if (isRegular) {
+      // Regular terminal: connection = can we read the user's normal futures
+      // account with their Regular Futures keys (not Lead copy-trading status).
+      api.config.testKucoinRegular()
+        .then((d: { connected?: boolean; available_balance?: number; usdt_balance?: number }) =>
+          setLeadStatus({ connected: !!d?.connected, balance: d?.available_balance, equity: d?.usdt_balance }))
+        .catch(() => setLeadStatus({ connected: false }));
+    } else {
+      api.futures.leadTradingStatus()
+        .then(d => setLeadStatus(d))
+        .catch(() => setLeadStatus(null));
+    }
+  }, [isRegular]);
 
   // Default to 'market' — matches KuCoin's own UI default and gives the
   // expected behaviour when a user clicks Buy Long/Short without configuring
@@ -408,8 +418,8 @@ export default function ManualOrderPanel({
             {mode === 'paper'
               ? 'Paper Trading Account'
               : leadStatus?.connected
-                ? 'Lead Trading Account'
-                : 'Lead Trading: Not Connected'}
+                ? (isRegular ? 'Regular Futures Account' : 'Lead Trading Account')
+                : (isRegular ? 'Regular Futures: Not Connected' : 'Lead Trading: Not Connected')}
           </span>
         </div>
         {mode === 'paper' ? (
