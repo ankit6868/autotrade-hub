@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { api } from '@/lib/api';
 import LoadingSpinner from '@/components/ui/LoadingSpinner';
 import RiskConfigPanel from '@/components/futures/RiskConfigPanel';
+import RegularFuturesKeys from '@/components/setup/RegularFuturesKeys';
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -319,6 +320,8 @@ export default function SetupPage() {
       <div className="card">
         <RiskConfigPanel />
       </div>
+
+      <RegularFuturesKeys />
     </div>
   );
 }

@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 import time as _time
 from datetime import datetime
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, Header, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import select, desc, func
 
@@ -19,6 +19,13 @@ from backend.models.trade import Trade, StrategyInstance, FuturesOrder
 from backend.models.config import Config
 from backend.utils.clerk_auth import get_user_id, get_user_email
 from backend.services.futures_engine import futures_engine_registry
+from backend.services.futures_mode import (
+    orders_path as _orders_path,
+    st_orders_path as _st_orders_path,
+    cancel_by_order_id as _cancel_by_oid,
+    cancel_by_client_oid as _cancel_by_coid,
+    normalize_mode as _norm_mode,
+)
 from backend.utils.audit import log_event
 
 log = logging.getLogger(__name__)
@@ -445,35 +452,61 @@ def _fetch_kucoin_symbol_settings(eng, kc_symbol: str,
     return lev_int, (mode_raw or None)
 
 
-def _ensure_live_credentials(eng, user_id: str, db: Session) -> tuple[bool, str | None]:
+def get_futures_api_mode(x_futures_api: str | None = Header(default=None)) -> str:
+    """Resolve the KuCoin futures API mode from the X-Futures-Api request header.
+
+    The /regular-futures-trade terminal sends 'regular'; everything else omits
+    the header and defaults to 'lead' — so the existing Lead terminal is
+    completely unaffected.
     """
-    Make sure the futures engine has the user's KuCoin Lead Trading credentials
-    loaded — even when no bot was explicitly started in live mode.
+    from backend.services.futures_mode import normalize_mode
+    return normalize_mode(x_futures_api)
+
+
+def _api_mode_from(request) -> str:
+    """Inline header read for endpoints that already receive `request` — returns
+    'regular' when the /regular-futures-trade terminal sends X-Futures-Api, else
+    'lead'. Never raises."""
+    try:
+        return _norm_mode(request.headers.get("x-futures-api"))
+    except Exception:
+        return "lead"
+
+
+def _ensure_live_credentials(eng, user_id: str, db: Session, api_mode: str = "lead") -> tuple[bool, str | None]:
+    """
+    Make sure the futures engine has the user's KuCoin credentials for `api_mode`
+    ('lead' copy-trading, default; or 'regular' normal futures) loaded — even
+    when no bot was explicitly started in live mode.
 
     Manual market / limit orders and force-closes call this before talking to
-    the Lead Trading REST API. Without it, `eng._api_key` is "" (engine still
-    in its default paper state) and the live REST call is silently skipped,
-    leaving a phantom position in the UI with nothing on KuCoin.
+    the REST API. Without it, `eng._api_key` is "" (engine still in its default
+    paper state) and the live REST call is silently skipped, leaving a phantom
+    position in the UI with nothing on KuCoin.
+
+    Also stamps `eng._api_mode` so the direct order-post spots route to the
+    right endpoint. Reloads if the requested mode differs from what's loaded.
 
     Returns: (ok, error_message).
-        ok=True  → eng._api_key / _api_sec / _api_pass are populated.
-        ok=False → keys missing or undecryptable; error_message is user-facing.
     """
-    from backend.utils.encryption import decrypt, DecryptError
+    from backend.utils.encryption import DecryptError
+    from backend.services.futures_mode import normalize_mode, has_creds, load_kucoin_creds
 
-    if eng._api_key and eng._api_sec and eng._api_pass:
-        return True, None  # already loaded (e.g. live bot is running)
+    api_mode = normalize_mode(api_mode)
+
+    # Already loaded for THIS mode? (e.g. a live bot running in the same mode)
+    if eng._api_key and eng._api_sec and eng._api_pass and getattr(eng, "_api_mode", "lead") == api_mode:
+        return True, None
 
     cfg = db.execute(
         select(Config).where(Config.user_id == user_id).limit(1)
     ).scalar_one_or_none()
-    if not cfg or not (cfg.kucoin_key_enc and cfg.kucoin_secret_enc and cfg.kucoin_passphrase_enc):
-        return False, ("KuCoin API key not configured. Go to Setup → add a Lead-Trading "
+    if not has_creds(cfg, api_mode):
+        label = "regular futures" if api_mode == "regular" else "Lead-Trading"
+        return False, (f"KuCoin {label} API key not configured. Go to Setup → add a {label} "
                        "futures API key (General + Trade permissions, no Withdraw).")
     try:
-        kk = decrypt(cfg.kucoin_key_enc or "", user_id)
-        ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
-        kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+        kk, ks, kp = load_kucoin_creds(cfg, user_id, api_mode)
     except DecryptError:
         return False, "Could not decrypt KuCoin credentials. Re-enter them in Setup."
 
@@ -483,7 +516,8 @@ def _ensure_live_credentials(eng, user_id: str, db: Session) -> tuple[bool, str 
     eng._api_key  = kk
     eng._api_sec  = ks
     eng._api_pass = kp
-    log.info("[%s] Loaded KuCoin Lead Trading credentials into futures engine on demand.", user_id)
+    eng._api_mode = api_mode
+    log.info("[%s] Loaded KuCoin %s credentials into futures engine on demand.", user_id, api_mode)
     return True, None
 
 
@@ -1365,20 +1399,21 @@ def cleanup_broken_trades(
 
 @router.get("/balance")
 def futures_balance(
+    request: Request,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
     """Fetch KuCoin Futures account USDT balance (real money, live accounts only)."""
     from backend.services.native_trading_engine import _kucoin_get_signed
-    from backend.utils.encryption import decrypt, DecryptError
+    from backend.utils.encryption import DecryptError
+    from backend.services.futures_mode import load_kucoin_creds, has_creds
 
+    _amode = _api_mode_from(request)
     cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
-    if not cfg:
+    if not cfg or not has_creds(cfg, _amode):
         return {"error": "Add your KuCoin Futures API key in Setup first.", "balance": None}
     try:
-        kk = decrypt(cfg.kucoin_key_enc or "", user_id)
-        ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
-        kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+        kk, ks, kp = load_kucoin_creds(cfg, user_id, _amode)
     except DecryptError:
         return {"error": "Could not decrypt KuCoin credentials. Re-enter in Setup.", "balance": None}
 
@@ -1721,6 +1756,7 @@ def futures_formations(
 
 @router.get("/open")
 def futures_open_positions(
+    request: Request,
     mode: str = None,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
@@ -1965,7 +2001,7 @@ def futures_open_positions(
     # positions opened on KuCoin we don't know about (filled limit orders,
     # external tools, account restored from snapshot) should appear here
     # so the user never has a hidden real-money position.
-    if (mode == "live" or mode is None) and _ensure_live_credentials(eng, user_id, db)[0]:
+    if (mode == "live" or mode is None) and _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))[0]:
         try:
             from backend.services.native_trading_engine import _kucoin_get_signed
             from backend.services.futures_engine import KUCOIN_FUTURES_BASE
@@ -2490,7 +2526,7 @@ def futures_manual_entry(
     real_notional = real_margin = None
     contracts = None   # KuCoin contract count — set by live sizing OR paper parity below
     if mode == "live":
-        ok, err = _ensure_live_credentials(eng, user_id, db)
+        ok, err = _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))
         if not ok:
             return {"error": err}
         kc_symbol = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
@@ -2551,7 +2587,7 @@ def futures_manual_entry(
                 "positionSide": position_side,
             }
             resp = _kucoin_post_signed(
-                "/api/v1/copy-trade/futures/orders", body,
+                (_st_orders_path if body.get("stop") else _orders_path)(getattr(eng, "_api_mode", "lead")), body,
                 eng._api_key, eng._api_sec, eng._api_pass,
                 base_url=KUCOIN_FUTURES_BASE,
             )
@@ -2834,7 +2870,7 @@ def futures_force_close(
     confirmed_keys: list[str] = []   # keys whose KuCoin close confirmed → safe to pop
 
     if mode == "live" and matching:
-        ok, err = _ensure_live_credentials(eng, user_id, db)
+        ok, err = _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))
         if not ok:
             return {
                 "error": f"Could not load KuCoin credentials: {err}. "
@@ -2886,7 +2922,7 @@ def futures_force_close(
                     "reduceOnly":   True,
                 }
                 resp = _kucoin_post_signed(
-                    "/api/v1/copy-trade/futures/orders", body,
+                    (_st_orders_path if body.get("stop") else _orders_path)(getattr(eng, "_api_mode", "lead")), body,
                     eng._api_key, eng._api_sec, eng._api_pass,
                     base_url=KUCOIN_FUTURES_BASE,
                 )
@@ -3016,7 +3052,7 @@ def futures_force_close(
     # KuCoin holding real margin.
     kucoin_only_closed = 0
     if mode == "live" and not closed_positions and not orphan_trades:
-        ok, _ = _ensure_live_credentials(eng, user_id, db)
+        ok, _ = _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))
         if ok:
             try:
                 kc_symbol = normalize_futures_symbol(
@@ -3083,7 +3119,7 @@ def futures_force_close(
                         "reduceOnly":   True,
                     }
                     resp = _kucoin_post_signed(
-                        "/api/v1/copy-trade/futures/orders", body,
+                        (_st_orders_path if body.get("stop") else _orders_path)(getattr(eng, "_api_mode", "lead")), body,
                         eng._api_key, eng._api_sec, eng._api_pass,
                         base_url=KUCOIN_FUTURES_BASE,
                     )
@@ -3317,7 +3353,7 @@ def place_futures_order(
     # ── Live mode: send to Lead Trading API ──────────────────────────────
     exchange_order_id = None
     if mode == "live":
-        ok, err = _ensure_live_credentials(eng, user_id, db)
+        ok, err = _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))
         if not ok:
             return {"error": err}
         try:
@@ -3394,13 +3430,13 @@ def place_futures_order(
                 # reduceOnly is set above only when the caller explicitly
                 # requested it.
                 resp = _kucoin_post_signed(
-                    "/api/v1/copy-trade/futures/orders", body,
+                    (_st_orders_path if body.get("stop") else _orders_path)(getattr(eng, "_api_mode", "lead")), body,
                     eng._api_key, eng._api_sec, eng._api_pass,
                     base_url=KUCOIN_FUTURES_BASE,
                 )
             else:
                 resp = _kucoin_post_signed(
-                    "/api/v1/copy-trade/futures/orders", body,
+                    (_st_orders_path if body.get("stop") else _orders_path)(getattr(eng, "_api_mode", "lead")), body,
                     eng._api_key, eng._api_sec, eng._api_pass,
                     base_url=KUCOIN_FUTURES_BASE,
                 )
@@ -3574,7 +3610,7 @@ def cancel_futures_order(
         client_oid: str | None = parts[2] if len(parts) > 2 and parts[2] else None
         symbol: str | None     = parts[3] if len(parts) > 3 and parts[3] else None
 
-        ok, err = _ensure_live_credentials(eng, user_id, db)
+        ok, err = _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))
         if not ok:
             return {"error": f"Cannot cancel stop order: {err}", "order_id": order_id}
 
@@ -3658,20 +3694,15 @@ def cancel_futures_order(
         # the user's key has the right permission.
         attempts: list[tuple[str, str, dict | None]] = []
 
-        # Primary: Lead Trading cancel-by-orderId (handles stop orders).
+        # Primary: cancel-by-orderId (handles stop orders). Mode-aware shape.
+        _cmode = getattr(eng, "_api_mode", "lead")
         if stop_exchange_id:
-            attempts.append((
-                "DELETE",
-                "/api/v1/copy-trade/futures/orders",
-                {"orderId": stop_exchange_id},
-            ))
-        # Secondary: Lead Trading cancel-by-clientOid (requires symbol).
+            _ep, _qp = _cancel_by_oid(_cmode, stop_exchange_id)
+            attempts.append(("DELETE", _ep, _qp))
+        # Secondary: cancel-by-clientOid (requires symbol).
         if client_oid and symbol:
-            attempts.append((
-                "DELETE",
-                "/api/v1/copy-trade/futures/orders/client-order",
-                {"symbol": symbol, "clientOid": client_oid},
-            ))
+            _ep2, _qp2 = _cancel_by_coid(_cmode, symbol, client_oid)
+            attempts.append(("DELETE", _ep2, _qp2))
 
         last_responses: list[tuple[str, dict | str]] = []
         for method, endpoint, query in attempts:
@@ -3778,7 +3809,7 @@ def cancel_futures_order(
     kucoin_cancelled = not is_live_order   # paper orders need no exchange call
     kucoin_error: str | None = None
     if is_live_order:
-        ok, err = _ensure_live_credentials(eng, user_id, db)
+        ok, err = _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))
         if not ok:
             log.warning("[%s] cancel-order skipped Lead Trading call: %s", user_id, err)
             kucoin_error = err
@@ -3794,8 +3825,8 @@ def cancel_futures_order(
                 from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
                 from urllib.parse import urlencode
                 ts = str(int(_time.time() * 1000))
-                qs = urlencode({"orderId": db_order.exchange_order_id})
-                endpoint = f"/api/v1/copy-trade/futures/orders?{qs}"
+                _ep, _qp = _cancel_by_oid(getattr(eng, "_api_mode", "lead"), db_order.exchange_order_id)
+                endpoint = f"{_ep}?{urlencode(_qp)}" if _qp else _ep
                 headers = _sign_request(
                     eng._api_sec, eng._api_pass, eng._api_key,
                     ts, "DELETE", endpoint,
@@ -3926,7 +3957,7 @@ def cancel_all_futures_orders(
     has_live = any(o.mode == "live" and o.exchange_order_id for o in orders)
     live_creds_ok = True
     if has_live:
-        live_creds_ok, _creds_err = _ensure_live_credentials(eng, user_id, db)
+        live_creds_ok, _creds_err = _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))
 
     for o in orders:
         # For LIVE orders, attempt the KuCoin cancel FIRST and finalize the DB
@@ -3949,8 +3980,8 @@ def cancel_all_futures_orders(
                 from backend.services._kucoin_proxy import urlopen as _proxy_urlopen
                 from urllib.parse import urlencode
                 ts = str(int(_time.time() * 1000))
-                qs = urlencode({"orderId": o.exchange_order_id})
-                endpoint = f"/api/v1/copy-trade/futures/orders?{qs}"
+                _ep, _qp = _cancel_by_oid(getattr(eng, "_api_mode", "lead"), o.exchange_order_id)
+                endpoint = f"{_ep}?{urlencode(_qp)}" if _qp else _ep
                 headers = _sign_request(
                     eng._api_sec, eng._api_pass, eng._api_key,
                     ts, "DELETE", endpoint,
@@ -4579,6 +4610,7 @@ def put_risk_config(
 
 @router.get("/orders")
 def get_futures_orders(
+    request: Request,
     symbol: str = None,
     status: str = "pending",
     mode: str = None,
@@ -4605,7 +4637,7 @@ def get_futures_orders(
     # our rows with an exchange_order_id NOT in that list has either filled
     # or been cancelled. Paper orders never had an exchange_order_id so
     # they're naturally excluded from this reconcile.
-    if (status == "pending" or status is None) and mode != "paper" and _ensure_live_credentials(eng, user_id, db)[0]:
+    if (status == "pending" or status is None) and mode != "paper" and _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))[0]:
         try:
             from backend.services.native_trading_engine import _kucoin_get_signed
             from backend.services.futures_engine import KUCOIN_FUTURES_BASE
@@ -4678,7 +4710,7 @@ def get_futures_orders(
     # source of truth. We merge them into the response so the Open Orders
     # tab can show what KuCoin's "Advanced Orders" sub-tab shows.
     stop_orders: list[dict] = []
-    if (status == "pending" or status is None) and mode != "paper" and _ensure_live_credentials(eng, user_id, db)[0]:
+    if (status == "pending" or status is None) and mode != "paper" and _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))[0]:
         try:
             from backend.services.native_trading_engine import _kucoin_get_signed
             from backend.services.futures_engine import KUCOIN_FUTURES_BASE
@@ -4893,7 +4925,7 @@ def set_futures_leverage(
     result = eng.set_symbol_leverage(symbol, leverage)
     # Best-effort sync to KuCoin so order placement uses the same value.
     # Silent if creds aren't loaded yet — order path will sync on demand.
-    if _ensure_live_credentials(eng, user_id, db)[0]:
+    if _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))[0]:
         _sync_leverage_to_kucoin(eng, symbol, leverage, user_id)
     log_event(db, user_id, "futures.set_leverage", request, payload=result)
     return result
@@ -4920,7 +4952,7 @@ def set_futures_margin_mode(
     # Push to KuCoin if creds available. If KuCoin refuses (e.g. open
     # position locks the mode), surface the error so the toggle visibly
     # reverts in the UI instead of silently going out of sync.
-    if _ensure_live_credentials(eng, user_id, db)[0]:
+    if _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))[0]:
         ok, err = _sync_margin_mode_to_kucoin(eng, symbol, mode, user_id)
         if not ok:
             result["warning"] = err
@@ -4935,6 +4967,7 @@ def set_futures_margin_mode(
 @router.get("/leverage/{symbol}")
 def get_futures_leverage(
     symbol: str,
+    request: Request,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
@@ -4963,7 +4996,7 @@ def get_futures_leverage(
     # overwrote the user's chosen leverage. Now we only override engine
     # leverage when KuCoin's value is meaningful (has a position OR
     # the configured leverage is non-default).
-    if _ensure_live_credentials(eng, user_id, db)[0]:
+    if _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))[0]:
         try:
             from backend.services.native_trading_engine import _kucoin_get_signed
             from backend.services.futures_engine import KUCOIN_FUTURES_BASE
@@ -5027,6 +5060,7 @@ def get_futures_leverage(
 
 @router.get("/account")
 def futures_account(
+    request: Request,
     mode: str = None,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
@@ -5046,9 +5080,8 @@ def futures_account(
     cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()
     if cfg:
         try:
-            kk = decrypt(cfg.kucoin_key_enc or "", user_id)
-            ks = decrypt(cfg.kucoin_secret_enc or "", user_id)
-            kp = decrypt(cfg.kucoin_passphrase_enc or "", user_id)
+            from backend.services.futures_mode import load_kucoin_creds
+            kk, ks, kp = load_kucoin_creds(cfg, user_id, _api_mode_from(request))
             if kk and ks:
                 from backend.services.native_trading_engine import _kucoin_get_signed
                 from backend.services.futures_engine import KUCOIN_FUTURES_BASE
@@ -5862,7 +5895,7 @@ def set_position_tp_sl(
 
     # ── Step 2b: if no engine position AND no paper orphan, try KuCoin ──
     if not matched_pos:
-        if not _ensure_live_credentials(eng, user_id, db)[0]:
+        if not _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))[0]:
             return {"error": f"No open position for {pair}. Connect a Lead Trading API key in Setup to enable TP/SL on KuCoin-only positions."}
         # Use /api/v1/positions (LIST) + filter, NOT /api/v1/position?symbol=X
         # (SINGLE). The single-position endpoint returns qty=0 for Lead
@@ -5927,7 +5960,7 @@ def set_position_tp_sl(
     # ── Step 3: place TP/SL stop orders on KuCoin for live positions ────
     kc_results: dict[str, object] = {}
     if kc_mode == "live":
-        ok, err = _ensure_live_credentials(eng, user_id, db)
+        ok, err = _ensure_live_credentials(eng, user_id, db, _api_mode_from(request))
         if not ok:
             kc_results["warning"] = err
         elif kc_direction is None:
@@ -5997,7 +6030,7 @@ def set_position_tp_sl(
                 log.info("[%s] Placing %s stop order: %s", user_id, label.upper(), body)
                 try:
                     resp = _kucoin_post_signed(
-                        "/api/v1/copy-trade/futures/orders",
+                        _st_orders_path(getattr(eng, "_api_mode", "lead")),
                         body,
                         eng._api_key, eng._api_sec, eng._api_pass,
                         base_url=KUCOIN_FUTURES_BASE,
@@ -6108,15 +6141,14 @@ def set_position_tp_sl(
 
                 def _cancel_one(ex_id, c_oid, sym) -> tuple[bool, bool]:
                     """Cancel ONE live stop. Returns (cancelled_ok, already_gone)."""
-                    routes: list[tuple[str, dict]] = []
+                    _cm = getattr(eng, "_api_mode", "lead")
+                    routes: list[tuple[str, dict | None]] = []
                     if ex_id:
-                        routes.append(("/api/v1/copy-trade/futures/orders",
-                                       {"orderId": ex_id}))
+                        routes.append(_cancel_by_oid(_cm, ex_id))
                     if c_oid and sym:
-                        routes.append(("/api/v1/copy-trade/futures/orders/client-order",
-                                       {"symbol": sym, "clientOid": c_oid}))
+                        routes.append(_cancel_by_coid(_cm, sym, c_oid))
                     for endpoint, q in routes:
-                        ep = endpoint + "?" + _cancel_urlencode(q)
+                        ep = (endpoint + "?" + _cancel_urlencode(q)) if q else endpoint
                         try:
                             ts = str(int(_t.time() * 1000))
                             headers = _sign_cancel(

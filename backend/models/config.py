@@ -12,6 +12,12 @@ class Config(Base):
     kucoin_key_enc = Column(Text)
     kucoin_secret_enc = Column(Text)
     kucoin_passphrase_enc = Column(Text)
+    # Regular (normal) KuCoin Futures API keys — used by the /regular-futures-trade
+    # terminal. Separate from the Lead copy-trading keys above so a user can
+    # connect a normal futures key independently. Null when not configured.
+    kucoin_reg_key_enc = Column(Text)
+    kucoin_reg_secret_enc = Column(Text)
+    kucoin_reg_passphrase_enc = Column(Text)
     openrouter_key_enc = Column(Text)
     preferred_model = Column(Text, default="nvidia/nemotron-3-super-120b-a12b:free")
     max_position_pct = Column(Float, default=5.0)

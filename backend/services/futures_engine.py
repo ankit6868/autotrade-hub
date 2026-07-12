@@ -572,6 +572,10 @@ class FuturesEngine(NativeTradingEngine):
         self._leverage      = 1
         self._market_type   = "futures"
         self._margin_mode   = "cross"
+        # KuCoin API mode: 'lead' (copy-trading, default) or 'regular' (normal
+        # futures). Only the order-endpoint paths differ. Set per request by
+        # _ensure_live_credentials (manual terminal) or at bot start.
+        self._api_mode      = "lead"
         self._pending_orders: dict[str, PendingOrder] = {}
         self._per_symbol_leverage: dict[str, int] = {}
         self._per_symbol_margin: dict[str, str] = {}
@@ -2328,8 +2332,10 @@ class FuturesEngine(NativeTradingEngine):
             return False, {}, "not in live mode"
         try:
             from .native_trading_engine import _kucoin_post_signed
+            from .futures_mode import orders_path, st_orders_path
+            _path = st_orders_path(self._api_mode) if body.get("stop") else orders_path(self._api_mode)
             resp = _kucoin_post_signed(
-                "/api/v1/copy-trade/futures/orders", body,
+                _path, body,
                 self._api_key, self._api_sec, self._api_pass,
                 base_url=KUCOIN_FUTURES_BASE,
             )
@@ -3076,10 +3082,12 @@ class FuturesEngine(NativeTradingEngine):
                 for row in rows:
                     if row.exchange_order_id:
                         try:
+                            from .futures_mode import cancel_by_order_id
+                            _ep, _qp = cancel_by_order_id(self._api_mode, row.exchange_order_id)
                             _kucoin_delete_signed(
-                                "/api/v1/copy-trade/futures/orders",
+                                _ep,
                                 self._api_key, self._api_sec, self._api_pass,
-                                params={"orderId": row.exchange_order_id},
+                                params=_qp,
                                 base_url=KUCOIN_FUTURES_BASE,
                             )
                         except Exception as ce:
@@ -3153,8 +3161,10 @@ class FuturesEngine(NativeTradingEngine):
         # 2. Place the fresh stop.
         try:
             from .native_trading_engine import _kucoin_post_signed
+            from .futures_mode import orders_path, st_orders_path
+            _path = st_orders_path(self._api_mode) if body.get("stop") else orders_path(self._api_mode)
             resp = _kucoin_post_signed(
-                "/api/v1/copy-trade/futures/orders", body,
+                _path, body,
                 self._api_key, self._api_sec, self._api_pass,
                 base_url=KUCOIN_FUTURES_BASE,
             )

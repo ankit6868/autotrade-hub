@@ -58,6 +58,15 @@ export function setUserEmail(email: string | null) {
   _userEmail = email;
 }
 
+// Futures API mode: 'lead' (copy-trading, default) or 'regular' (normal futures).
+// The /regular-futures-trade terminal sets this to 'regular' on mount (and back
+// to 'lead' on unmount) so every futures request carries X-Futures-Api: regular
+// and the backend routes to the private-account endpoints + regular keys.
+let _futuresApiMode: 'lead' | 'regular' = 'lead';
+export function setFuturesApiMode(mode: 'lead' | 'regular') {
+  _futuresApiMode = mode;
+}
+
 // Retry policy. Mobile-data clients often abort TCP after ~15s, but Railway's
 // first response after the container scales from zero takes 10-30s. The retry
 // keeps the user-perceived latency in check while still surviving cold starts.
@@ -122,6 +131,7 @@ async function _buildAuthHeaders(extra?: Record<string, string>): Promise<Record
     }
   }
   if (_userEmail) headers['X-User-Email'] = _userEmail;
+  if (_futuresApiMode === 'regular') headers['X-Futures-Api'] = 'regular';
   return headers;
 }
 
@@ -291,6 +301,10 @@ export const api = {
     update: (data: Record<string, unknown>) =>
       request<any>('/api/config/update', { method: 'PUT', body: JSON.stringify(data) }),
     testKucoin: () => request<any>('/api/config/test-kucoin', { method: 'POST' }),
+    // Regular (normal) KuCoin Futures API keys — for the /regular-futures-trade terminal.
+    setupRegular: (data: Record<string, unknown>) =>
+      request<any>('/api/config/setup-regular', { method: 'POST', body: JSON.stringify(data) }),
+    testKucoinRegular: () => request<any>('/api/config/test-kucoin-regular', { method: 'POST' }),
     testOpenrouter: () => request<any>('/api/config/test-openrouter', { method: 'POST' }),
     models: () => request<{ models: { id: string; name: string; context_length: number }[] }>('/api/config/models'),
   },
