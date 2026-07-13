@@ -548,6 +548,46 @@ def futures_trade_stats(
     }
 
 
+@router.get("/chart-trades")
+def futures_chart_trades(
+    pair: str,
+    mode: str = None,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """The user's MANUAL futures trades for `pair` (open + recent closed), shaped
+    for the chart overlay: entry/exit markers + TP/SL lines. instance_id IS NULL
+    keeps it to hand-placed trades (bot trades already have the formations overlay)."""
+    where = [
+        Trade.user_id == user_id,
+        Trade.market_type == "futures",
+        Trade.pair == pair,
+        Trade.instance_id.is_(None),
+    ]
+    if mode in ("paper", "live"):
+        where.append(Trade.mode == mode)
+    rows = db.execute(
+        select(Trade).where(*where).order_by(desc(Trade.entry_time)).limit(40)
+    ).scalars().all()
+    out = []
+    for t in rows:
+        if not t.entry_time or not t.entry_price:
+            continue
+        state = "open" if t.status == "open" else ("won" if (t.profit_abs or 0) >= 0 else "lost")
+        out.append({
+            "direction":  "long" if t.side == "long" else "short",
+            "entry":      float(t.entry_price),
+            "entry_time": _epoch_utc(t.entry_time),
+            "sl":         float(t.stoploss_price) if t.stoploss_price else None,
+            "tp":         float(t.tp_price) if t.tp_price else None,
+            "exit":       float(t.exit_price) if t.exit_price else None,
+            "exit_time":  _epoch_utc(t.exit_time) if t.exit_time else None,
+            "state":      state,
+            "profit_pct": float(t.profit_pct) if t.profit_pct is not None else None,
+        })
+    return {"trades": out}
+
+
 def _ensure_live_credentials(eng, user_id: str, db: Session, api_mode: str = "lead") -> tuple[bool, str | None]:
     """
     Make sure the futures engine has the user's KuCoin credentials for `api_mode`

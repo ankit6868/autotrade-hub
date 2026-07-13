@@ -13,6 +13,11 @@ import { TradeBoxPrimitive, TradeBox } from '@/lib/tradeBoxPrimitive';
 interface Props {
   pair: string;
   defaultInterval?: string;
+  // paper | live — which of the user's manual trades to overlay (entry/TP/SL/exit).
+  mode?: 'paper' | 'live';
+  // Bumped by the parent after an order/entry so the trade overlay refetches
+  // immediately (before the next poll) — instant entry marker feedback.
+  tradeRefreshKey?: number;
   // When provided (e.g. the strategy a bot follows), the chart auto-enables
   // the matching overlays — e.g. ['vwap','ema'] turns those on. Users can
   // still toggle any indicator on/off manually afterwards.
@@ -192,7 +197,7 @@ function chartOpts(bg = '#0d1117') {
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
-export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', strategyIndicators, strategyId, onTakeFormation }: Props) {
+export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', mode, tradeRefreshKey, strategyIndicators, strategyId, onTakeFormation }: Props) {
   const wrapperRef = useRef<HTMLDivElement>(null);
   const mainRef    = useRef<HTMLDivElement>(null);
   const rsiRef     = useRef<HTMLDivElement>(null);
@@ -231,6 +236,12 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
   const lastBarTimeRef = useRef<number>(0);   // latest candle time (extends open boxes)
   const fitPendingRef = useRef(true);         // fit view once per pair/timeframe, not every refetch
   const liveBarRef = useRef<{ time: number; o: number; h: number; l: number; c: number } | null>(null);
+  // Markers come from two sources (strategy formations + the user's manual
+  // trades); both merge into ONE setMarkers() call so neither clobbers the other.
+  const formMarkersRef = useRef<SeriesMarker<Time>[]>([]);
+  const tradeMarkersRef = useRef<SeriesMarker<Time>[]>([]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const priceLinesRef = useRef<any[]>([]);   // open TP/SL/Entry price lines
   const [overlayStrats, setOverlayStrats] = useState<{ id: number; name: string }[]>([]);
   const [pickStrat, setPickStrat] = useState<number | undefined>(undefined);
   // The most recent PENDING setup (drives the "Take trade" banner).
@@ -482,12 +493,22 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
   useVisibleInterval(liveTick, 2_500);
 
   // ── Formations overlay: taken-trade boxes + the strategy's live setup ─────
+  // Merge formation + manual-trade markers into ONE setMarkers() call.
+  const redrawMarkers = useCallback(() => {
+    const cs = serCandle.current;
+    if (!cs) return;
+    const all = [...formMarkersRef.current, ...tradeMarkersRef.current]
+      .sort((a, b) => (a.time as number) - (b.time as number));
+    try { cs.setMarkers(all); } catch { /* noop */ }
+  }, []);
+
   const loadForms = useCallback(async () => {
     const cs = serCandle.current;
     const prim = boxPrimRef.current;
     if (!cs) return;
     if (!showForms) {
-      try { cs.setMarkers([]); } catch { /* noop */ }
+      formMarkersRef.current = [];
+      redrawMarkers();
       prim?.setBoxes([]);
       setLatestForm(null);
       return;
@@ -555,11 +576,51 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', stra
       }
       setLatestForm(latest ? { direction: latest.direction, entry: latest.entry, sl: latest.sl ?? null, tp: latest.tp ?? null } : null);
 
-      markers.sort((a, b) => (a.time as number) - (b.time as number));
-      cs.setMarkers(markers);
+      formMarkersRef.current = markers;
+      redrawMarkers();
       prim?.setBoxes(boxes);
     } catch { /* overlay is best-effort */ }
-  }, [pair, tf, effStrat, showForms]);
+  }, [pair, tf, effStrat, showForms, redrawMarkers]);
+
+  // ── Manual-trade overlay: entry (BUY/SELL) + exit markers, and TP/SL/Entry
+  // price lines for OPEN positions. Always on (your own trades on this pair).
+  const loadTrades = useCallback(async () => {
+    const cs = serCandle.current;
+    if (!cs) return;
+    try {
+      const d = await api.futures.chartTrades(pair, mode);
+      priceLinesRef.current.forEach(pl => { try { cs.removePriceLine(pl); } catch { /* noop */ } });
+      priceLinesRef.current = [];
+      const markers: SeriesMarker<Time>[] = [];
+      (d.trades || []).forEach((t) => {
+        const long = t.direction === 'long';
+        if (t.entry_time) markers.push({
+          time: t.entry_time as Time,
+          position: long ? 'belowBar' : 'aboveBar',
+          color: long ? '#22c55e' : '#ef4444',
+          shape: long ? 'arrowUp' : 'arrowDown',
+          text: long ? 'BUY' : 'SELL',
+        });
+        if (t.exit_time && t.state !== 'open') markers.push({
+          time: t.exit_time as Time,
+          position: long ? 'aboveBar' : 'belowBar',
+          color: t.state === 'won' ? '#22c55e' : '#ef4444',
+          shape: 'square',
+          text: `EXIT${t.profit_pct != null ? ` ${t.profit_pct >= 0 ? '+' : ''}${t.profit_pct.toFixed(2)}%` : ''}`,
+        });
+        // Live TP / SL / Entry lines for still-OPEN positions.
+        if (t.state === 'open') {
+          priceLinesRef.current.push(cs.createPriceLine({ price: t.entry, color: '#94a3b8', lineWidth: 1, lineStyle: 3, axisLabelVisible: true, title: `Entry ${long ? 'LONG' : 'SHORT'}` }));
+          if (t.tp) priceLinesRef.current.push(cs.createPriceLine({ price: t.tp, color: '#22c55e', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'TP' }));
+          if (t.sl) priceLinesRef.current.push(cs.createPriceLine({ price: t.sl, color: '#ef4444', lineWidth: 1, lineStyle: 2, axisLabelVisible: true, title: 'SL' }));
+        }
+      });
+      tradeMarkersRef.current = markers;
+      redrawMarkers();
+    } catch { /* best-effort overlay */ }
+  }, [pair, mode, redrawMarkers]);
+  useEffect(() => { loadTrades(); }, [loadTrades, tradeRefreshKey]);
+  useVisibleInterval(loadTrades, 8_000);
 
   // Load the user's strategies for the overlay picker (once, when first opened).
   useEffect(() => {

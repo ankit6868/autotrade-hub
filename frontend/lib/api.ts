@@ -390,6 +390,10 @@ export const api = {
     tradeStats: (mode?: 'paper' | 'live') =>
       request<{ count: number; wins: number; losses: number; win_rate: number; total_pnl: number; pl_pct: number }>(
         `/api/futures/trade-stats${mode ? `?mode=${mode}` : ''}`),
+    // The user's manual trades for a pair — chart overlay (entry/TP/SL/exit).
+    chartTrades: (pair: string, mode?: 'paper' | 'live') =>
+      request<{ trades: Array<{ direction: string; entry: number; entry_time: number; sl: number | null; tp: number | null; exit: number | null; exit_time: number | null; state: string; profit_pct: number | null }> }>(
+        `/api/futures/chart-trades?pair=${encodeURIComponent(pair)}${mode ? `&mode=${mode}` : ''}`),
     backtest: {
       // run + autoTune go through the long-running path: direct to Railway
       // (5min proxy timeout) instead of through Vercel's edge proxy (60s).
