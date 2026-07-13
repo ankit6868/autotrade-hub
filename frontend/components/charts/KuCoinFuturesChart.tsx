@@ -235,7 +235,6 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', mode
   const boxPrimRef = useRef<TradeBoxPrimitive | null>(null);
   const lastBarTimeRef = useRef<number>(0);   // latest candle time (extends open boxes)
   const fitPendingRef = useRef(true);         // fit view once per pair/timeframe, not every refetch
-  const liveBarRef = useRef<{ time: number; o: number; h: number; l: number; c: number } | null>(null);
   // Markers come from two sources (strategy formations + the user's manual
   // trades); both merge into ONE setMarkers() call so neither clobbers the other.
   const formMarkersRef = useRef<SeriesMarker<Time>[]>([]);
@@ -450,9 +449,6 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', mode
           pct: (last.close - prev.close) / prev.close * 100,
         });
       }
-      // Seed the live-tick bar so the last candle can move in real time between
-      // full refetches (updated from the price feed every ~2.5s below).
-      if (last) liveBarRef.current = { time: last.time, o: last.open, h: last.high, l: last.low, c: last.close };
 
       // Hide attribution after data load
       setTimeout(hideAllAttribution, 50);
@@ -471,26 +467,27 @@ export default function KuCoinFuturesChart({ pair, defaultInterval = '15m', mode
   useEffect(() => { fitPendingRef.current = true; }, [pair, tf]);
 
   useEffect(() => { loadData(); }, [loadData]);
-  // Visibility-aware: full refetch every 8s (was 30s) keeps history accurate.
-  useVisibleInterval(loadData, 8_000);
+  // Full refetch (history + indicators) every 10s.
+  useVisibleInterval(loadData, 10_000);
 
-  // Live tick: between full refetches, move the LAST candle in real time from
-  // the price feed (~2.5s) via .update() — so the chart ticks like KuCoin's.
-  const liveTick = useCallback(async () => {
+  // Live forming candle: poll the latest kline every ~3s and update ONLY the
+  // last bar via .update(). SAME data source as the full candles, so the
+  // forming candle ticks smoothly (green when price > open, red when below)
+  // with no two-source jitter and no fake spikes when a new candle starts.
+  const loadLive = useCallback(async () => {
     const cs = serCandle.current;
-    const b = liveBarRef.current;
-    if (!cs || !b) return;
+    if (!cs) return;
     try {
-      const d = await api.market.price(pair);
-      const px = parseFloat(d.price);
-      if (!px || Number.isNaN(px)) return;
-      b.h = Math.max(b.h, px);
-      b.l = Math.min(b.l, px);
-      b.c = px;
-      cs.update({ time: b.time as Time, open: b.o, high: b.h, low: b.l, close: px } as CandlestickData);
-    } catch { /* ignore transient price errors */ }
-  }, [pair]);
-  useVisibleInterval(liveTick, 2_500);
+      const data = await api.market.ohlcv(pair, tf, 2);
+      const raw = (data.candles ?? []).slice().sort((a: { time: number }, b: { time: number }) => a.time - b.time);
+      const last = raw[raw.length - 1];
+      if (!last) return;
+      cs.update({ time: last.time as Time, open: last.open, high: last.high, low: last.low, close: last.close } as CandlestickData);
+      serVol.current?.update({ time: last.time as Time, value: last.volume, color: last.close >= last.open ? 'rgba(38,166,154,0.35)' : 'rgba(239,83,80,0.35)' } as HistogramData);
+      lastBarTimeRef.current = last.time;
+    } catch { /* transient */ }
+  }, [pair, tf]);
+  useVisibleInterval(loadLive, 3_000);
 
   // ── Formations overlay: taken-trade boxes + the strategy's live setup ─────
   // Merge formation + manual-trade markers into ONE setMarkers() call.
