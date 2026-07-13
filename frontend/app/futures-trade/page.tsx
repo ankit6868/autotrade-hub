@@ -2,7 +2,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '@/lib/api';
 import { useVisibleInterval } from '@/lib/useVisibleInterval';
-import KuCoinFuturesChart from '@/components/charts/KuCoinFuturesChart';
+import ChartPanel from '@/components/charts/ChartPanel';
 import PairTabs from '@/components/futures/PairTabs';
 import OrderBook from '@/components/futures/OrderBook';
 import RecentTrades from '@/components/futures/RecentTrades';
@@ -191,7 +191,7 @@ export default function FuturesTerminal() {
               won't shrink the Positions panel here. */}
           <div className="flex-1 min-w-0 flex flex-col overflow-hidden border-r border-white/[0.06]">
             <div className="flex-1 min-h-0 overflow-hidden">
-              <KuCoinFuturesChart pair={pair} defaultInterval="15m" mode={mode} tradeRefreshKey={refreshTrigger} onTakeFormation={takeFormation} />
+              <ChartPanel pair={pair} defaultInterval="15m" mode={mode} tradeRefreshKey={refreshTrigger} onTakeFormation={takeFormation} />
             </div>
             <div className="h-[260px] shrink-0 border-t border-white/[0.06] overflow-hidden">
               <PositionsPanel
@@ -308,7 +308,7 @@ export default function FuturesTerminal() {
         <div className="lg:hidden flex-1 min-h-0 overflow-hidden flex flex-col">
           {mobileView === 'chart' && (
             <div className="flex-1 min-h-0 overflow-hidden">
-              <KuCoinFuturesChart pair={pair} defaultInterval="15m" mode={mode} tradeRefreshKey={refreshTrigger} onTakeFormation={takeFormation} />
+              <ChartPanel pair={pair} defaultInterval="15m" mode={mode} tradeRefreshKey={refreshTrigger} onTakeFormation={takeFormation} />
             </div>
           )}
           {mobileView === 'orderbook' && (
