@@ -59,7 +59,7 @@ export default function Home() {
           className="rounded-2xl bg-[#0f1830] border border-white/[0.06] hover:border-emerald-500/30 transition-colors p-5"
         >
           <div className="text-2xl mb-2">💹</div>
-          <div className="text-white font-bold">Futures Terminal</div>
+          <div className="text-white font-bold">Lead Futures Panel</div>
           <p className="text-xs text-slate-400 mt-1">Chart, manual orders, bot panel — paper + live in one tab.</p>
         </Link>
         <Link
