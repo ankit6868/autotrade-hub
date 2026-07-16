@@ -17,10 +17,44 @@ const PUB_KEY = process.env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY;
 // Must be a public route (the middleware allows /sign-in without auth).
 const AFTER_SIGN_OUT_URL = '/sign-in';
 
+// Dark theme for ALL Clerk UI (UserButton popover, sign-in/up modals, user
+// profile) so it matches the app's navy palette instead of Clerk's default
+// white card. Applied once on ClerkProvider → consistent in every layout.
+// `variables` handle colours robustly (no Tailwind purge risk); a few
+// `elements` add the border/shadow + a clear red "Sign out" affordance and
+// make the popover responsive (never wider than the viewport on small screens).
+const clerkAppearance = {
+  variables: {
+    colorBackground: '#0f1830',
+    colorText: '#e5e7eb',
+    colorTextSecondary: '#94a3b8',
+    colorPrimary: '#3b82f6',
+    colorInputBackground: '#0b1220',
+    colorInputText: '#e5e7eb',
+    colorInputBorder: 'rgba(255,255,255,0.12)',
+    borderRadius: '0.75rem',
+    fontFamily: 'inherit',
+  },
+  elements: {
+    userButtonPopoverCard:
+      'bg-[#0f1830] border border-white/10 shadow-2xl max-w-[calc(100vw-1.5rem)]',
+    userButtonPopoverMain: 'bg-[#0f1830]',
+    userButtonPopoverFooter: 'bg-[#0f1830]',
+    userButtonPopoverActionButton: 'hover:bg-white/[0.06] text-slate-200',
+    userButtonPopoverActionButton__signOut:
+      'text-red-300 hover:bg-red-500/10 hover:text-red-200',
+    userButtonPopoverActionButtonIcon: 'text-slate-400',
+    userButtonAvatarBox: 'w-8 h-8',
+    card: 'bg-[#0f1830] border border-white/10 shadow-2xl max-w-[calc(100vw-1.5rem)]',
+    modalContent: 'max-w-[calc(100vw-1.5rem)]',
+  },
+};
+
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   if (!PUB_KEY) return <>{children}</>;
   return (
     <ClerkProvider
+      appearance={clerkAppearance}
       afterSignOutUrl={AFTER_SIGN_OUT_URL}
       signInUrl="/sign-in"
       signUpUrl="/sign-up"
