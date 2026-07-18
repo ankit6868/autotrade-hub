@@ -398,7 +398,7 @@ export default function PositionsPanel({
           <TradeHistoryTab trades={tradeHistory} mode={mode} onRefresh={refreshAll} />
         )}
         {tab === 'assets' && (
-          <AssetsTab account={account} />
+          <AssetsTab account={account} mode={mode} onRefresh={refreshAll} />
         )}
         {tab === 'bots' && (
           <BotsTab bots={bots} mainEngine={mainEngine} />
@@ -1447,14 +1447,41 @@ function TradeHistoryTab({ trades, mode, onRefresh }: { trades: any[]; mode?: 'p
   );
 }
 
-function AssetsTab({ account }: { account: any }) {
+function AssetsTab({ account, mode, onRefresh }: { account: any; mode?: 'paper' | 'live'; onRefresh?: () => void }) {
+  const isPaper = (mode ?? account?.mode ?? 'paper') === 'paper';
+  const [amount, setAmount] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
+
+  async function addFunds(reset: boolean) {
+    const amt = reset ? 1000 : parseFloat(amount);
+    if (!reset && (!amt || amt <= 0)) { setMsg({ text: 'Enter an amount above 0', ok: false }); return; }
+    setBusy(true); setMsg(null);
+    try {
+      const r = await api.futures.paperAddFunds({ amount: amt, reset });
+      if (r?.error) { setMsg({ text: r.error, ok: false }); }
+      else {
+        setMsg({ text: reset ? 'Reset to 1000 USDT' : `Added ${amt.toFixed(2)} USDT`, ok: true });
+        setAmount('');
+        onRefresh?.();
+      }
+    } catch {
+      setMsg({ text: 'Could not reach the server — try again', ok: false });
+    } finally { setBusy(false); }
+  }
+
   return (
     <div className="p-4 space-y-3">
-      <h3 className="text-sm font-bold text-white">Asset Overview</h3>
+      <div className="flex items-center gap-2">
+        <h3 className="text-sm font-bold text-white">Asset Overview</h3>
+        {isPaper && <span className="text-[9px] px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-400 font-medium">Paper</span>}
+      </div>
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
-          { label: 'Balance', value: `${(account?.balance ?? 0).toFixed(2)} USDT` },
-          { label: 'Equity', value: `${(account?.equity ?? 0).toFixed(2)} USDT` },
+          // Balance = realized wallet (margin_balance); Equity = wallet +
+          // unrealized. Falls back to `balance` for older payloads.
+          { label: 'Balance', value: `${(account?.margin_balance ?? account?.balance ?? 0).toFixed(2)} USDT` },
+          { label: 'Equity', value: `${(account?.equity ?? account?.balance ?? 0).toFixed(2)} USDT` },
           { label: 'Unrealized PNL', value: `${(account?.unrealized_pnl ?? 0).toFixed(2)} USDT`, color: (account?.unrealized_pnl ?? 0) >= 0 },
           { label: 'Used Margin', value: `${(account?.used_margin ?? 0).toFixed(2)} USDT` },
           { label: 'Available', value: `${(account?.available_balance ?? 0).toFixed(2)} USDT` },
@@ -1472,6 +1499,47 @@ function AssetsTab({ account }: { account: any }) {
           </div>
         ))}
       </div>
+
+      {/* Paper-only: add / reset demo funds right next to the balance. Live
+          balances come from KuCoin and can't be topped up here. */}
+      {isPaper && (
+        <div className="rounded-lg border border-indigo-500/20 bg-indigo-500/[0.06] p-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11px] text-slate-300 font-medium">Add demo funds</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              min="0"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') addFunds(false); }}
+              placeholder="e.g. 1000"
+              disabled={busy}
+              className="w-28 bg-[#0b1220] border border-white/10 rounded px-2 py-1 text-xs text-white placeholder:text-slate-600 focus:outline-none focus:border-indigo-400"
+              aria-label="Amount of demo USDT to add"
+            />
+            <button
+              onClick={() => addFunds(false)}
+              disabled={busy}
+              className="text-xs font-medium px-2.5 py-1 rounded bg-indigo-500/20 text-indigo-300 hover:text-indigo-200 border border-indigo-500/30 disabled:opacity-50"
+            >
+              ＋ Add
+            </button>
+            <button
+              onClick={() => addFunds(true)}
+              disabled={busy}
+              className="text-xs font-medium px-2.5 py-1 rounded bg-white/[0.04] text-slate-300 hover:text-white border border-white/10 disabled:opacity-50"
+              title="Reset the paper wallet back to 1000 USDT."
+            >
+              Reset to 1000
+            </button>
+            {msg && (
+              <span className={`text-[11px] ${msg.ok ? 'text-emerald-400' : 'text-red-400'}`}>{msg.text}</span>
+            )}
+          </div>
+          <p className="text-[10px] text-slate-500 mt-1.5">Virtual USDT for paper trading only — no real money.</p>
+        </div>
+      )}
     </div>
   );
 }
