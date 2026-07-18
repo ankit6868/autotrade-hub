@@ -3341,8 +3341,16 @@ class FuturesEngine(NativeTradingEngine):
             direction = "long" if order.side == "buy" else "short"
             fill_price = order.price if order.price else current_price
             now = datetime.now(timezone.utc)
-            sl = order.sl_price or (fill_price * (1 - abs(self._stoploss)) if direction == "long" else fill_price * (1 + abs(self._stoploss)))
-            tp = order.tp_price or (fill_price * (1 + self._take_profit) if direction == "long" else fill_price * (1 - self._take_profit))
+            # SL/TP are USER-DRIVEN only — parity with /manual-entry (bug 4).
+            # If the user didn't attach a stop to this limit order, the filled
+            # position gets NONE (0 → check_exit skips that leg). Previously
+            # this fell back to the engine's default 3% SL / 1.5% TP, silently
+            # bounding manual paper limit fills the user never asked to bound
+            # (and on the manual engine those defaults are the base -0.03/0.015
+            # since start_futures never runs, so every limit fill auto-closed
+            # at ±a few %).
+            sl = float(order.sl_price or 0.0)
+            tp = float(order.tp_price or 0.0)
             lev = order.leverage or self._leverage
             with self._lock:
                 pos = FuturesPosition(

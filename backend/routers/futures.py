@@ -5280,35 +5280,66 @@ def _paper_account(eng, user_id: str = None):
             "max_withdraw": 0.0, "position_count": 0, "currency": "USDT",
         }
 
-    main_balance = float(eng.balance or 0)
+    main_balance = float(eng.balance or 0)   # realized paper wallet (marginBalance)
     unrealized = 0.0
     used_margin = 0.0
     open_count = 0
     try:
-        if eng.is_running:
-            pos_list = eng.get_open_positions()
-            unrealized = sum(p.get("unrealized_pnl", 0) for p in pos_list)
-            used_margin = sum(p.get("stake", 0) for p in pos_list)
-            open_count = len(pos_list)
+        # The MAIN user engine never starts its run loop, so `is_running` is
+        # ALWAYS False for it (bug: the old code gated this block on
+        # is_running AND called a non-existent get_open_positions(), so the
+        # Asset Overview showed 0 margin / 0 PNL for every open paper trade).
+        # Compute directly from engine state instead. Only PAPER-tagged
+        # positions count — live manual positions are accounted via KuCoin.
+        with eng._lock:
+            snapshot = [
+                (
+                    p.pair,
+                    p.direction,
+                    float(p.entry or 0),
+                    # Effective locked margin = original stake × remaining_pct
+                    # (a partial close frees the closed fraction's margin).
+                    float(p.size or 0) * max(0.0, min(1.0, float(getattr(p, "remaining_pct", 1.0) or 1.0))),
+                    int(getattr(p, "leverage", 1) or 1),
+                )
+                for p in eng.positions.values()
+                if getattr(p, "_mode", "paper") == "paper"
+            ]
+        for _pair, _dir, _entry, _eff_margin, _lev in snapshot:
+            open_count  += 1
+            used_margin += _eff_margin
+            cur = _futures_ticker_price(_pair) or _entry
+            if _entry:
+                pct = (cur - _entry) / _entry if _dir == "long" else (_entry - cur) / _entry
+                unrealized += pct * _eff_margin * _lev
     except Exception:
-        pass
+        log.warning("[%s] paper account unrealized/margin calc failed",
+                    user_id, exc_info=True)
 
+    equity    = main_balance + unrealized
+    available = max(0.0, main_balance - used_margin)
     return {
         "mode": "paper",
         "source": "paper_engine_main",
         "engine_count": 1,
-        "balance": round(main_balance, 4),
+        # "Account Equity" in the UI reads `balance` — mirror the live branch
+        # (KuCoin's accountEquity INCLUDES unrealised PNL) so paper equity
+        # moves with open-position P&L like the real account does.
+        "balance": round(equity, 4),
         "margin_balance": round(main_balance, 4),
-        "equity": round(main_balance + unrealized, 4),
-        "available_balance": round(main_balance, 4),
-        "available_margin": round(main_balance - used_margin, 4),
+        "equity": round(equity, 4),
+        # Free margin for NEW orders = wallet − locked margin (drives Max
+        # Long/Short + the "Available" line). Drops as positions open, returns
+        # (± realised P&L) when they close.
+        "available_balance": round(available, 4),
+        "available_margin": round(available, 4),
         "unrealized_pnl": round(unrealized, 4),
         "used_margin": round(used_margin, 4),
         "order_margin": 0,
         "margin_mode": "Isolated",
         "frozen_funds": 0,
         "risk_ratio": round(used_margin / max(main_balance, 0.01) * 100, 2) if used_margin > 0 else 0,
-        "max_withdraw": round(main_balance, 4),
+        "max_withdraw": round(available, 4),
         "position_count": open_count,
         "currency": "USDT",
     }
@@ -6447,6 +6478,14 @@ def set_position_tp_sl(
     if trade:
         if sl_price is not None:
             trade.stoploss_price = float(sl_price)
+        # Persist tp_price too — previously only stoploss_price was written,
+        # so adding/editing a TP after entry never reached the DB row. The
+        # chart overlay + Trade History read Trade.tp_price, so the new TP
+        # line was invisible until the position closed. The engine pos.tp was
+        # already set above, so the stop still FIRED — this just keeps the DB
+        # (and everything that reads it) in sync with what the user set.
+        if tp_price is not None:
+            trade.tp_price = float(tp_price)
         db.commit()
 
     log_event(db, user_id, "futures.set_tp_sl", request,
