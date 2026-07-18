@@ -487,12 +487,60 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
                 </div>
               </div>
 
-              {/* Risk Guard cooldown badge */}
+              {/* Risk Guard cooldown badge + inline controls. When the bot is
+                  mid-cooldown the user can Resume now (clear it) or Turn off the
+                  guard entirely — no need to stop/recreate the bot. */}
               {bot.guard_state === 'cooldown' && (
                 <div className="mt-2 px-1.5 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-[9px] text-amber-300 font-medium">
-                  ⏸ Risk Guard cooldown{guardMinsLeft(bot.guard_cooldown_until) ? ` — ${guardMinsLeft(bot.guard_cooldown_until)}m left` : ''} (loss streak — new entries paused)
+                  <div>⏸ Risk Guard cooldown{guardMinsLeft(bot.guard_cooldown_until) ? ` — ${guardMinsLeft(bot.guard_cooldown_until)}m left` : ''} (loss streak — new entries paused)</div>
+                  <div className="flex items-center gap-1.5 mt-1">
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        await api.futures.bots.setGuard(bot.id, { clear_cooldown: true });
+                        refreshBots();
+                      }}
+                      className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 hover:text-emerald-200"
+                      title="Clear the cooldown and resume new entries immediately."
+                    >
+                      ▶ Resume now
+                    </button>
+                    <button
+                      onClick={async (e) => {
+                        e.stopPropagation();
+                        await api.futures.bots.setGuard(bot.id, { enabled: false });
+                        refreshBots();
+                      }}
+                      className="px-1.5 py-0.5 rounded bg-white/[0.06] border border-white/10 text-slate-300 hover:text-white"
+                      title="Turn the loss-streak Risk Guard OFF for this bot (persists across restarts)."
+                    >
+                      Turn off guard
+                    </button>
+                  </div>
                 </div>
               )}
+
+              {/* Always-available Risk Guard toggle (per bot, per terminal). */}
+              <div className="mt-1.5 flex items-center justify-between px-1.5 py-1 rounded bg-[#131722] border border-white/[0.03]">
+                <span className="text-[9px] text-slate-500" title="Consecutive-loss cooldown: after N losing trades in a row the bot pauses new entries for a while. Turn off to trade without this brake.">
+                  🛡️ Risk Guard {bot.guard_enabled !== false ? `(${bot.guard_max_consec ?? 5} losses → ${bot.guard_cooldown_min ?? 60}m)` : ''}
+                </span>
+                <button
+                  onClick={async (e) => {
+                    e.stopPropagation();
+                    await api.futures.bots.setGuard(bot.id, { enabled: bot.guard_enabled === false, clear_cooldown: bot.guard_enabled !== false ? false : true });
+                    refreshBots();
+                  }}
+                  className={`text-[9px] font-bold px-2 py-0.5 rounded border ${
+                    bot.guard_enabled !== false
+                      ? 'text-emerald-400 bg-emerald-500/10 border-emerald-500/20'
+                      : 'text-slate-400 bg-white/[0.04] border-white/10'
+                  }`}
+                  title="Toggle the loss-streak Risk Guard for this bot. Persists across restarts."
+                >
+                  {bot.guard_enabled !== false ? 'ON' : 'OFF'}
+                </button>
+              </div>
 
               {/* Signal / Last action */}
               <div className="mt-2 p-1.5 rounded bg-[#131722] border border-white/[0.03]">

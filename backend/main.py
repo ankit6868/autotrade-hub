@@ -4139,6 +4139,15 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
                     # rows normalise to "single" inside start_futures).
                     position_mode        = getattr(i, "position_mode", None),
                     strategy_flags       = _sf,
+                    # Restore the persisted Risk-Guard (loss-streak cooldown)
+                    # config. Without these, this background resume dropped the
+                    # user's choice and start_futures re-defaulted guard_enabled
+                    # to True — so a bot the user turned the guard OFF for had it
+                    # silently switched back ON after every Railway redeploy.
+                    guard_enabled      = bool(getattr(i, "guard_enabled", True)
+                                              if i.guard_enabled is not None else True),
+                    guard_max_consec   = int(getattr(i, "guard_max_consec", 5) or 5),
+                    guard_cooldown_min = int(getattr(i, "guard_cooldown_min", 60) or 60),
                 )
                 resumed += 1
                 # Re-apply paused state if the bot was paused before the

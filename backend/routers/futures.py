@@ -6869,6 +6869,11 @@ def list_futures_bots(
                 eng._guard_cooldown_until.isoformat()
                 if eng and getattr(eng, "_guard_cooldown_until", None) else None
             ),
+            # Persisted guard config so the bot card can show + toggle it live.
+            "guard_enabled": bool(getattr(i, "guard_enabled", True)
+                                  if i.guard_enabled is not None else True),
+            "guard_max_consec": int(getattr(i, "guard_max_consec", 5) or 5),
+            "guard_cooldown_min": int(getattr(i, "guard_cooldown_min", 60) or 60),
             "risk_pct": i.risk_pct,
             "stoploss": i.stoploss,
             "takeprofit": i.takeprofit,
@@ -7311,6 +7316,86 @@ def resume_futures_bot(
     db.commit()
     log_event(db, user_id, "futures.resume_bot", request, payload={"bot_id": bot_id})
     return {"paused": False, "bot_id": bot_id}
+
+
+@router.post("/bots/{bot_id}/guard")
+def set_futures_bot_guard(
+    bot_id: int,
+    req: dict,
+    request: Request,
+    db: Session = Depends(get_db),
+    user_id: str = Depends(get_user_id),
+):
+    """Turn the Risk-Guard (consecutive-loss cooldown) on/off for ONE bot at
+    runtime AND/OR clear an ACTIVE cooldown — without stopping / recreating it.
+
+    Body (all optional):
+      • enabled        : bool  — master on/off for this bot's loss-streak guard
+      • max_consec     : int   — losses-in-a-row that trip the cooldown (2..20)
+      • cooldown_min   : int   — cooldown length in minutes (5..1440)
+      • clear_cooldown : bool  — immediately end any active cooldown (resume now)
+
+    Applies to the LIVE engine if the bot is running AND persists to the
+    StrategyInstance row so the choice survives a backend restart (the resume
+    path reads these columns). This is the per-bot "where do I turn it off"
+    control surfaced on each bot card — Lead or Regular, independently.
+    """
+    instance = db.execute(
+        select(StrategyInstance).where(
+            StrategyInstance.id == bot_id, StrategyInstance.user_id == user_id,
+        )
+    ).scalar_one_or_none()
+    if not instance:
+        return {"error": "Bot not found"}
+
+    enabled        = req.get("enabled")
+    max_consec     = req.get("max_consec")
+    cooldown_min   = req.get("cooldown_min")
+    clear_cooldown = bool(req.get("clear_cooldown", False))
+
+    # ── Persist to the DB row (auto-resume reads these) ─────────────────
+    if enabled is not None:
+        instance.guard_enabled = bool(enabled)
+    if max_consec is not None:
+        instance.guard_max_consec = max(2, min(20, int(max_consec)))
+    if cooldown_min is not None:
+        instance.guard_cooldown_min = max(5, min(1440, int(cooldown_min)))
+    db.commit()
+
+    # ── Apply live to the running engine (if any) ───────────────────────
+    applied_live = False
+    if instance.engine_key:
+        bot_engines = {k: e for k, e in futures_engine_registry.user_bot_engines(user_id)}
+        eng = bot_engines.get(instance.engine_key)
+        if eng is not None:
+            if enabled is not None:
+                eng._guard_enabled = bool(enabled)
+            if max_consec is not None:
+                eng._guard_max_consec = max(2, min(20, int(max_consec)))
+            if cooldown_min is not None:
+                eng._guard_cooldown_min = max(5, min(1440, int(cooldown_min)))
+            # Clear the active cooldown when asked, or automatically when the
+            # guard is being turned OFF (otherwise a bot mid-cooldown would
+            # stay paused until the timer expired despite the guard being off).
+            if clear_cooldown or enabled is False:
+                eng._guard_cooldown_until = None
+                eng._guard_state = "active"
+            applied_live = True
+
+    log_event(db, user_id, "futures.set_bot_guard", request, payload={
+        "bot_id": bot_id, "enabled": enabled, "max_consec": max_consec,
+        "cooldown_min": cooldown_min, "clear_cooldown": clear_cooldown,
+        "applied_live": applied_live,
+    })
+    return {
+        "ok": True,
+        "bot_id": bot_id,
+        "guard_enabled": instance.guard_enabled,
+        "guard_max_consec": instance.guard_max_consec,
+        "guard_cooldown_min": instance.guard_cooldown_min,
+        "cooldown_cleared": clear_cooldown or enabled is False,
+        "applied_live": applied_live,
+    }
 
 
 @router.delete("/bots/{bot_id}")

@@ -599,6 +599,10 @@ export const api = {
       // NICE-6: pause / resume — manages open positions but blocks new entries
       pause:  (botId: number) => request<any>(`/api/futures/bots/${botId}/pause`,  { method: 'POST' }),
       resume: (botId: number) => request<any>(`/api/futures/bots/${botId}/resume`, { method: 'POST' }),
+      // Risk-Guard (loss-streak cooldown) runtime control — toggle on/off and/or
+      // clear an active cooldown for ONE running bot, persisted across restarts.
+      setGuard: (botId: number, data: { enabled?: boolean; max_consec?: number; cooldown_min?: number; clear_cooldown?: boolean }) =>
+        request<any>(`/api/futures/bots/${botId}/guard`, { method: 'POST', body: JSON.stringify(data) }),
       performance: (botId: number) => request<any>(`/api/futures/bots/${botId}/performance`),
     },
   },
