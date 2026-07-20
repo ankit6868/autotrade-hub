@@ -361,8 +361,8 @@ export default function PositionsPanel({
   });
 
   const tabs: { key: Tab; label: string; count?: number }[] = [
-    { key: 'open_orders', label: 'Open Orders', count: openOrders.length },
     { key: 'positions', label: 'Positions', count: positions.length },
+    { key: 'open_orders', label: 'Open Orders', count: openOrders.length },
     { key: 'assets', label: 'Assets' },
     { key: 'order_history', label: 'Order History' },
     { key: 'trade_history', label: 'Trade History' },

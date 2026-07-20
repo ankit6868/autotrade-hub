@@ -424,8 +424,12 @@ export default function ManualOrderPanel({
         </div>
         {mode === 'paper' ? (
           <span className="text-[11px] text-indigo-300 font-medium">{availableBalance.toFixed(2)} USDT</span>
-        ) : leadStatus?.connected && leadStatus.balance != null ? (
-          <span className="text-[11px] text-emerald-300 font-medium">{leadStatus.balance.toFixed(2)} USDT</span>
+        ) : leadStatus?.connected && (leadStatus.equity ?? leadStatus.balance) != null ? (
+          // Show account EQUITY (total) here so it matches the Assets tab's
+          // "Balance" card. The free-to-trade figure is shown as "Available"
+          // in the form below — previously this line showed available, which
+          // read as a different (smaller) account balance than the Assets tab.
+          <span className="text-[11px] text-emerald-300 font-medium">{(leadStatus.equity ?? leadStatus.balance)!.toFixed(2)} USDT</span>
         ) : null}
       </div>
 

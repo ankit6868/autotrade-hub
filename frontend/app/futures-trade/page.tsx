@@ -387,7 +387,15 @@ export default function FuturesTerminal() {
             and Asset Overview inside the RIGHT column — see lg+ block
             above. No shared bottom row.) */}
         <div className="lg:hidden h-[220px] border-t border-white/[0.06] bg-[#0d1117] overflow-hidden">
-          <PositionsPanel mode={mode} onRefresh={refreshAccount} refreshTrigger={refreshTrigger} />
+          <PositionsPanel
+            mode={mode}
+            onRefresh={refreshAccount}
+            refreshTrigger={refreshTrigger}
+            optimisticPosition={optimisticPosition}
+            onOptimisticConsumed={() => setOptimisticPosition(null)}
+            optimisticOrder={optimisticOrder}
+            onOptimisticOrderConsumed={() => setOptimisticOrder(null)}
+          />
         </div>
       </div>
     </div>
