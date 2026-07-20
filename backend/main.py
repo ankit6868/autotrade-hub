@@ -4148,6 +4148,10 @@ def _resume_dead_bots(*, log_label: str = "watchdog") -> int:
                                               if i.guard_enabled is not None else True),
                     guard_max_consec   = int(getattr(i, "guard_max_consec", 5) or 5),
                     guard_cooldown_min = int(getattr(i, "guard_cooldown_min", 60) or 60),
+                    # Restore the persisted daily entry cap. Without this the
+                    # engine re-defaulted to 8/day on every restart, so bots
+                    # silently stopped entering after 8 trades a day.
+                    max_trades_per_day = int(getattr(i, "max_trades_per_day", 999) or 999),
                 )
                 resumed += 1
                 # Re-apply paused state if the bot was paused before the

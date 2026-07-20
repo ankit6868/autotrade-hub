@@ -167,6 +167,11 @@ class StrategyInstance(Base):
     guard_enabled      = Column(Boolean, default=True)
     guard_max_consec   = Column(Integer, default=5)
     guard_cooldown_min = Column(Integer, default=60)
+    # Max NEW entries per UTC day. Persisted so it survives a restart — before
+    # this column existed, resume never passed it and the engine re-defaulted to
+    # 8, silently capping bots at 8 trades/day. Default 999 = effectively
+    # unlimited. _lightweight_migrate auto-adds the column.
+    max_trades_per_day = Column(Integer, default=999)
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
 

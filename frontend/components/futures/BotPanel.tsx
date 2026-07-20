@@ -487,6 +487,16 @@ export default function BotPanel({ pair, mode, paperBalance, onBotCreated }: Pro
                 </div>
               </div>
 
+              {/* Daily entry-cap indicator — tells the user WHY a bot stopped
+                  entering ("40/40 trades today"). Only shown when the bot has
+                  actually hit its cap; a cap of 999 (unlimited) never trips. */}
+              {bot.max_trades_per_day != null && bot.day_trades != null &&
+               bot.day_trades >= bot.max_trades_per_day && bot.max_trades_per_day < 999 && (
+                <div className="mt-2 px-1.5 py-1 rounded bg-amber-500/10 border border-amber-500/30 text-[9px] text-amber-300 font-medium">
+                  ⏸ Daily cap reached — {bot.day_trades}/{bot.max_trades_per_day} trades today (resets at 00:00 UTC). New entries paused.
+                </div>
+              )}
+
               {/* Risk Guard cooldown badge + inline controls. When the bot is
                   mid-cooldown the user can Resume now (clear it) or Turn off the
                   guard entirely — no need to stop/recreate the bot. */}

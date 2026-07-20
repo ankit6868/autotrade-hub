@@ -645,7 +645,13 @@ class FuturesEngine(NativeTradingEngine):
         # reversal, which stop-and-reverse already handles cooldown-free)
         # from being needlessly suppressed.
         self._cooldown_until:    dict[tuple[str, str], float] = {}
-        self._max_trades_per_day:int   = 8
+        # Effectively unlimited by default. The OLD default (8) silently
+        # re-capped every bot at 8 trades/day whenever start_futures was
+        # called without max_trades_per_day — which is exactly what the
+        # auto-resume path did on every restart, so bots quietly stopped
+        # entering after 8 trades a day. The /bots create endpoint sends 999;
+        # this matches it so a resume can't reintroduce the 8-cap.
+        self._max_trades_per_day:int   = 999
         self._cooldown_seconds:  int   = 0
         self._day_key:           str   = ""           # YYYY-MM-DD UTC
         self._day_trades:        int   = 0
@@ -892,7 +898,7 @@ class FuturesEngine(NativeTradingEngine):
         # Defaults come from the StrategyTemplate's trade_limits when
         # available; the bot create endpoint computes appropriate mode-based
         # values per PDF §7.
-        max_trades_per_day: int   = 8,
+        max_trades_per_day: int   = 999,   # was 8 — see __init__ note; 8 silently re-capped bots on resume
         cooldown_candles:   int   = 3,
         max_daily_dd_pct:   float = 25.0,
         # Consecutive-loss adaptive cooldown (WolfBot-style)

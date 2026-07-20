@@ -6730,6 +6730,8 @@ def list_futures_bots(
                 guard_enabled        = bool(getattr(i, "guard_enabled", True) if i.guard_enabled is not None else True),
                 guard_max_consec     = int(getattr(i, "guard_max_consec", 5) or 5),
                 guard_cooldown_min   = int(getattr(i, "guard_cooldown_min", 60) or 60),
+                # Restore the daily entry cap so a revive doesn't re-cap at 8.
+                max_trades_per_day   = int(getattr(i, "max_trades_per_day", 999) or 999),
             )
             log.info("Auto-resumed bot %s for user %s (ARM=%s)",
                      i.engine_key, user_id, getattr(i, "arm_enabled", False))
@@ -6874,6 +6876,10 @@ def list_futures_bots(
                                   if i.guard_enabled is not None else True),
             "guard_max_consec": int(getattr(i, "guard_max_consec", 5) or 5),
             "guard_cooldown_min": int(getattr(i, "guard_cooldown_min", 60) or 60),
+            # Daily entry cap + how many entries taken today (surfaced so the
+            # user can see WHY a bot stopped entering — "8/8 trades today").
+            "max_trades_per_day": int(getattr(i, "max_trades_per_day", 999) or 999),
+            "day_trades": int(getattr(eng, "_day_trades", 0) or 0) if eng else 0,
             "risk_pct": i.risk_pct,
             "stoploss": i.stoploss,
             "takeprofit": i.takeprofit,
@@ -7187,6 +7193,8 @@ def create_futures_bot(
         guard_enabled        = guard_enabled,
         guard_max_consec     = guard_max_consec,
         guard_cooldown_min   = guard_cooldown_min,
+        # Max entries/day — persist so a restart doesn't silently re-cap at 8.
+        max_trades_per_day   = max_trades_per_day,
     )
     db.add(instance)
     db.commit()
