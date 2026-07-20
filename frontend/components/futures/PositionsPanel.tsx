@@ -48,6 +48,12 @@ export default function PositionsPanel({
   const [mainEngine, setMainEngine] = useState<any>(null);
   const [account, setAccount] = useState<any>(null);
   const [closingPair, setClosingPair] = useState<string | null>(null);
+  // Distinguish "genuinely empty" from "the fetch failed". A live /open can
+  // time out on the slow KuCoin reconcile; previously that error was swallowed
+  // and the tab rendered "No open positions" — indistinguishable from empty.
+  const [posErr, setPosErr] = useState(false);
+  const [ordErr, setOrdErr] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   // Optimistic rows the backend hasn't confirmed yet, kept "sticky" so a slow
   // or lagging /open (live/lead reconciles with KuCoin — ~0.5-2.5s) can't blink
@@ -85,17 +91,27 @@ export default function PositionsPanel({
   // /open KuCoin reconcile — so opening a position froze the whole bottom panel
   // for seconds even though /orders (a DB read) was ready in ~100ms.
   const refreshAll = useCallback(() => {
-    // Positions — the slow one in live/lead mode. Merges sticky optimistic rows.
-    api.futures.open(mode).then((d: any) => mergePositions(d.trades || [])).catch(() => {});
-    api.futures.orders({ status: 'pending', mode }).then((d: any) => mergeOrders(d.orders || [])).catch(() => {});
-    api.futures.history({ mode, limit: '50' }).then((d: any) => setTradeHistory(d.trades || [])).catch(() => {});
-    api.futures.account(mode).then((d: any) => { if (d) setAccount(d); }).catch(() => {});
-    api.futures.bots.list(mode).then((d: any) => setBots(d.bots || [])).catch(() => {});
-    api.futures.status().then((d: any) => setMainEngine(d?.running ? d : null)).catch(() => {});
+    setRefreshing(true);
+    const calls = [
+      // Positions — the slow one in live/lead mode. Merges sticky optimistic rows.
+      api.futures.open(mode).then((d: any) => { setPosErr(false); mergePositions(d.trades || []); }).catch(() => setPosErr(true)),
+      api.futures.orders({ status: 'pending', mode }).then((d: any) => { setOrdErr(false); mergeOrders(d.orders || []); }).catch(() => setOrdErr(true)),
+      api.futures.history({ mode, limit: '50' }).then((d: any) => setTradeHistory(d.trades || [])).catch(() => {}),
+      api.futures.account(mode).then((d: any) => { if (d) setAccount(d); }).catch(() => {}),
+      api.futures.bots.list(mode).then((d: any) => setBots(d.bots || [])).catch(() => {}),
+      api.futures.status().then((d: any) => setMainEngine(d?.running ? d : null)).catch(() => {}),
+    ];
+    // Each setState above fires the moment ITS call returns (panels stay
+    // decoupled); this only drives the spinner. Every call already .catch()es,
+    // so Promise.all never rejects here.
+    Promise.all(calls).then(() => setRefreshing(false)).catch(() => setRefreshing(false));
   }, [mode, mergePositions, mergeOrders]);
 
   // Switching paper<->live must not carry sticky optimistic rows across modes.
-  useEffect(() => { pendingPos.current.clear(); pendingOrd.current.clear(); }, [mode]);
+  useEffect(() => {
+    pendingPos.current.clear(); pendingOrd.current.clear();
+    setPosErr(false); setOrdErr(false);
+  }, [mode]);
 
   useEffect(() => { refreshAll(); }, [refreshAll]);
   // Visibility-aware: stop polling positions/orders when the tab is hidden.
@@ -410,7 +426,27 @@ export default function PositionsPanel({
             )}
           </button>
         ))}
+        {/* Manual refresh — force-reload every panel for the current mode. */}
+        <button
+          onClick={() => refreshAll()}
+          disabled={refreshing}
+          aria-label="Refresh panels"
+          title="Refresh"
+          className="ml-auto shrink-0 p-1.5 text-slate-500 hover:text-white rounded hover:bg-white/5 disabled:opacity-50"
+        >
+          <svg className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+        </button>
       </div>
+
+      {/* Fetch-failure banner — so a timed-out /open reads as "couldn't load",
+          not a misleading empty state. */}
+      {((tab === 'positions' && posErr) || (tab === 'open_orders' && ordErr)) && (
+        <div className="px-3 py-1.5 text-[11px] text-amber-300 bg-amber-500/10 border-b border-amber-500/20">
+          ⚠ Couldn’t load {tab === 'positions' ? 'positions' : 'open orders'} — retrying… (tap refresh ↻ if it persists)
+        </div>
+      )}
 
       {/* Content */}
       <div className="flex-1 overflow-auto">
