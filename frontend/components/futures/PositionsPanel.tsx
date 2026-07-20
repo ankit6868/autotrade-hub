@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { api } from '@/lib/api';
 import { useVisibleInterval } from '@/lib/useVisibleInterval';
 import MarginAdjustModal from './MarginAdjustModal';
@@ -49,29 +49,53 @@ export default function PositionsPanel({
   const [account, setAccount] = useState<any>(null);
   const [closingPair, setClosingPair] = useState<string | null>(null);
 
-  const refreshAll = useCallback(async () => {
-    // Each call wrapped independently so one failure doesn't block others
-    const [pos, orders, history, acct, botList, engineStatus] = await Promise.all([
-      api.futures.open(mode).catch(() => ({ trades: [] })),
-      api.futures.orders({ status: 'pending', mode }).catch(() => ({ orders: [] })),
-      api.futures.history({ mode, limit: '50' }).catch(() => ({ trades: [] })),
-      api.futures.account(mode).catch(() => null),
-      api.futures.bots.list(mode).catch(() => ({ bots: [] })),
-      api.futures.status().catch(() => null),
-    ]);
-    // Show ALL open positions — manual AND bot-owned. Bot rows are
-    // tagged with `source='bot'` + `bot_key` and rendered with a
-    // visible "BOT" badge so the user can distinguish (the row's
-    // Contract column shows BOT • <bot_key>). Previous filter hid
-    // bot rows entirely; user wanted to see them in one place
-    // alongside the bot's own management cards.
-    setPositions(pos.trades || []);
-    setOpenOrders(orders.orders || []);
-    setTradeHistory(history.trades || []);
-    if (acct) setAccount(acct);
-    setBots(botList.bots || []);
-    setMainEngine(engineStatus?.running ? engineStatus : null);
-  }, [mode]);
+  // Optimistic rows the backend hasn't confirmed yet, kept "sticky" so a slow
+  // or lagging /open (live/lead reconciles with KuCoin — ~0.5-2.5s) can't blink
+  // a just-opened position/order out of the list, then back in on the next poll.
+  // Dropped once the server reports the same id OR after a short TTL.
+  const OPTIMISTIC_TTL_MS = 20_000;
+  const pendingPos = useRef<Map<string, { payload: any; exp: number }>>(new Map());
+  const pendingOrd = useRef<Map<string, { payload: any; exp: number }>>(new Map());
+
+  const mergePositions = useCallback((serverTrades: any[]) => {
+    const now = Date.now();
+    const ids = new Set(serverTrades.map((t: any) => t.position_id));
+    for (const [id, v] of Array.from(pendingPos.current.entries())) {
+      if (ids.has(id) || now > v.exp) pendingPos.current.delete(id);
+    }
+    const extra = Array.from(pendingPos.current.values()).map(v => v.payload)
+      .filter(p => !ids.has(p.position_id));
+    setPositions([...extra, ...serverTrades]);
+  }, []);
+
+  const mergeOrders = useCallback((serverOrders: any[]) => {
+    const now = Date.now();
+    const ids = new Set(serverOrders.map((o: any) => o.order_id));
+    for (const [id, v] of Array.from(pendingOrd.current.entries())) {
+      if (ids.has(id) || now > v.exp) pendingOrd.current.delete(id);
+    }
+    const extra = Array.from(pendingOrd.current.values()).map(v => v.payload)
+      .filter(o => !ids.has(o.order_id));
+    setOpenOrders([...extra, ...serverOrders]);
+  }, []);
+
+  // Decoupled refresh: fire each fetch independently and update ITS panel the
+  // moment that call returns. Previously a single Promise.all meant EVERY panel
+  // (Open Orders, Account, History, Bots) waited on the slowest call — the live
+  // /open KuCoin reconcile — so opening a position froze the whole bottom panel
+  // for seconds even though /orders (a DB read) was ready in ~100ms.
+  const refreshAll = useCallback(() => {
+    // Positions — the slow one in live/lead mode. Merges sticky optimistic rows.
+    api.futures.open(mode).then((d: any) => mergePositions(d.trades || [])).catch(() => {});
+    api.futures.orders({ status: 'pending', mode }).then((d: any) => mergeOrders(d.orders || [])).catch(() => {});
+    api.futures.history({ mode, limit: '50' }).then((d: any) => setTradeHistory(d.trades || [])).catch(() => {});
+    api.futures.account(mode).then((d: any) => { if (d) setAccount(d); }).catch(() => {});
+    api.futures.bots.list(mode).then((d: any) => setBots(d.bots || [])).catch(() => {});
+    api.futures.status().then((d: any) => setMainEngine(d?.running ? d : null)).catch(() => {});
+  }, [mode, mergePositions, mergeOrders]);
+
+  // Switching paper<->live must not carry sticky optimistic rows across modes.
+  useEffect(() => { pendingPos.current.clear(); pendingOrd.current.clear(); }, [mode]);
 
   useEffect(() => { refreshAll(); }, [refreshAll]);
   // Visibility-aware: stop polling positions/orders when the tab is hidden.
@@ -94,6 +118,10 @@ export default function PositionsPanel({
     if (!optimisticPosition) return;
     if (optimisticPosition.mode !== mode) return;          // wrong tab
     if ((optimisticPosition.source ?? 'manual') !== 'manual') return;
+    // Register as sticky so the next (possibly slow/lagging) /open can't drop it.
+    pendingPos.current.set(optimisticPosition.position_id, {
+      payload: optimisticPosition, exp: Date.now() + OPTIMISTIC_TTL_MS,
+    });
     setPositions(prev => {
       if (prev.some(p => p.position_id === optimisticPosition.position_id)) {
         return prev;   // already in list — backend refresh beat us to it
@@ -110,6 +138,9 @@ export default function PositionsPanel({
   useEffect(() => {
     if (!optimisticOrder) return;
     if (optimisticOrder.mode !== mode) return;
+    pendingOrd.current.set(optimisticOrder.order_id, {
+      payload: optimisticOrder, exp: Date.now() + OPTIMISTIC_TTL_MS,
+    });
     setOpenOrders(prev => {
       if (prev.some(o => o.order_id === optimisticOrder.order_id)) {
         return prev;
@@ -130,6 +161,15 @@ export default function PositionsPanel({
       positionId ? p.position_id !== positionId
                  : !(p.pair === pair && (!direction || (p.side || p.direction) === direction))
     ));
+    // Drop from the sticky-optimistic map so a refresh can't re-add the row we
+    // just closed (the closed position won't be in /open, so without this the
+    // pending entry would keep resurrecting it until its TTL expired).
+    for (const [id, v] of Array.from(pendingPos.current.entries())) {
+      if (positionId ? id === positionId
+                     : (v.payload?.pair === pair && (!direction || (v.payload?.side || v.payload?.direction) === direction))) {
+        pendingPos.current.delete(id);
+      }
+    }
     try {
       const res = await api.futures.forceClose(pair, mode, direction, positionId);
       // Backend returns { error } when KuCoin refuses the close — surface
@@ -213,6 +253,12 @@ export default function PositionsPanel({
       symbol ? prev.filter(o => o.symbol !== symbol && o.pair !== symbol)
              : []
     );
+    // Purge matching sticky-optimistic orders so they can't be re-added.
+    for (const [id, v] of Array.from(pendingOrd.current.entries())) {
+      if (!symbol || v.payload?.symbol === symbol || v.payload?.pair === symbol) {
+        pendingOrd.current.delete(id);
+      }
+    }
     try {
       const res = await api.futures.cancelAllOrders({ mode, symbol });
       if (res?.error) {
@@ -241,6 +287,7 @@ export default function PositionsPanel({
     // (often >1s for live), giving the "Cancel doesn't work" feeling.
     const prevOrders = openOrders;
     setOpenOrders(prev => prev.filter(o => o.order_id !== orderId));
+    pendingOrd.current.delete(orderId);   // don't let a sticky re-add it
     try {
       const res = await api.futures.cancelOrder(orderId);
       if (res?.error) {
