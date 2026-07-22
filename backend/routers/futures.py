@@ -5244,10 +5244,16 @@ def futures_account(
                 select(Config).where(Config.user_id == user_id).limit(1)
             ).scalar_one_or_none()
             if eng is not None and not getattr(eng, "_paper_restored", False):
-                _saved = getattr(_pcfg, "paper_balance", None) if _pcfg else None
-                if _saved is not None and float(_saved) > 0:
-                    eng.balance = float(_saved)
                 eng._paper_restored = True
+                _saved = getattr(_pcfg, "paper_balance", None) if _pcfg else None
+                # Restore only into a still-fresh wallet. A closed trade (or
+                # add-funds) is the only thing that moves the paper balance; if
+                # one already happened this session the in-memory value is
+                # authoritative and must NOT be clobbered by a stale persisted
+                # number (guards the rare "engine created by /manual-entry or
+                # add-funds before the first /account poll" race).
+                if _saved is not None and not getattr(eng, "closed_trades", None):
+                    eng.balance = float(_saved)
             result = _paper_account(eng, user_id)
             # Write-through only when the realized wallet actually changed
             # (trade close / add-funds) — avoids a DB write on every 10s poll.
@@ -5441,6 +5447,9 @@ def paper_add_funds(
         prev_balance = float(eng.balance or 0)
         new_balance = amount if reset else prev_balance + amount
         eng.balance = new_balance
+        # Mark restored so a first /account poll after this can't overwrite the
+        # top-up with the stale persisted value (the restore is once-per-engine).
+        eng._paper_restored = True
         try:
             eng._log_action("paper_funds_added",
                 f"{'RESET' if reset else 'ADDED'} {amount:.2f} USDT "
@@ -5448,6 +5457,17 @@ def paper_add_funds(
                 amount=amount, reset=reset)
         except Exception:
             pass
+    # Persist immediately so the new wallet survives a restart even before the
+    # next /account write-through.
+    try:
+        _cfg = db.execute(
+            select(Config).where(Config.user_id == user_id).limit(1)
+        ).scalar_one_or_none()
+        if _cfg is not None:
+            _cfg.paper_balance = round(float(new_balance), 4)
+            db.commit()
+    except Exception:
+        db.rollback()
     return {"ok": True, "mode": "paper",
             "action": "reset" if reset else "add",
             "prev_balance": round(prev_balance, 4),
