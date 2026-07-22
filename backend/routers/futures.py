@@ -5238,9 +5238,13 @@ def futures_account(
                     eng.balance = float(_saved)
                 eng._paper_restored = True
             result = _paper_account(eng, user_id)
+            # Write-through only when the realized wallet actually changed
+            # (trade close / add-funds) — avoids a DB write on every 10s poll.
             if _pcfg is not None and eng is not None:
-                _pcfg.paper_balance = round(float(eng.balance or 0), 4)
-                db.commit()
+                _newbal = round(float(eng.balance or 0), 4)
+                if _pcfg.paper_balance != _newbal:
+                    _pcfg.paper_balance = _newbal
+                    db.commit()
             return result
         except Exception:
             db.rollback()
