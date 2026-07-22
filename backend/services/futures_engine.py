@@ -1294,6 +1294,68 @@ class FuturesEngine(NativeTradingEngine):
             log.info("[%s] Rehydrated %d open paper position(s) for instance %s",
                      self.user_id, adopted, self._instance_id)
 
+    def rehydrate_manual_paper_positions(self) -> int:
+        """Re-attach the user's OPEN MANUAL paper positions (instance_id NULL)
+        after a backend restart. The manual `for_user` engine never runs
+        start_futures, so _rehydrate_paper_positions (bot-only) skips it —
+        without this a restart left manual paper positions alive ONLY as DB
+        rows: their TP/SL stopped firing (the watchdog ticks eng.positions,
+        which was empty) and they didn't count toward Asset-Overview
+        used-margin / unrealized PNL. Idempotent; /open calls it once per fresh
+        engine instance.
+        """
+        import json as _json
+        from datetime import datetime, timezone
+        from sqlalchemy import select as _sel
+        from backend.models.database import SessionLocal
+        from backend.models.trade import Trade as _T
+
+        existing_db_ids = {getattr(p, "db_id", None) for p in self.positions.values()}
+        added = 0
+        try:
+            with SessionLocal() as db:
+                rows = db.execute(
+                    _sel(_T).where(
+                        _T.user_id == self.user_id,
+                        _T.market_type == "futures",
+                        _T.mode == "paper",
+                        _T.status == "open",
+                        _T.instance_id.is_(None),
+                    )
+                ).scalars().all()
+                for t in rows:
+                    if t.id in existing_db_ids or not t.entry_price or not t.amount:
+                        continue
+                    pos = FuturesPosition(
+                        pair=t.pair, direction=(t.side or "long"),
+                        entry=float(t.entry_price), sl=float(t.stoploss_price or 0.0),
+                        tp=float(t.tp_price or 0.0), size=float(t.amount),
+                        leverage=int(t.leverage or 1),
+                        opened_at=t.entry_time or datetime.now(timezone.utc),
+                        trade_id=f"manual-rehydrated#{t.id}",
+                    )
+                    pos.db_id = t.id
+                    pos._mode = "paper"      # manual paper tag (not bot)
+                    if t.liquidation_price:
+                        pos.liquidation_price = float(t.liquidation_price)
+                    if t.arm_state:
+                        try:
+                            a = _json.loads(t.arm_state)
+                            pos.remaining_pct   = float(a.get("remaining_pct", 1.0) or 1.0)
+                            pos.partial_pnl_abs = float(a.get("partial_pnl_abs", 0.0) or 0.0)
+                            pos.partial_pnl_persisted = float(a.get("partial_pnl_persisted", 0.0) or 0.0)
+                            pos.contracts       = int(a.get("contracts", 0) or 0)
+                        except Exception:
+                            pass
+                    with self._lock:
+                        self.positions[pos.trade_id] = pos
+                    added += 1
+        except Exception as exc:
+            log.warning("[%s] manual paper rehydrate failed: %s", self.user_id, exc)
+        if added:
+            log.info("[%s] Rehydrated %d open MANUAL paper position(s)", self.user_id, added)
+        return added
+
     # ── Run loop (lives on FuturesEngine after the spot purge) ──────────
     #
     # Before the spot purge this method lived on NativeTradingEngine as a

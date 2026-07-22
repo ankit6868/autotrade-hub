@@ -1878,6 +1878,17 @@ def futures_open_positions(
     from backend.services.native_trading_engine import _kucoin_get
 
     user_eng = futures_engine_registry.for_user(user_id)
+    # One-time rehydrate of MANUAL paper positions after a restart. They live
+    # only in memory, so a redeploy leaves them as DB-only rows — the engine
+    # can't tick their TP/SL and _paper_account misses their margin/PNL. Rebuild
+    # them into the engine once per fresh instance so TP/SL fires again and the
+    # wallet math is whole. Cheap + idempotent (guarded by a per-engine flag).
+    if not getattr(user_eng, "_manual_rehydrated", False):
+        try:
+            user_eng.rehydrate_manual_paper_positions()
+        except Exception:
+            pass
+        user_eng._manual_rehydrated = True
     # Collect every futures engine owned by this user — the manual-trading
     # `for_user` engine PLUS one per running bot. Each engine is tagged with
     # its source ('manual' for the user engine, 'bot' + bot_key for bot
