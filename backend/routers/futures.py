@@ -2164,6 +2164,28 @@ def futures_open_positions(
                     _ksym = kp.get("symbol", "")
                     _kbase = _ksym.replace("USDTM", "").replace("XBT", "BTC")
                     kc_open_keys.add((f"{_kbase}/USDT", _dir))
+                # ── NOMINAL-leverage lookup for KuCoin-surfaced positions ──
+                # KuCoin's /positions only returns realLeverage, which BALLOONS
+                # as a position loses (a 20x trade down a few % reports ~45x).
+                # Using it mis-scales the TP/SL ROI and the margin math. When we
+                # opened the trade through the app we stored the TRUE leverage on
+                # the Trade row — look it up by (pair, direction), newest first,
+                # and prefer it over realLeverage below.
+                _nominal_lev: dict[tuple[str, str], float] = {}
+                try:
+                    for _p, _s, _l in db.execute(
+                        select(Trade.pair, Trade.side, Trade.leverage)
+                        .where(Trade.user_id == user_id,
+                               Trade.market_type == "futures",
+                               Trade.mode == "live",
+                               Trade.leverage.isnot(None))
+                        .order_by(desc(Trade.entry_time)).limit(50)
+                    ).all():
+                        _k = (_p, _s or "long")
+                        if _k not in _nominal_lev and _l:
+                            _nominal_lev[_k] = float(_l)
+                except Exception:
+                    pass
                 for kp in (kc_resp.get("data") or []):
                     direction = _kc_direction(kp)
                     if direction is None:
@@ -2185,7 +2207,12 @@ def futures_open_positions(
                     entry     = float(kp.get("avgEntryPrice", 0))
                     cur       = float(kp.get("markPrice", 0)) or entry
                     margin    = float(kp.get("posMargin", 0) or kp.get("maintMargin", 0))
-                    lev       = float(kp.get("realLeverage", 0)) or float(kp.get("leverage", 1)) or 1
+                    # Prefer the NOMINAL leverage we stored at entry over KuCoin's
+                    # realLeverage (which inflates as the position loses and would
+                    # make a 20x trade report ~45x, mis-scaling ROI + margin math).
+                    lev       = (_nominal_lev.get((pair, direction))
+                                 or float(kp.get("leverage", 0))
+                                 or float(kp.get("realLeverage", 1)) or 1)
                     liq       = float(kp.get("liquidationPrice", 0)) or None
                     unreal    = float(kp.get("unrealisedPnl", 0))
                     # Real margin mode from KuCoin (authoritative). Newer API
@@ -5193,9 +5220,31 @@ def futures_account(
 
     eng = futures_engine_registry.for_user(user_id)
 
-    # Paper mode: skip KuCoin, return paper engine balance directly
+    # Paper mode: skip KuCoin, return paper engine balance directly.
     if mode == "paper":
-        return _paper_account(eng, user_id)
+        # Persist the paper wallet across restarts. The engine's balance is
+        # in-memory only, so a Railway redeploy reset it to 1000 and wiped the
+        # user's accumulated paper P&L. Restore ONCE per fresh engine instance
+        # from Config.paper_balance, then write-through on every poll so the
+        # realized wallet (incl. closed-trade P&L) always survives the next
+        # restart. One Config row read/write per /account call — cheap.
+        try:
+            _pcfg = db.execute(
+                select(Config).where(Config.user_id == user_id).limit(1)
+            ).scalar_one_or_none()
+            if eng is not None and not getattr(eng, "_paper_restored", False):
+                _saved = getattr(_pcfg, "paper_balance", None) if _pcfg else None
+                if _saved is not None and float(_saved) > 0:
+                    eng.balance = float(_saved)
+                eng._paper_restored = True
+            result = _paper_account(eng, user_id)
+            if _pcfg is not None and eng is not None:
+                _pcfg.paper_balance = round(float(eng.balance or 0), 4)
+                db.commit()
+            return result
+        except Exception:
+            db.rollback()
+            return _paper_account(eng, user_id)
 
     # Live mode: try to fetch live data from KuCoin Futures account
     cfg = db.execute(select(Config).where(Config.user_id == user_id).limit(1)).scalar_one_or_none()

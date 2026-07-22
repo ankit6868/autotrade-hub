@@ -97,6 +97,8 @@ export default function MarginAdjustModal({
             ...(position.position_id ? { position_id: position.position_id } : {}),
           })
         : await api.futures.reduceMargin({
+            // Reduce-margin is paper-only (live positions use partial close —
+            // the Reduce tab is disabled for live above), so mode is always paper.
             pair: position.pair, mode: 'paper', amount: amt,
             direction: position.direction,
             ...(position.position_id ? { position_id: position.position_id } : {}),

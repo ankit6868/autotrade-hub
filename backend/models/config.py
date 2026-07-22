@@ -68,6 +68,12 @@ class Config(Base):
     risk_daily_enabled = Column(Boolean, default=False)        # master on/off
     risk_max_trades_per_day = Column(Integer, default=0)       # max live entries/day
     risk_max_losses_per_day = Column(Integer, default=0)       # max losing closes/day
+    # --- Persisted PAPER wallet (manual engine) ---
+    # The paper wallet lived only in memory, so a Railway restart reset it to
+    # 1000 — wiping accumulated profit/loss. Persisted here (write-through on
+    # every /account poll, restored once per engine instance) so paper P&L
+    # carries across restarts. _lightweight_migrate auto-adds the column.
+    paper_balance = Column(Float, default=1000.0)
     created_at = Column(DateTime, server_default=func.now())
 
 
