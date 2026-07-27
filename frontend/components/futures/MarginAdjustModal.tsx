@@ -97,9 +97,8 @@ export default function MarginAdjustModal({
             ...(position.position_id ? { position_id: position.position_id } : {}),
           })
         : await api.futures.reduceMargin({
-            // Reduce-margin is paper-only (live positions use partial close —
-            // the Reduce tab is disabled for live above), so mode is always paper.
-            pair: position.pair, mode: 'paper', amount: amt,
+            // Works for paper (engine/DB) and live (KuCoin withdrawMargin).
+            pair: position.pair, mode, amount: amt,
             direction: position.direction,
             ...(position.position_id ? { position_id: position.position_id } : {}),
           });
@@ -135,13 +134,12 @@ export default function MarginAdjustModal({
           </button>
           <button
             onClick={() => setTab('reduce')}
-            disabled={mode === 'live'}
             className={`flex-1 py-3 text-sm font-semibold transition-colors ${
               tab === 'reduce'
                 ? 'text-amber-300 border-b-2 border-amber-400'
-                : 'text-slate-400 disabled:opacity-40 disabled:cursor-not-allowed'
+                : 'text-slate-400'
             }`}
-            title={mode === 'live' ? 'Live reduce-margin not supported — use partial close instead' : ''}
+            title="Remove isolated margin (raises effective leverage). KuCoin enforces a max-withdraw limit on live."
           >
             Reduce Margin
           </button>

@@ -557,7 +557,7 @@ export const api = {
     // Reduce margin (paper only — live partial-close is the workaround).
     reduceMargin: (data: {
       pair: string;
-      mode: 'paper';
+      mode: 'paper' | 'live';
       amount: number;
       direction?: 'long' | 'short';
       position_id?: string;

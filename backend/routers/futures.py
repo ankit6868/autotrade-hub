@@ -733,13 +733,22 @@ def _fetch_kucoin_live_position(eng, pair: str, direction: str | None = None) ->
 
 
 def _kucoin_deposit_margin(user_id: str, db: Session, pair: str,
-                           amount: float, api_mode: str = "lead") -> tuple[bool, object]:
+                           amount: float, api_mode: str = "lead",
+                           direction: str | None = None) -> tuple[bool, object]:
     """POST KuCoin Futures deposit-margin for `amount` USDT on `pair`.
 
     Single source of truth for the deposit-margin REST call, shared by the
     engine/DB-orphan add-margin path and the KuCoin-only fallback. Returns
     (True, kucoin_data_dict) on success or (False, error_message) on any
-    failure (missing creds, non-200000 business code, transport error)."""
+    failure (missing creds, non-200000 business code, transport error).
+
+    `positionSide` handling: hedge-mode (dual-side) accounts REJECT the call
+    with "position side invalid" unless a LONG/SHORT side is supplied, while
+    one-way accounts reject the call when a side IS supplied. We don't know the
+    account's mode here, so — when a direction is known — we try WITH the
+    matching side first (fixes the hedge-mode failure the user hit) and fall
+    back to WITHOUT it on a position-side error (keeps one-way accounts working).
+    """
     try:
         from backend.services.native_trading_engine import _kucoin_post_signed
         from backend.services.futures_engine import KUCOIN_FUTURES_BASE
@@ -756,17 +765,75 @@ def _kucoin_deposit_margin(user_id: str, db: Session, pair: str,
         # `pair` is "BASE/USDT" — full futures-symbol transform (XBT remap).
         sym = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
         biz_no = f"add-margin-{user_id[-8:]}-{int(_time.time() * 1000)}"
-        result = _kucoin_post_signed(
-            "/api/v1/position/margin/deposit-margin",
-            {"symbol": sym, "margin": amount, "bizNo": biz_no},
-            kk, ks, kp,
-            base_url=KUCOIN_FUTURES_BASE,
-        )
-        if str(result.get("code")) != "200000":
-            return False, f"KuCoin rejected: {result.get('msg', 'unknown')}"
-        return True, result.get("data")
+        base_body = {"symbol": sym, "margin": amount, "bizNo": biz_no}
+        pside = {"long": "LONG", "short": "SHORT"}.get((direction or "").lower())
+
+        # Attempt order: side-specific first (hedge mode needs it), then none.
+        attempts: list[dict] = []
+        if pside:
+            attempts.append({**base_body, "positionSide": pside})
+        attempts.append(base_body)
+
+        last_msg = "unknown"
+        for body in attempts:
+            result = _kucoin_post_signed(
+                "/api/v1/position/margin/deposit-margin", body,
+                kk, ks, kp, base_url=KUCOIN_FUTURES_BASE,
+            )
+            if str(result.get("code")) == "200000":
+                return True, result.get("data")
+            last_msg = result.get("msg", "unknown")
+            # Only fall through to the next attempt on a position-side error;
+            # any other rejection (insufficient balance, etc.) is terminal.
+            if "position side" not in str(last_msg).lower() and "positionside" not in str(last_msg).lower():
+                break
+        return False, f"KuCoin rejected: {last_msg}"
     except Exception as exc:
         return False, f"KuCoin margin deposit failed: {exc}"
+
+
+def _kucoin_withdraw_margin(user_id: str, db: Session, pair: str,
+                            amount: float, api_mode: str = "lead",
+                            direction: str | None = None) -> tuple[bool, object]:
+    """POST KuCoin Futures withdrawMargin (REMOVE isolated margin) for `amount`
+    USDT on `pair`. Mirrors _kucoin_deposit_margin, including the hedge-mode
+    positionSide fallback. KuCoin enforces its own max-withdraw limit and
+    rejects an over-withdrawal, which we surface verbatim.
+    Returns (True, kucoin_data) or (False, error_message)."""
+    try:
+        from backend.services.native_trading_engine import _kucoin_post_signed
+        from backend.services.futures_engine import KUCOIN_FUTURES_BASE
+        from backend.services.kucoin_futures_client import normalize_futures_symbol
+        from backend.services.futures_mode import load_kucoin_creds, has_creds
+        cfg = db.execute(
+            select(Config).where(Config.user_id == user_id).limit(1)
+        ).scalar_one_or_none()
+        if not has_creds(cfg, api_mode):
+            return False, "No KuCoin credentials configured"
+        kk, ks, kp = load_kucoin_creds(cfg, user_id, api_mode)
+        if not (kk and ks and kp):
+            return False, "KuCoin credentials missing"
+        sym = normalize_futures_symbol(pair.replace("/", "").replace("USDT", "USDTM"))
+        base_body = {"symbol": sym, "withdrawAmount": str(amount)}
+        pside = {"long": "LONG", "short": "SHORT"}.get((direction or "").lower())
+        attempts: list[dict] = []
+        if pside:
+            attempts.append({**base_body, "positionSide": pside})
+        attempts.append(base_body)
+        last_msg = "unknown"
+        for body in attempts:
+            result = _kucoin_post_signed(
+                "/api/v1/margin/withdrawMargin", body,
+                kk, ks, kp, base_url=KUCOIN_FUTURES_BASE,
+            )
+            if str(result.get("code")) == "200000":
+                return True, result.get("data")
+            last_msg = result.get("msg", "unknown")
+            if "position side" not in str(last_msg).lower() and "positionside" not in str(last_msg).lower():
+                break
+        return False, f"KuCoin rejected: {last_msg}"
+    except Exception as exc:
+        return False, f"KuCoin margin withdraw failed: {exc}"
 
 
 # ── Live Verified Results Dashboard ──────────────────────────────────────────
@@ -5680,7 +5747,9 @@ def position_add_margin(
                 if ok_creds:
                     kc_pos = _fetch_kucoin_live_position(kc_eng, pair, direction_req)
                     if kc_pos is not None:
-                        ok_dep, dep = _kucoin_deposit_margin(user_id, db, pair, amount, _api_mode_from(request))
+                        ok_dep, dep = _kucoin_deposit_margin(
+                            user_id, db, pair, amount, _api_mode_from(request),
+                            direction=(direction_req or kc_pos.get("direction")))
                         if not ok_dep:
                             return {"error": dep}
                         prev_margin = float(kc_pos.get("margin") or 0)
@@ -5801,8 +5870,11 @@ def position_add_margin(
                 "remaining_balance": round(eng.balance, 4)}
 
     # LIVE: deposit margin on KuCoin via the shared helper (canonical
-    # /api/v1/position/margin/deposit-margin path).
-    ok_dep, dep = _kucoin_deposit_margin(user_id, db, pair, amount, _api_mode_from(request))
+    # /api/v1/position/margin/deposit-margin path). Pass the position side so
+    # hedge-mode accounts don't reject with "position side invalid".
+    ok_dep, dep = _kucoin_deposit_margin(
+        user_id, db, pair, amount, _api_mode_from(request),
+        direction=getattr(pos, "direction", None))
     if not ok_dep:
         return {"error": dep}
     result_data = dep
@@ -5844,12 +5916,16 @@ def position_add_margin(
 @router.post("/position/reduce-margin")
 def position_reduce_margin(
     req: dict,
+    request: Request,
     db: Session = Depends(get_db),
     user_id: str = Depends(get_user_id),
 ):
-    """Withdraw margin from an open paper futures position.
-    Live reduce-margin is more complex (requires risk-limit-level change
-    on KuCoin) — for now use partial-close for live positions instead.
+    """Withdraw (remove) isolated margin from an open futures position.
+
+    Paper: shrinks the position's margin in the engine / DB row.
+    Live: calls KuCoin's /api/v1/margin/withdrawMargin (both lead + regular via
+    the X-Futures-Api mode). KuCoin enforces its own max-withdraw limit and
+    rejects an over-withdrawal — surfaced to the user.
     """
     pair = req.get("pair")
     mode = req.get("mode", "paper")
@@ -5861,11 +5937,35 @@ def position_reduce_margin(
         return {"error": "amount must be a number"}
     if not pair:
         return {"error": "pair is required"}
-    if mode != "paper":
-        return {"error": "Reduce margin on LIVE positions is not yet "
-                         "supported. Use partial-close instead."}
     if not (0.01 <= amount <= 1_000_000):
         return {"error": "amount must be between 0.01 and 1,000,000 USDT"}
+
+    # ── LIVE: withdraw margin on KuCoin (lead or regular per header) ──────
+    if mode == "live":
+        ok_w, w = _kucoin_withdraw_margin(
+            user_id, db, pair, amount, _api_mode_from(request),
+            direction=direction_req,
+        )
+        if not ok_w:
+            return {"error": w}
+        # Mirror locally so the engine's PNL math + row margin stay in sync
+        # when we happen to still track the position.
+        try:
+            _le, _lp, _ = _find_position_across_engines(
+                user_id, pair, "live",
+                direction=direction_req, position_id=position_id_req,
+            )
+            if _lp is not None:
+                with _le._lock:
+                    _lp.size = max(0.0, float(getattr(_lp, "size", 0) or 0) - amount)
+        except Exception:
+            pass
+        log_event(db, user_id, "futures.reduce_margin", request, payload={
+            "pair": pair, "amount": amount, "mode": "live", "direction": direction_req,
+        })
+        return {"ok": True, "mode": "live", "pair": pair,
+                "amount_reduced": amount, "kucoin_response": w,
+                "source": "kucoin_live"}
 
     eng, pos, _ = _find_position_across_engines(
         user_id, pair, "paper",
