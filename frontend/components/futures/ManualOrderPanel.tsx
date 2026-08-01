@@ -184,6 +184,26 @@ export default function ManualOrderPanel({
   const maxLongAmount = refPrice > 0 ? (availableBalance * leverage) / refPrice : 0;
   const maxShortAmount = maxLongAmount;
 
+  // ── Projected net P&L at the typed TP / SL ────────────────────────────────
+  // Same math the TP/SL editor shows on an open position, but pre-trade: the
+  // side is inferred from where the TP (or SL) sits vs entry — you set a TP on
+  // the profit side, so TP above entry ⇒ Long, below ⇒ Short. P&L is on the
+  // typed margin, leveraged. Shown as USDT + ROI% under each input.
+  const _tpNum = parseFloat(tpPrice) || 0;
+  const _slNum = parseFloat(slPrice) || 0;
+  const _plDir: 'long' | 'short' =
+    _tpNum > 0 ? (_tpNum >= refPrice ? 'long' : 'short')
+    : _slNum > 0 ? (_slNum <= refPrice ? 'long' : 'short')
+    : 'long';
+  const _legPnl = (price: number) =>
+    (refPrice > 0 && price > 0 && costUsdt_ > 0)
+      ? ((_plDir === 'long' ? (price - refPrice) : (refPrice - price)) / refPrice) * costUsdt_ * leverage
+      : 0;
+  const tpPnl = _legPnl(_tpNum);
+  const slPnl = _legPnl(_slNum);
+  const tpRoiPct = costUsdt_ > 0 ? (tpPnl / costUsdt_) * 100 : 0;
+  const slRoiPct = costUsdt_ > 0 ? (slPnl / costUsdt_) * 100 : 0;
+
   // Is this an advanced type shown via dropdown?
   const isAdvancedType = ['advanced_limit', 'trailing_stop', 'hidden', 'twap'].includes(orderType);
   const activeLabel = ALL_TYPES.find(t => t.key === orderType)?.label || 'Limit';
@@ -909,6 +929,12 @@ export default function ManualOrderPanel({
                   <span className="text-[10px] text-slate-500 pr-2">USDT</span>
                 </div>
               )}
+              {tpEnabled && _tpNum > 0 && costUsdt_ > 0 && refPrice > 0 && (
+                <div className="text-[10px] text-emerald-400 mt-1">
+                  Net profit ≈ <span className="font-semibold">+{tpPnl.toFixed(2)} USDT</span>
+                  {' '}(+{tpRoiPct.toFixed(1)}% on {costUsdt_.toFixed(2)} margin · {_plDir})
+                </div>
+              )}
             </div>
             {/* SL */}
             <div>
@@ -931,6 +957,12 @@ export default function ManualOrderPanel({
                     className="flex-1 bg-transparent px-3 py-1.5 text-sm text-white outline-none min-w-0"
                   />
                   <span className="text-[10px] text-slate-500 pr-2">USDT</span>
+                </div>
+              )}
+              {slEnabled && _slNum > 0 && costUsdt_ > 0 && refPrice > 0 && (
+                <div className="text-[10px] text-red-400 mt-1">
+                  Net loss ≈ <span className="font-semibold">{slPnl.toFixed(2)} USDT</span>
+                  {' '}({slRoiPct.toFixed(1)}% on {costUsdt_.toFixed(2)} margin · {_plDir})
                 </div>
               )}
             </div>
