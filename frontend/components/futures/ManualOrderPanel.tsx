@@ -960,10 +960,16 @@ export default function ManualOrderPanel({
                 </div>
               )}
               {slEnabled && _slNum > 0 && costUsdt_ > 0 && refPrice > 0 && (
-                <div className="text-[10px] text-red-400 mt-1">
-                  Net loss ≈ <span className="font-semibold">{slPnl.toFixed(2)} USDT</span>
-                  {' '}({slRoiPct.toFixed(1)}% on {costUsdt_.toFixed(2)} margin · {_plDir})
-                </div>
+                slPnl <= 0 ? (
+                  <div className="text-[10px] text-red-400 mt-1">
+                    Net loss ≈ <span className="font-semibold">{slPnl.toFixed(2)} USDT</span>
+                    {' '}({slRoiPct.toFixed(1)}% on {costUsdt_.toFixed(2)} margin · {_plDir})
+                  </div>
+                ) : (
+                  <div className="text-[10px] text-amber-400 mt-1">
+                    ⚠ SL is on the profit side for a {_plDir} — that won’t act as a stop loss.
+                  </div>
+                )
               )}
             </div>
           </div>
