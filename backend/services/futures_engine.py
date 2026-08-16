@@ -3385,10 +3385,19 @@ class FuturesEngine(NativeTradingEngine):
         would end up with both a phantom local position AND the real
         KuCoin position once it executes.
         """
+        # Match the order's stored symbol in ANY form. CRITICAL: pending orders
+        # are stored with the KuCoin-normalised symbol (BTC → XBT, e.g.
+        # "XBTUSDTM"), but the plain transform below yields "BTCUSDTM" — so
+        # every BTC paper limit/stop order failed this membership test and sat
+        # UNFILLED forever (non-BTC coins have no remap, so they worked). Add the
+        # normalised form so BTC matches too.
+        from .kucoin_futures_client import normalize_futures_symbol as _norm_sym
+        _plain = pair.replace("/", "").replace("USDT", "USDTM")   # e.g. BTCUSDTM
         symbol_variants = [
-            pair.replace("/", "").replace("USDT", "USDTM"),
-            pair.replace("/", "-"),
-            pair,
+            _norm_sym(_plain),          # XBTUSDTM for BTC ← the fix
+            _plain,                     # BTCUSDTM / ETHUSDTM / …
+            pair.replace("/", "-"),     # BTC-USDT
+            pair,                       # BTC/USDT
         ]
         orders_to_fill = []
         with self._lock:
